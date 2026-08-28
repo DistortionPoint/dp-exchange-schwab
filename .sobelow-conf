@@ -1,0 +1,27 @@
+# Sobelow configuration, read by `mix sobelow --config` (part of `mix quality`).
+#
+# `Config.HTTPS` is ignored because it cannot ever be true here. It is a Phoenix
+# endpoint check — "is force_ssl configured on your web endpoint" — and this is a
+# library with no endpoint and no router. Sobelow says as much itself on every
+# run: "Sobelow cannot find the router." Left unignored it prints a permanent
+# high-confidence finding against `config/prod.exs`, which is worse than useless:
+# a check that is always red teaches everyone to stop reading the output.
+#
+# influx-elixir ships no `.sobelow-conf` and therefore prints this same false
+# positive on every one of its runs. That is inherited noise, not a convention.
+#
+# `exit: :high` makes a genuine high-confidence finding FAIL the build. Without
+# it sobelow exits 0 no matter what it finds, so `mix quality` would report clean
+# on a real vulnerability. This repo is public, so the check should bite.
+[
+  exit: :high,
+  format: "txt",
+  ignore: ["Config.HTTPS"],
+  ignore_files: [],
+  out: nil,
+  private: false,
+  router: nil,
+  skip: false,
+  threshold: :low,
+  verbose: false
+]

@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Template for .mcp.json — copy to .mcp.json and fill in your own token.",
+    "",
+    "  cp .mcp.json.sample .mcp.json",
+    "",
+    ".mcp.json is gitignored and MUST STAY THAT WAY. It carries a bearer token,",
+    "this repository is public, and git history is not retractable. The host app",
+    "ignores its own .mcp.json for the same reason.",
+    "",
+    "This points at dp_crypto_management's MCP server, which answers questions",
+    "about the host's exchange code that reading the source alone does not.",
+    "Start the host on :4001 first; the server is only reachable while it runs."
+  ],
+  "mcpServers": {
+    "dp-crypto": {
+      "type": "http",
+      "url": "http://localhost:4001/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-token-here>"
+      }
+    }
+  }
+}

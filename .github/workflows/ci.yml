@@ -1,0 +1,119 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    # Skip CI for bot version-bump commits
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    strategy:
+      matrix:
+        otp: ['28.0']
+        elixir: ['1.18']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      # Cache dependencies
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            deps-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      # Cache compiled build
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: build-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            build-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      # Cache Dialyzer PLTs
+      - name: Cache PLTs
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plts-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            plts-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - run: mix format --check-formatted
+      - run: mix credo --strict
+      - run: mix dialyzer
+      - run: mix test --cover
+
+  # No live-venue job in CI. Tier-1 tests (in-process fakes) are all CI runs;
+  # tier-2 tests hit a venue's public API and run per venue, by hand, during
+  # its extraction — never on a schedule, because a venue that sees a package
+  # polling it on a timer will rate-limit or block (D7).
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28.0'
+          elixir-version: '1.18'
+
+      # Reuse deps cache from quality job
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ runner.os }}-28.0-1.18-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get
+
+      - name: Auto-increment patch version
+        run: |
+          current=$(grep '@version "' mix.exs | sed 's/.*@version "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$current"
+          new_version="$major.$minor.$((patch + 1))"
+          sed -i "s/@version \"$current\"/@version \"$new_version\"/" mix.exs
+          echo "VERSION=$new_version" >> "$GITHUB_ENV"
+
+      - name: Publish to Hex.pm
+        run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mix.exs
+          git commit -m "Release v${{ env.VERSION }} [skip ci]"
+          git tag "v${{ env.VERSION }}"
+          git push origin main --tags
+
+      - name: Create GitHub release
+        run: gh release create "v${{ env.VERSION }}" --generate-notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

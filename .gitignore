@@ -1,0 +1,50 @@
+# Build and deps
+/_build/
+/deps/
+*.ez
+*.beam
+
+# Test and coverage
+/cover/
+
+# Documentation
+/doc/
+
+# Hex package artifacts
+dp_exchange_coinbase-*.tar
+
+# Dialyzer PLTs
+priv/plts/
+
+# Crash dumps
+erl_crash.dump
+
+# Temporary files
+/tmp/
+*.swp
+*.swo
+*~
+
+# Mix fetch marker
+/.fetch
+
+# IDE / editor
+.elixir_ls/
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets — .env.sample is the ONLY committed one (§7.7, D17)
+.env*
+!.env.sample
+
+# MCP config — carries a bearer token; each developer writes their own (Phase 0.12, D17)
+.mcp.json
+
+# Claude Code local state — agents ARE shared and committed; these are not
+.claude/settings.local.json
+.claude/projects/
