@@ -33,6 +33,29 @@ defmodule DpExchange.Schwab.Rest do
   `market_status/1` is answered from `/markets`, not assumed. This is the first venue in
   the family where a feed delivering nothing is usually correct rather than broken, and
   guessing `:open` would make a real outage indistinguishable from a Saturday.
+
+  ## A pull requires a query
+
+  `get_symbols/1` takes a `:query`, because `/instruments` has no list-everything
+  projection — all six of its projections search against a term. Without one it returns
+  `{:error, {:query_required, :schwab}}` and sends nothing.
+
+  ## Accounts are addressed by a hash, and getting one is a prerequisite
+
+  `/accounts/accountNumbers` returns account numbers **and** their encrypted hashes, and
+  every other account path takes the hash. So `get_accounts/2` is not a convenience here;
+  it is the first call any trading flow has to make.
+
+  Balances read the account's own declared `type`. A `MarginAccount` and a `CashAccount`
+  carry entirely different fields, and an account whose type the venue did not state is
+  `{:error, :unexpected_response_shape}` rather than assumed to be either — reading a
+  margin account as cash would report no buying power for an account that has one.
+
+  ## Placing an order returns an id from a header, or fails
+
+  Schwab answers a placed order with `201` and an **empty body**; the id is in `Location`.
+  A `201` with no `Location` returns `{:error, :order_id_not_returned}` rather than
+  success, because a caller that cannot name the order it just placed cannot cancel it.
   """
 
   alias DpExchange.Core.HttpClient

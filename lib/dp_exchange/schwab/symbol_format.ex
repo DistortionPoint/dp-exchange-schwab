@@ -23,10 +23,25 @@ defmodule DpExchange.Schwab.SymbolFormat do
   resolving to an equity ticker is the exact failure this family exists to prevent** —
   every value stays plausible and only the meaning is wrong.
 
-  `to_exchange_symbol/1` therefore returns `{:ok, native}` or `{:error, reason}` rather
-  than a bare string, which is a deliberate difference from the crypto packages. A
-  transformation that cannot fail can be a function returning a string; a validation
-  cannot.
+  ## Translating and judging are two functions, and that split is forced
+
+  The obvious design is one function returning `{:ok, native} | {:error, reason}`. It does
+  not survive contact with the contract: `Core.SymbolNormalizer` requires
+  `to_exchange_symbol/1` to be **total**, and Core's conformance suite asserts the round
+  trip over arbitrary input — including input this venue would refuse. A consumer
+  normalising a string for display must not have it raise or hand back a tuple.
+
+  But a caller about to spend a request has to refuse first, for the reason above.
+
+  So:
+
+  - **`to_exchange_symbol/1` and `to_canonical_symbol/1` translate, and are total.** They
+    normalise case and whitespace and return a string for anything. They judge nothing.
+  - **`validate/1` judges**, returning `{:ok, native} | {:error, reason}`. `Rest`, `Orders`
+    and `Fake` call this one, always, before any request leaves.
+
+  A transformation that cannot fail may return a string; a validation may not. Keeping
+  both under one name would have meant breaking one of the two contracts.
 
   ## Options are a different shape and are not handled here
 

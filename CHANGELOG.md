@@ -78,9 +78,56 @@ an acceptable changelog line.
   instrument rather than a pair. `BTC`, `ETH` and `SOL` are all real listed equity
   tickers, so a misrouted crypto pair has a **plausible wrong answer** available: an ETF
   holding nothing like the coin, quoted in dollars, indistinguishable downstream from a
-  real price. `to_exchange_symbol/1` returns `{:ok, native} | {:error, reason}` rather
-  than a bare string — a transformation that cannot fail may return a string, a
-  validation cannot.
+  real price.
+
+  **Translation and validation are separate functions, and the split is forced.**
+  `Core.SymbolNormalizer` requires `to_exchange_symbol/1` to be *total* — the conformance
+  suite asserts the round trip over arbitrary input — while a caller about to spend a
+  request must refuse first. So `to_exchange_symbol/1` and `to_canonical_symbol/1`
+  translate and judge nothing; `validate/1` returns `{:ok, native} | {:error, reason}` and
+  is what `Rest`, `Orders` and `Fake` call. A transformation that cannot fail may return a
+  string; a validation may not.
+- `DpExchange.Schwab.Rest` — both servers behind one module: `/marketdata/v1` for quotes,
+  candles, market hours and instrument search, `/trader/v1` for accounts, balances and
+  orders. A consumer sees neither (D12).
+
+  Candles refuse in two distinct ways, because they mean different things:
+  `{:error, {:unsupported_timeframe, tf}}` for a width the venue does not serve, and
+  `{:error, {:lookback_exceeds_venue, tf, requested, max}}` for a width that exists but
+  cannot reach that far back. The second is the one that matters — ten days of minutes, or
+  a year of dailies, are both plausible wrong answers sitting right there.
+
+  **`get_symbols/1` requires a `:query`**, returning `{:error, {:query_required, :schwab}}`
+  without one. `/instruments` has no list-everything projection, so the catalogue cannot be
+  enumerated, only searched. Deliberately not `:not_supported` — the endpoint works.
+
+  **Accounts are addressed by an encrypted hash, not an account number**, so
+  `get_accounts/2` is a prerequisite for the whole trading surface. Balances read the
+  account's declared `type`: `MarginAccount` and `CashAccount` carry entirely different
+  fields, and an untyped account is unreadable rather than assumed — reading a margin
+  account as cash would report no buying power for one that has it.
+
+  A placed order returns `201` with an **empty body** and its id in `Location`. A `201`
+  with no `Location` is `{:error, :order_id_not_returned}`, because a caller that cannot
+  name the order it just placed cannot cancel it.
+- `DpExchange.Schwab.Orders` — builds the single-leg `SINGLE` strategy `place_order/3`
+  corresponds to, and **enforces Schwab's own published instruction-by-asset-type matrix
+  before sending**. Order writes are throttled on this venue and reads are free, so a
+  rejection the documentation already predicted must not cost one of them. `session` and
+  `duration` are on every order because every documented example carries them, and
+  `session` has no slot in `Core` at all.
+
+  Multi-leg spreads, `TRIGGER` and `OCO` nest whole orders in `childOrderStrategies` and
+  are unreachable through the contract. Recorded as a Core gap rather than worked around:
+  inventing a request shape would put venue vocabulary into consumer code.
+- `DpExchange.Schwab.Feed` — a REST poll behind `Core.PollingFeed`. It does **not** stop
+  itself when the market closes: pausing would make "closed" and "crashed" look identical
+  from outside, and pre/post-market are real trading windows.
+- `DpExchange.Schwab.Supervisor` — a limiter and a feed, like every venue. The limiter is
+  **configured rather than declared**, because Schwab has no venue-wide ceiling to declare.
+- `DpExchange.Schwab.Fake` — an in-process stand-in that **refuses what the real venue
+  refuses**, including the ten-day lookback cap and the instruction matrix. It is also the
+  only place in the family where the **closed-market path** can be exercised.
 
 ### Notable in the declaration
 
@@ -106,5 +153,17 @@ an acceptable changelog line.
 
 ### Requires
 
-Core with `Timeframe.nameable/0` and `max_leverage: :per_account` — both landed for this
-package and not yet published. This package cannot build against Hex until Core does.
+`dp_exchange_core ~> 0.1.11`. Three Core changes landed for this package, all of them
+defects this venue exposed:
+
+- **`Timeframe.nameable/0`** — the widths Core can *name*, wider than `known/0`, the widths
+  it can *bucket*. `Capabilities` **and** the conformance suite both checked declarations
+  against `known/0`, so a venue serving `1w` or `1M` could not declare them — while
+  `Timeframe`'s own moduledoc already documented both as deliberately unbucketable. Core
+  contradicted itself, and a venue serving a real weekly candle had two options:
+  under-declare, or not ship.
+- **`Timeframe` now models `10m`.** Its absence was not neutral: `aligned?/2` answers
+  `true` for a width it cannot model, so every 10-minute candle passed the authenticity
+  check unexamined.
+- **`max_leverage: :per_account`** — see above. Without it, shipping meant declaring
+  `supports_margin: false`, which is false, or inventing a multiplier.

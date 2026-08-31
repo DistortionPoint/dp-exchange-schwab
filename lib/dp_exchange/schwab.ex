@@ -12,13 +12,13 @@ defmodule DpExchange.Schwab do
 
   ## What is different about this venue
 
-  Four things, and each shows up in the contract rather than being smoothed over:
+  Five things, and each shows up in the contract rather than being smoothed over:
 
   **A symbol is one instrument, not a pair.** Every other venue in the family addresses
   `BASE-QUOTE`. Here `AAPL` names a single security and what you pay with is USD because
-  the venue is a US broker. `SymbolFormat` therefore *refuses* pair-shaped input instead of
-  splitting it — `BTC`, `ETH` and `SOL` are all real listed equity tickers, so a misrouted
-  crypto pair has a plausible wrong answer waiting for it.
+  the venue is a US broker. `SymbolFormat.validate/1` therefore *refuses* pair-shaped input
+  instead of splitting it — `BTC`, `ETH` and `SOL` are all real listed equity tickers, so a
+  misrouted crypto pair has a plausible wrong answer waiting for it.
 
   **The market closes.** `market_status/1` is answered from `/markets`, not assumed. A feed
   delivering nothing at 3am is correct, and a consumer that alarms on silence would alarm
@@ -34,6 +34,13 @@ defmodule DpExchange.Schwab do
   streaming, so `get_order_book/2` is `:unsupported` and the feed is a poll. Schwab
   publishes a separate Thinkorswim product where a streaming surface would live; it is out
   of scope here and named so a reader knows where to look.
+
+  **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection
+  — all six of its projections search against a term — so `get_symbols/1` requires a
+  `:query` and returns `{:error, {:query_required, :schwab}}` without one. That is
+  deliberately **not** `:not_supported`: the endpoint works, and a caller must be able to
+  tell "needs a term" from "has no endpoint". Returning some arbitrary search instead would
+  hand back a short list that looks like a catalogue.
 
   ## Credentials
 

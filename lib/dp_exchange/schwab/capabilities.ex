@@ -21,11 +21,16 @@ defmodule DpExchange.Schwab.Capabilities do
 
   ## This venue is not shaped like the others
 
-  Four differences matter enough to state before the values:
+  Five differences matter enough to state before the values:
 
   **A symbol is one instrument, not a pair.** Every other venue in the family addresses a
   pair and returns one quote shape. Schwab has seven quote shapes across `AssetMainType`
   and a symbol names a single security.
+
+  **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection,
+  so `get_symbols/1` is declared **active** but requires a `:query`. It is not
+  `:unsupported`, and the difference is the point: "needs a search term" and "has no
+  endpoint" are different facts, and a caller has to be able to act on each.
 
   **There is no order book and no socket.** No endpoint in either document returns depth,
   and neither document describes a streaming surface. The feed is a REST poll served by
