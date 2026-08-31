@@ -59,7 +59,7 @@ defmodule DpExchange.Schwab.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.{Auth, SymbolFormat}
 
   @market_data_url "https://api.schwabapi.com/marketdata/v1"
@@ -156,6 +156,46 @@ defmodule DpExchange.Schwab.Rest do
   # The response is keyed by symbol, and a symbol the venue does not list comes back
   # either absent or as a `QuoteError`. Both are refusals rather than errors: they are
   # permanent for this symbol and retrying changes nothing.
+
+  @doc """
+  Best bid and ask for `symbol` — the top of the book, not a traded price.
+
+  Reads the same `/quotes` payload as `get_price/3`, which carries `bidPrice`, `askPrice`,
+  `bidSize` and `askSize` alongside the last trade. Those used to ride on the `Quote`;
+  `Core.Types.Quote` has no fields for them now.
+
+  **This is not the venue's order book.** Schwab publishes depth over its WebSocket Streamer
+  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`), which this package does not speak yet — see
+  `get_order_book/2`. This is the top of it, from REST.
+  """
+  @spec get_top_of_book(String.t(), map(), keyword()) ::
+          {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
+  def get_top_of_book(symbol, credentials, opts) do
+    with {:ok, native} <- SymbolFormat.validate(symbol),
+         path = "/quotes?symbols=" <> URI.encode(native) <> "&indicative=false",
+         {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
+         {:ok, row} <- quote_row(body, native) do
+      {:ok,
+       %TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bid: decimal(row["bidPrice"]),
+         ask: decimal(row["askPrice"]),
+         bid_size: decimal(row["bidSize"]),
+         ask_size: decimal(row["askSize"]),
+         venue_time: top_of_book_time(row),
+         observed_at: DateTime.utc_now(),
+         provider: :schwab
+       }}
+    end
+  end
+
+  defp top_of_book_time(row) do
+    case venue_time(row) do
+      {:ok, at} -> at
+      _no_venue_time -> nil
+    end
+  end
+
   defp quote_row(body, native) when is_map(body) do
     case Map.get(body, native) do
       %{"quote" => quote_map} when is_map(quote_map) -> {:ok, quote_map}
@@ -174,8 +214,6 @@ defmodule DpExchange.Schwab.Rest do
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: decimal(price),
-         bid: decimal(row["bidPrice"]),
-         ask: decimal(row["askPrice"]),
          volume: decimal(row["totalVolume"]),
          timestamp: timestamp,
          provider: :schwab
@@ -247,7 +285,7 @@ defmodule DpExchange.Schwab.Rest do
       path = "/pricehistory?" <> URI.encode_query(params)
 
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
-        candles(body, native)
+        candles(body, native, timeframe)
       end
     end
   end
@@ -299,13 +337,13 @@ defmodule DpExchange.Schwab.Rest do
     |> Enum.find(Enum.max(legal), fn period -> days_for(period, period_type) >= days end)
   end
 
-  defp candles(%{"candles" => rows}, native) when is_list(rows) do
+  defp candles(%{"candles" => rows}, native, timeframe) when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(native)
 
     rows
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case candle(symbol, row) do
-        {:ok, quote_struct} -> {:cont, {:ok, [quote_struct | acc]}}
+      case candle(symbol, timeframe, row) do
+        {:ok, bar} -> {:cont, {:ok, [bar | acc]}}
         error -> {:halt, error}
       end
     end)
@@ -318,22 +356,38 @@ defmodule DpExchange.Schwab.Rest do
   # An empty series for a symbol the venue does not list. `empty: true` is Schwab's own
   # flag and is carried as a refusal, not as zero candles — a caller must be able to tell
   # "no data" from "no such symbol".
-  defp candles(%{"empty" => true}, _native), do: {:refused, :not_listed}
-  defp candles(_other, _native), do: {:error, :unexpected_response_shape}
+  defp candles(%{"empty" => true}, _native, _timeframe), do: {:refused, :not_listed}
+  defp candles(_other, _native, _timeframe), do: {:error, :unexpected_response_shape}
 
-  # A candle is delivered as a `Quote` because that is the contract's shape for a series.
-  # `close` is the price: an OHLC bar's price, for a series, is where it ended.
-  defp candle(symbol, row) do
-    with {:ok, close} <- required(row, "close"),
-         {:ok, timestamp} <- candle_time(row) do
+  # A bar is a `Core.Types.Candle`, not a `Quote`.
+  #
+  # This used to build a Quote with `price: close`, on the reasoning that "an OHLC bar's
+  # price, for a series, is where it ended". The close is a real number and it is not the
+  # bar: open, high and low were being discarded at the boundary, and no caller could tell,
+  # because what arrived was a well-formed Quote. Core 0.1.16 types this callback as
+  # `[Types.Candle.t()]` and the four prices are carried.
+  #
+  # `:opened_at` — Schwab stamps a bar at its **open**, in epoch milliseconds.
+  defp candle(symbol, timeframe, row) do
+    # Timestamp first, deliberately. An undated bar is `:missing_venue_timestamp` — the
+    # specific refusal this package is built around — and checking prices ahead of it would
+    # report `:unexpected_response_shape` for a row whose real problem is that it cannot be
+    # placed in time.
+    with {:ok, timestamp} <- candle_time(row),
+         {:ok, open} <- required(row, "open"),
+         {:ok, high} <- required(row, "high"),
+         {:ok, low} <- required(row, "low"),
+         {:ok, close} <- required(row, "close") do
       {:ok,
-       %Quote{
+       %Candle{
          symbol: symbol,
-         price: decimal(close),
-         bid: nil,
-         ask: nil,
+         timeframe: timeframe,
+         opened_at: timestamp,
+         open: decimal(open),
+         high: decimal(high),
+         low: decimal(low),
+         close: decimal(close),
          volume: decimal(row["volume"]),
-         timestamp: timestamp,
          provider: :schwab
        }}
     end

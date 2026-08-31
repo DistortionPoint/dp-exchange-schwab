@@ -51,12 +51,22 @@ defmodule DpExchangeSchwab.MixProject do
       # Needs `Timeframe.nameable/0` — this venue serves 1w and 1M, which Core can name
       # but deliberately cannot bucket — and `max_leverage: :per_account`, because Reg-T
       # has no single ceiling. Both landed in Core for this package.
-      {:dp_exchange_core, "~> 0.1.13"},
+      {:dp_exchange_core, "~> 0.1.16"},
 
-      # a venue that speaks WebSocket ships what it needs to speak it.
-      # No `websockex`. **This venue has no streaming API at all** — its feed is a REST
-      # poll served by `Core.PollingFeed`. Shipping a WebSocket library here would be
-      # dead weight that also implies a capability the venue does not have.
+      # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
+      # it needs to speak it.
+      # No `websockex` — **yet**. This package does not speak the venue's socket; that is
+      # not the same as the venue not having one, and this comment used to say it was.
+      #
+      # It read "this venue has no streaming API at all". **That is false.** Schwab
+      # publishes a WebSocket **Streamer** with 15 services, including three book services
+      # and `ACCT_ACTIVITY`. It is described in the prose documentation this repository
+      # already held (`docs/reference/schwab/documentation/market-data-production.txt`),
+      # and it is absent from both OpenAPI documents — which is exactly how the error was
+      # made: the specifications were read, the prose beside them was not.
+      #
+      # The feed is a REST poll served by `Core.PollingFeed` until the Streamer is
+      # implemented. Add `websockex` when it is, and not before.
       {:jason, "~> 1.4"},
       {:decimal, "~> 2.0"},
 

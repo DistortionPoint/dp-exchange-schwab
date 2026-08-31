@@ -44,10 +44,13 @@ price.
 delivering nothing at 3am is correct, and a consumer that alarms on silence would alarm
 every night — making a real outage indistinguishable from a Saturday.
 
-**There is no order book and no socket.** Neither specification describes depth or
-streaming. `get_order_book/2` is `:unsupported` and the feed is a REST poll behind
-`Core.PollingFeed`. Schwab publishes a separate **Thinkorswim** product where a streaming
-surface would live; it is out of scope here.
+**This package has no order book and no socket. The venue has both.** Schwab publishes a
+WebSocket **Streamer** with 15 services, three of which carry depth (`NYSE_BOOK`,
+`NASDAQ_BOOK`, `OPTIONS_BOOK`) and one of which carries order and fill events
+(`ACCT_ACTIVITY`). It is documented in the prose beside the OpenAPI specifications, not in
+them, which is how this README came to claim the venue had neither. `get_order_book/2` is
+`:unsupported` and the feed is a REST poll behind `Core.PollingFeed` **until the Streamer
+is implemented here** — not because there is nothing to implement.
 
 **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection —
 every lookup is a search. `get_symbols/1` therefore requires a `:query` and returns

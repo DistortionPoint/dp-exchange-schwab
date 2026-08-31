@@ -195,7 +195,9 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, quote_struct} = Fake.get_price("AAPL", credentials: @creds)
 
       assert quote_struct.timestamp == Fake.as_of()
-      assert Decimal.lt?(quote_struct.bid, quote_struct.ask)
+      # The book moved to TopOfBook; the fake exposes it through get_top_of_book/2.
+      assert {:ok, top} = Fake.get_top_of_book("AAPL", credentials: @creds)
+      assert Decimal.lt?(top.bid, top.ask)
       assert quote_struct.provider == :schwab
     end
 
@@ -225,7 +227,10 @@ defmodule DpExchange.SchwabTest do
                Fake.get_historical_prices("AAPL", "5m", range, credentials: @creds)
 
       assert length(candles) == 5
-      assert Enum.all?(candles, &(&1.bid == nil))
+      # Bars carry four prices now, not one. A fake whose OHLC all matched could not catch
+      # a caller reading the wrong one.
+      assert Enum.all?(candles, &Decimal.lt?(&1.low, &1.high))
+      assert Enum.all?(candles, & &1.opened_at)
     end
 
     test "the market can be closed, which is the only place that path is testable" do
@@ -333,7 +338,47 @@ defmodule DpExchange.SchwabTest do
     end
   end
 
+  # Argument shapes for the declared-unsupported sweep. A lookup rather than a case, so a
+  # callback added to the facade adds a row instead of a branch.
+  @wide_facade_args %{
+    {:withdraw, 5} => ["AAPL", "bitcoin", :one, "addr", []],
+    {:estimate_withdrawal_fee, 4} => ["AAPL", "bitcoin", :one, []],
+    {:quote_conversion, 4} => ["AAPL", "USD", :one, []],
+    {:get_deposit_address, 3} => ["AAPL", "bitcoin", []],
+    {:create_watchlist, 3} => ["name", [], []],
+    {:get_financials, 3} => ["AAPL", :balance_sheet, []],
+    {:rename_account, 3} => ["id", "name", []],
+    {:stake, 3} => ["AAPL", :one, []],
+    {:unstake, 3} => ["AAPL", :one, []],
+    {:get_funding, 2} => ["AAPL", []],
+    {:get_contract_stats, 2} => ["AAPL", []],
+    {:get_option_chain, 2} => ["AAPL", []],
+    {:get_option_expirations, 2} => ["AAPL", []],
+    {:get_option_greeks, 2} => ["id", []],
+    {:get_watchlist, 2} => ["id", []],
+    {:update_watchlist, 2} => ["id", []],
+    {:delete_watchlist, 2} => ["id", []],
+    {:get_filings, 2} => ["id", []],
+    {:get_screener, 2} => ["id", []],
+    {:commit_conversion, 2} => ["id", []],
+    {:get_conversion, 2} => ["id", []],
+    {:get_top_of_book, 2} => ["AAPL", []]
+  }
+
   defp unsupported_args(name, arity) do
+    case Map.fetch(@wide_facade_args, {name, arity}) do
+      {:ok, args} ->
+        Enum.map(args, fn
+          :one -> Decimal.new("1")
+          other -> other
+        end)
+
+      :error ->
+        legacy_args(name, arity)
+    end
+  end
+
+  defp legacy_args(name, arity) do
     case {name, arity} do
       {:quantization, 1} -> ["AAPL"]
       {:get_historical_prices, 4} -> ["AAPL", "1d", [], []]

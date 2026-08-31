@@ -289,8 +289,9 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
         }
       }
 
-      assert {:ok, quote_struct} = Rest.get_price("AAPL", @creds, opts(responding(body)))
-      assert quote_struct.bid == nil
+      # The assertion moved to TopOfBook with the field: an empty bid is nil, never zero.
+      assert {:ok, top} = Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
+      assert top.bid == nil
     end
 
     test "numbers arrive as integers, floats, strings or Decimals and all become Decimal" do

@@ -2,18 +2,29 @@ defmodule DpExchange.Schwab.Feed do
   @moduledoc """
   This venue's feed — **a REST poll**, and nothing outside this module needs to know that.
 
-  ## Why a venue with no socket still has a feed
+  ## Why this is a poll, and why that is not a statement about the venue
 
-  Neither of Schwab's Trader API specifications describes a streaming surface. Behind a
-  feed that does not matter: the same `Core.Types.Quote` reaches the same subscriber as
-  from a WebSocket venue, no consumer branches on transport, and `coverage/1` reports what
-  is actually arriving rather than what was subscribed (D12, §6.1.8).
+  **Schwab has a WebSocket Streamer. This module does not speak it yet.** Those are
+  different facts, and this moduledoc used to conflate them: it said neither Trader API
+  specification describes a streaming surface, which is true, and left the reader to
+  conclude the venue has none, which is false.
 
-  Schwab does publish a separate **Thinkorswim** API product, which is where a streaming
-  quote surface would live if it exists. Nothing here has been checked against it, and it
-  is out of scope for this package — recorded so a reader looking for a Schwab socket
-  knows where to look next rather than concluding there is none.
+  The Streamer carries 15 services — `LEVELONE_*` quotes, `NYSE_BOOK`, `NASDAQ_BOOK` and
+  `OPTIONS_BOOK` for depth, `CHART_*` for candles, and `ACCT_ACTIVITY` for order and fill
+  events. It is documented in the prose beside the specifications, committed at
+  `docs/reference/schwab/documentation/market-data-production.txt`, and its bootstrap is
+  `GET /userPreference`, which returns `streamerInfo.streamerSocketUrl`.
 
+  **The error was reading the OpenAPI documents and stopping there.** Both are honest about
+  their own scope; neither claims to describe the whole venue. Nothing warned that the
+  prose beside them held a second transport.
+
+  Until the Streamer is implemented, this is a REST poll served by `Core.PollingFeed`, and
+  behind the feed that does not matter: the same `Core.Types.Quote` reaches the same
+  subscriber as from a socket venue, no consumer branches on transport, and `coverage/1`
+  reports what is actually arriving rather than what was subscribed (D12, §6.1.8). When the
+  Streamer lands, `streamable` gains `:order_book`, `:orders` and `:fills`, and no consumer
+  should have to change.
   ## The market closes, and silence is usually correct
 
   This is the first venue in the family where delivering nothing is the normal overnight

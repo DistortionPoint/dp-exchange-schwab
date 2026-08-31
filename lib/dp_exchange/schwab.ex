@@ -30,10 +30,13 @@ defmodule DpExchange.Schwab do
   minting a new refresh token each time with a fresh seven days. A host that keeps
   refreshing never needs a person again.
 
-  **There is no order book and no socket.** Neither specification describes depth or
-  streaming, so `get_order_book/2` is `:unsupported` and the feed is a poll. Schwab
-  publishes a separate Thinkorswim product where a streaming surface would live; it is out
-  of scope here and named so a reader knows where to look.
+  **`get_order_book/2` is `:unsupported`, and the reason matters more than the value.**
+  It used to read "there is no order book and no socket" — a claim about the venue, and
+  wrong. The venue has both. **This package** has neither yet: the REST API returns no
+  depth, and the WebSocket **Streamer** that does — `NYSE_BOOK`, `NASDAQ_BOOK`,
+  `OPTIONS_BOOK` — is not implemented here. The value stays `:unsupported` because that is
+  still true of this package today; the reason changes because the old one was false and
+  would have stopped anyone looking.
 
   **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection
   — all six of its projections search against a term — so `get_symbols/1` requires a
@@ -105,6 +108,13 @@ defmodule DpExchange.Schwab do
   def get_price(symbol, opts \\ []) do
     with {:ok, credentials} <- credentials(opts) do
       Rest.get_price(symbol, credentials, with_limiter(opts))
+    end
+  end
+
+  @impl true
+  def get_top_of_book(symbol, opts \\ []) do
+    with {:ok, credentials} <- credentials(opts) do
+      Rest.get_top_of_book(symbol, credentials, with_limiter(opts))
     end
   end
 
@@ -345,4 +355,114 @@ defmodule DpExchange.Schwab do
   defp alive?(name) when is_atom(name), do: is_pid(Process.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
   defp alive?(_other), do: false
+
+  # --- Declared but not yet implemented -----------------------------------
+  #
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
+  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
+  # consumer routing on the declaration is told the truth.
+  #
+  # **`:unsupported` here is a statement about this package, not about the venue.** That
+  # distinction is the one Phase 1 had to correct after a package spent a year asserting a
+  # venue had no streaming API when it had fifteen services. Where the venue genuinely does
+  # not offer something, the comment beside it says so.
+
+  @impl true
+  def get_positions(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_funding(_symbol, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_contract_stats(_symbol, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_rates(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_balances(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_rewards(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_history(_opts), do: Venue.not_supported()
+
+  @impl true
+  def stake(_asset, _amount, _opts), do: Venue.not_supported()
+
+  @impl true
+  def unstake(_asset, _amount, _opts), do: Venue.not_supported()
+
+  @impl true
+  def quote_conversion(_from, _to, _amount, _opts), do: Venue.not_supported()
+
+  @impl true
+  def commit_conversion(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_conversion(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_portfolios(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_deposit_address(_asset, _network, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_approved_addresses(_opts), do: Venue.not_supported()
+
+  @impl true
+  def estimate_withdrawal_fee(_asset, _network, _amount, _opts), do: Venue.not_supported()
+
+  @impl true
+  def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_option_chain(_underlying, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_option_expirations(_underlying, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_watchlists(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_watchlist(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def create_watchlist(_name, _symbols, _opts), do: Venue.not_supported()
+
+  @impl true
+  def update_watchlist(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def delete_watchlist(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_financials(_symbol, _kind, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_corporate_events(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_filings(_symbol, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_news(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_screener(_name, _opts), do: Venue.not_supported()
+
+  @impl true
+  def create_account(_opts), do: Venue.not_supported()
+
+  @impl true
+  def rename_account(_id, _name, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_roles(_opts), do: Venue.not_supported()
 end

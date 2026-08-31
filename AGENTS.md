@@ -143,12 +143,25 @@ the family where delivering nothing is the normal overnight state.
 `coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
 not a fault.
 
-## 9. What this venue does not have
+## 9. What this package does not implement
+
+*This section used to be headed "what this venue does not have". That was wrong for at
+least one entry, and the distinction is the point: a capability this package lacks is not
+the same as one the venue lacks, and only the second would justify routing the work
+somewhere else permanently.*
 
 `get_order_book/2`, `get_market_overview/1`, `list_instruments/1`, `get_fees/2`,
 `get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2` all
 return `{:error, :not_supported}`. Route that work elsewhere rather than discovering an
 empty result.
+
+**Two of those are the venue's, and two are not:**
+
+- **`get_order_book/2`** — the venue *does* publish depth, over its WebSocket **Streamer**
+  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`). This package does not speak the Streamer
+  yet. Expect this to become supported.
+- **`get_trade_history/2`** — the venue publishes `GET /accounts/{n}/transactions`, which is
+  where fills live. Not implemented here yet. Expect this to become supported.
 
 `get_symbols/1` is **not** in that list. It works, but requires `:query` — the venue has no
 list-everything projection.

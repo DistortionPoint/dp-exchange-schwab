@@ -31,6 +31,33 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+- **This package no longer claims Schwab has no streaming API.** It does: a WebSocket
+  **Streamer** with 15 services, including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK` for
+  depth and `ACCT_ACTIVITY` for order and fill events. It is documented in the prose beside
+  the two OpenAPI specifications and absent from both, which is how the error was made — the
+  specifications were read and the prose next to them was not.
+
+  Corrected in `mix.exs`, `DpExchange.Schwab`, `Feed`, `Capabilities`, `README.md` and both
+  copies of `usage-rules.md`. **No capability value changed**: `get_order_book/2` remains
+  `:unsupported` and `streamable` remains `[:quotes]`, because this package still cannot read
+  depth. Only the recorded *reason* changed, from a false claim about the venue to a true one
+  about the package.
+
+- `usage-rules.md` §9 retitled from "What this venue does not have" to "**What this package
+  does not implement**", and now says which of the listed capabilities the venue really does
+  publish — `get_order_book/2` and `get_trade_history/2` both exist upstream.
+
+### Added
+- `docs/reference/schwab/portal-product-landscape.md` — the developer portal publishes **24
+  products**; **7** are visible to this account and **1** is entitled. The other six return
+  `204` from `lob-access/Status`, and Crypto and Thinkorswim are not among the seven at all.
+  No credential this project holds reaches them, so Schwab's addressable surface is the
+  Trader API and nothing further.
+- `docs/reference/schwab/user-guides/` — the portal's 17 User Guides, never previously
+  captured. Two matter here: **Authenticate with OAuth** and **OAuth Restart vs. Refresh
+  Token**, the latter being the document that draws the package/host auth boundary.
+
 ### Added
 - `DpExchange.Schwab.Capabilities` — the venue's declaration, derived from the two
   OpenAPI documents committed under `docs/reference/schwab/` **before** any provider was

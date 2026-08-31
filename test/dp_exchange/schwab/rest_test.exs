@@ -13,7 +13,7 @@ defmodule DpExchange.Schwab.RestTest do
   @moduletag :capture_log
 
   alias DpExchange.Core.Config
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Candle, Quote}
   alias DpExchange.Schwab.Rest
 
   defmodule PermissiveLimiter do
@@ -58,8 +58,7 @@ defmodule DpExchange.Schwab.RestTest do
 
       assert quote_struct.symbol == "AAPL"
       assert Decimal.equal?(quote_struct.price, Decimal.from_float(227.5))
-      assert Decimal.equal?(quote_struct.bid, Decimal.from_float(227.4))
-      assert Decimal.equal?(quote_struct.ask, Decimal.from_float(227.6))
+
       assert Decimal.equal?(quote_struct.volume, Decimal.new(51_234_567))
       assert quote_struct.timestamp.year == 2026
       assert quote_struct.provider == :schwab
@@ -183,17 +182,21 @@ defmodule DpExchange.Schwab.RestTest do
 
       range = [start: DateTime.add(DateTime.utc_now(), -3, :day)]
 
-      assert {:ok, [%Quote{} = candle]} =
+      assert {:ok, [%Candle{} = candle]} =
                Rest.get_historical_prices("AAPL", "5m", range, @creds,
                  plug: responding(body),
                  retry_attempts: 0
                )
 
-      # A bar's price, for a series, is where it closed.
-      assert Decimal.equal?(candle.price, Decimal.from_float(1.5))
+      # A bar carries four prices, and the close is only one of them. This asserted
+      # `candle.price` until 2026-08-31, when the callback still returned Quotes and open,
+      # high and low were discarded at the boundary.
+      assert Decimal.equal?(candle.close, Decimal.from_float(1.5))
       assert Decimal.equal?(candle.volume, Decimal.new(100))
-      assert candle.bid == nil
-      assert candle.ask == nil
+      assert candle.open
+      assert candle.high
+      assert candle.low
+      assert candle.opened_at
     end
 
     test "no range asks for the deepest the width allows" do

@@ -1,0 +1,1 @@
+[{"category":{"name":"Unassigned","description":null},"apiProducts":[{"name":"OFX2.2Tax","displayName":"OFX 2.2 Tax","description":"Get Tax Documents using OAuth","isHiddenByAdmin":false},{"name":"OFX 2.2 Tax","displayName":"OFX 2.2 Tax - Disabled","description":"Get Tax Documents using OAuth (Duplicate created & disabled)","isHiddenByAdmin":true}]}]

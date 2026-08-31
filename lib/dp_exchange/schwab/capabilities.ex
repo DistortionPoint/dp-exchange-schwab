@@ -32,9 +32,13 @@ defmodule DpExchange.Schwab.Capabilities do
   `:unsupported`, and the difference is the point: "needs a search term" and "has no
   endpoint" are different facts, and a caller has to be able to act on each.
 
-  **There is no order book and no socket.** No endpoint in either document returns depth,
-  and neither document describes a streaming surface. The feed is a REST poll served by
-  `Core.PollingFeed`.
+  **No order book and no socket *here*; the venue has both.** No endpoint in either
+  OpenAPI document returns depth, and neither describes a streaming surface — both true,
+  and both statements about the documents rather than the venue. Schwab's WebSocket
+  **Streamer** carries `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is documented in
+  the prose beside those specifications. `get_order_book/2` stays `:unsupported` because
+  this package does not speak the Streamer yet, and `streamable` stays `[:quotes]` for the
+  same reason. Both change when it does.
 
   **The market closes.** `/markets` answers `isOpen` directly. This is the venue
   `market_status/1` was added to the contract for — a feed that alarms on silence would
@@ -83,6 +87,50 @@ defmodule DpExchange.Schwab.Capabilities do
   # — a declaration that disagreed with the code would be the worse of the two errors.
   # This one moves when someone with a credential can check the shape.
   @venue_does_not_serve [
+    # Core 0.1.16's wider facade. **Mixed provenance, and the distinction matters here more
+    # than anywhere** — this is the package that spent a year asserting the venue had no
+    # streaming API when it had fifteen services.
+    #
+    # The venue genuinely does not serve: staking, perpetual funding, conversions, crypto
+    # deposit and withdrawal addresses. Schwab is an equities and options broker.
+    #
+    # The venue DOES serve these and this package does not implement them yet: option
+    # chains and expirations (`/chains`, `/expirationchain`), movers as a screener
+    # (`/movers/{symbol_id}`), and positions via the accounts endpoint. Each is a Phase
+    # 3–13 item, recorded in `docs/reference/schwab/coverage-matrix.md`.
+    {:get_positions, 1},
+    {:get_funding, 2},
+    {:get_contract_stats, 2},
+    {:get_staking_rates, 1},
+    {:get_staking_balances, 1},
+    {:get_staking_rewards, 1},
+    {:get_staking_history, 1},
+    {:stake, 3},
+    {:unstake, 3},
+    {:quote_conversion, 4},
+    {:commit_conversion, 2},
+    {:get_conversion, 2},
+    {:list_portfolios, 1},
+    {:get_deposit_address, 3},
+    {:list_approved_addresses, 1},
+    {:estimate_withdrawal_fee, 4},
+    {:withdraw, 5},
+    {:get_option_chain, 2},
+    {:get_option_expirations, 2},
+    {:get_option_greeks, 2},
+    {:list_watchlists, 1},
+    {:get_watchlist, 2},
+    {:create_watchlist, 3},
+    {:update_watchlist, 2},
+    {:delete_watchlist, 2},
+    {:get_financials, 3},
+    {:get_corporate_events, 1},
+    {:get_filings, 2},
+    {:get_news, 1},
+    {:get_screener, 2},
+    {:create_account, 1},
+    {:rename_account, 3},
+    {:get_roles, 1},
     {:get_order_book, 2},
     {:get_transfers, 2},
     {:get_fees, 2},
