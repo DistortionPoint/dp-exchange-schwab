@@ -8,21 +8,24 @@ unlike the other four venues nothing here can be re-fetched by a reader. That is
 why the captures are in the repository rather than linked: this file must be checkable
 against a fixed source, and the source has to travel with it.
 
-## What the captures do and do not contain
+## Superseded in part — read `spec-facts.md` first
 
-**They contain** the complete endpoint inventory and the full list of schema names, for
-both halves of the API. That is reproducible from the committed files by anyone.
+This file was written from saved portal *pages*, which carry the endpoint outline and not
+the spec. On **2026-08-28** the architect signed the browser in and the two OpenAPI
+documents were captured in full; they are in `openapi/`, and everything derived from them
+is in **`spec-facts.md`**.
 
-**They do not contain parameter values.** The portal is a Swagger UI that fetches its
-OpenAPI document at runtime, so a saved page carries the outline and not the spec. Searched
-in both captures: `periodType` — 0 hits, `frequencyType` — 0 hits. Schema *names* like
-`orderType`, `session` and `duration` appear; their enum members do not.
+What that changes here:
 
-This is recorded rather than filled in from memory. Getting a candle-width enum from
-recollection is precisely the failure this family exists to prevent, and it has already
-bitten once: Gemini's own published enum lists three widths its API rejects, and only
-measurement caught it.
+- The section that used to say parameter values were unavailable is gone. They are
+  available. `periodType`, `frequencyType` and every order enum are in `spec-facts.md`.
+- The endpoint lists below were **checked against the real specs and are exactly right** —
+  10 market-data paths and 13 trading operations across 10 paths, no more and no fewer. That is worth saying,
+  because it means the outline-only capture was not lossy about *shape*, only about values.
+- One reading below was **wrong**, and is corrected in place: see "Schema names, verbatim".
+- The sandbox question is answered, and the answer is no. See `spec-facts.md` §5.
 
+What still stands: none of it is measured against the live API, for want of a credential.
 ## Verified live, 2026-08-28
 
 | Check | Result |
@@ -34,11 +37,13 @@ measurement caught it.
 The `401` is worth stating: it confirms the base URL and path shape from the capture are
 right, without a credential and without guessing.
 
-**No sandbox is mentioned anywhere in either capture** — searched for `sandbox`, `paper`
-and `simulat`, zero hits. Task 7.1 asks whether a sandbox exists and whether it works; on
-this evidence the answer to the first is *not documented*, so the second does not arise
-yet. Gemini's demo environment turned out to be the family's most useful testing surface,
-so this is worth a direct question to Schwab rather than an assumption either way.
+**Sandbox: answered, and the answer is no.** The saved pages mentioned no sandbox because
+the sandbox text lives on the *Documentation* tab, which the page capture did not carry.
+It does now: Schwab writes that "The Trader API Sandbox environments will be available
+later this year" — a promise, in a document published 2025-10-30, with no sandbox server in
+either spec. Task 7.1 is therefore closed: there is nothing to test against. Gemini's demo
+environment was the family's most useful testing surface and this venue has no equivalent,
+which is a real difference between them rather than a gap in the capture.
 
 ## Market Data
 
@@ -143,26 +148,34 @@ the list is already informative.
 `orderStrategyType`, `status`, `amountIndicator`, `settlementInstruction`, `OrderStrategy`,
 `OrderLeg`, `OrderBalance`, `OrderValidationResult`, `OrderValidationDetail`,
 `APIRuleAction`, `CommissionAndFee`.
+`orderType` **and** `orderTypeRequest` as separate schemas was read here as meaning that
+some requested types resolve into others. **That was wrong**, and the spec says so: the two
+enums are identical except that `orderType` also carries `UNKNOWN`. It is a read-side
+escape hatch — a value an order can come back as and a value you cannot send — not a
+resolution rule. Recorded rather than quietly edited, because the guess was plausible and
+the plausible-but-wrong reading is the failure mode this reference exists to catch.
 
-`orderType` **and** `orderTypeRequest` as separate schemas is worth noticing: a venue that
-distinguishes the order type you *ask for* from the order type an order *has* usually does
-so because some requested types resolve into others.
+## What 7.2 was waiting on — all five answered
 
-## What is still needed before 7.2 can be finished
+Every one of the five open items is now read out of the specs. They are in `spec-facts.md`
+with the schema or parameter each came from; in short:
 
-The declaration needs values this capture does not carry:
+1. **`/pricehistory` parameters** — eight candle widths (1m, 5m, 10m, 15m, 30m, 1d, 1w,
+   1M), reachable only through constrained `(periodType, frequencyType, frequency)`
+   triples. The minute widths cap the lookback at 10 days.
+2. **Order enums** — full members for `orderType`, `orderTypeRequest`, `duration` and
+   `session`. Four of Core's seven order types map; `:ioc`/`:fok` are `duration` values
+   here and must not be declared as order types; `:post_only` and `:gtd` have no
+   equivalent.
+3. **Margin fields** — `MarginBalance` carries five distinct buying powers plus `regTCall`
+   and `sma`; `CashBalance` carries none of them. `max_leverage` is the wrong shape and
+   should not be declared for this venue.
+4. **Rate limits** — order writes are `0..120` per minute **per account**, set per
+   application at registration. Not a venue constant, so not a hardcoded ceiling. Order
+   reads are unthrottled; market data has no documented limit, which is recorded as
+   unmeasured rather than unlimited.
+5. **Sandbox** — none. Promised, not shipped, and no sandbox server in either spec.
 
-1. **`/pricehistory` parameters** — `periodType`, `period`, `frequencyType`, `frequency`
-   and their accepted enum members. Without them `historical_timeframes` cannot be declared,
-   and declaring it from memory is the exact failure this family refuses.
-2. **`orderType` / `orderTypeRequest` / `duration` / `session` enum members** — needed for
-   `supported_order_types` and `supported_time_in_force`.
-3. **Margin fields** — whether Reg-T buying power appears on the account response, and in
-   what shape. §7.2 flags that `max_leverage` may be the wrong shape for a Reg-T account,
-   and that is answerable only from the account schema.
-4. **Rate limits** — no ceiling appears in either capture.
-5. **Whether a sandbox exists.**
-
-Any one of these would do it: the OpenAPI JSON the portal fetches (visible in a browser's
-network tab as it loads the Specifications page), the expanded per-endpoint views, or the
-"Documentation" tab that sits beside "Specifications" in the same portal.
+Nothing above is measured against the live API. That is a deliberate limit, not an
+omission: it needs a credential this repo must never hold, so per D7 this is tier-1
+evidence and supports `:experimental`, never `:proven`.

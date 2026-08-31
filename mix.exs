@@ -48,7 +48,10 @@ defmodule DpExchangeSchwab.MixProject do
     [
       # The contract. Three-part pin: while Core is 0.x a minor bump may break us, and
       # that is the signal it is meant to send.
-      {:dp_exchange_core, "~> 0.1.8"},
+      # Needs `Timeframe.nameable/0` — this venue serves 1w and 1M, which Core can name
+      # but deliberately cannot bucket — and `max_leverage: :per_account`, because Reg-T
+      # has no single ceiling. Both landed in Core for this package.
+      {:dp_exchange_core, "~> 0.1.11"},
 
       # a venue that speaks WebSocket ships what it needs to speak it.
       # No `websockex`. **This venue has no streaming API at all** — its feed is a REST

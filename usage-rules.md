@@ -1,0 +1,119 @@
+# Using `dp_exchange_schwab`
+
+Rules for an agent or developer writing code against this package. Read this before the
+README; it is what the Hex tarball ships for consumers.
+
+## 1. This package is EXPERIMENTAL and cannot be proven here
+
+Nothing in it has run against the live API. Every endpoint needs OAuth credentials this
+repository must never hold, and **Schwab publishes no sandbox** — its documentation promises
+Trader API sandboxes "later this year" and neither specification declares a non-production
+server. There is nowhere to exercise this that is not real money.
+
+Check `DpExchange.Schwab.capabilities().endpoints` before calling anything. Maturity is per
+endpoint.
+
+## 2. Credentials are arguments, never configuration
+
+Pass them per call. This package never reads a vault, never caches a token, and never logs
+one.
+
+```elixir
+credentials = %{access_token: "…", refresh_token: "…", client_id: "…", client_secret: "…"}
+```
+
+`:access_token` alone is enough to sign. The rest are needed to refresh.
+
+**There is no anonymous surface — market data included.** A call without a token is refused
+locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent.
+
+## 3. Refresh, and persist what you get back
+
+The access token lives **30 minutes**. `DpExchange.Schwab.Auth.refresh/2` renews it.
+
+**The refresh token is one-time use.** Every refresh spends the old one and returns a new one
+carrying a fresh seven days. So:
+
+- **Persist the returned credential before using it.** Refreshing and then crashing before
+  storing costs the grant, and only a person at a browser can restore it.
+- **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
+  token may already have been spent; try again with the credential you still hold, not the
+  one you just sent.
+- `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. Seven days
+  elapsed with no refresh, or the user reset their password. Send a person to the login
+  page; do not retry.
+
+Refreshing at least once a week means never needing a person again.
+
+## 4. A symbol is one instrument, not a pair
+
+`"AAPL"`, not `"AAPL-USD"`. Pair-shaped input is refused, and this matters more than it
+looks: `BTC`, `ETH` and `SOL` are real listed equity tickers, so a crypto pair routed here
+by mistake has a plausible wrong answer available.
+
+Option symbols are fixed-width and positional — `"XYZ   240315C00500000"`. The padding is
+part of the format; do not trim it.
+
+## 5. Candles: eight widths, and a hard lookback cap
+
+`1m 5m 10m 15m 30m 1d 1w 1M`.
+
+**Minute widths reach at most ten days back.** A longer range returns
+`{:error, {:lookback_exceeds_venue, timeframe, requested_days, max_days}}`. It is not
+truncated and not downgraded to a coarser width — handle the error; do not assume a series.
+
+An unsupported width returns `{:error, {:unsupported_timeframe, width}}`.
+
+## 6. Account calls need a hash, not an account number
+
+`get_accounts/2` returns `%{account_number: …, hash: …}`. **Every other account path takes
+the hash**, passed as `:account_hash`. Nothing is defaulted — placing an order against a
+silently-chosen account is not something this package will do for you.
+
+```elixir
+{:ok, [account]} = DpExchange.Schwab.get_accounts(credentials)
+DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
+```
+
+## 7. Orders: only what Core can name
+
+Order types: `:market`, `:limit`, `:stop`, `:stop_limit`. Time in force: `:day`, `:gtc`,
+`:fok`, `:ioc`.
+
+- **`:ioc` and `:fok` are time-in-force here, not order types.** Schwab spells them as
+  `duration`.
+- **`:post_only` and `:gtd` do not exist on this venue** and are refused rather than mapped
+  to something near. Schwab's dated expiries are three fixed horizons, not an arbitrary date.
+- The venue supports `TRAILING_STOP`, `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, which `Core`
+  has no vocabulary for. They are not reachable through this facade.
+- Multi-leg spreads and `OCO`/`TRIGGER` orders are not reachable either — `place_order/3`
+  takes a flat request.
+
+Schwab publishes which instructions each asset type accepts, and this package enforces it
+**before sending**: `BUY`/`SELL`/`SELL_SHORT`/`BUY_TO_COVER` are equity-only, and the
+`_TO_OPEN`/`_TO_CLOSE` forms are option-only. Order writes are throttled and reads are not,
+so a locally-catchable rejection is worth catching.
+
+## 8. The market closes, and silence is usually correct
+
+Call `market_status/1` before concluding a quiet feed is broken. This is the only venue in
+the family where delivering nothing is the normal overnight state.
+
+`coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
+not a fault.
+
+## 9. What this venue does not have
+
+`get_order_book/2`, `get_market_overview/1`, `list_instruments/1`, `get_fees/2`,
+`get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2` all
+return `{:error, :not_supported}`. Route that work elsewhere rather than discovering an
+empty result.
+
+`get_symbols/1` is **not** in that list. It works, but requires `:query` — the venue has no
+list-everything projection.
+
+## 10. Rate limits are yours, not the venue's
+
+The documented ceiling is `0..120` order writes per minute **per account**, set **per
+application at registration**. Pass `:order_limit_per_minute` matching your own app's. Zero
+is a legal registration value.

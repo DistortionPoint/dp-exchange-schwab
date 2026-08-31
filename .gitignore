@@ -11,7 +11,7 @@
 /doc/
 
 # Hex package artifacts
-dp_exchange_coinbase-*.tar
+dp_exchange_schwab-*.tar
 
 # Dialyzer PLTs
 priv/plts/
