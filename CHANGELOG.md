@@ -129,6 +129,33 @@ an acceptable changelog line.
   refuses**, including the ten-day lookback cap and the instruction matrix. It is also the
   only place in the family where the **closed-market path** can be exercised.
 
+### What this venue taught the contract
+
+Seven things `Core` could not express until this package needed them. All seven are now in
+`dp_exchange_core`, and this package uses every one:
+
+- **`preview_order/3` and `replace_order/4`** are facade callbacks, and this is the only
+  venue that implements either. `previewOrder` validates an order and estimates its cost
+  without placing it; `PUT .../orders/{id}` amends atomically and returns a **new** order
+  id, because Schwab treats a replacement as a new order.
+- **`supported_sessions`** — every documented order carries a `session`, and nothing in a
+  family of continuously-trading crypto venues had a slot for it.
+- **`catalog_access: :query_only`** — `/instruments` has no list-everything projection.
+  Core's conformance suite asserted "every venue can be pulled", which is true here and
+  only by search.
+- **`ceiling` `:scope` and a zero `:limit`** — the order ceiling is per *account*, set per
+  *application at registration*, and **zero is a legal registration**. A limiter keyed by
+  credential would silently over-permit; a zero collapsed into `nil` would read as "no
+  limit" rather than "none granted".
+- **Four order types** — `TRAILING_STOP`, `TRAILING_STOP_LIMIT`, `MARKET_ON_CLOSE`,
+  `LIMIT_ON_CLOSE`. This package declared four for a venue that serves eight.
+- **Eight instrument types** — this declared `[:spot]` with a comment saying that
+  understated the venue. It now names nine.
+- **`supports_multi_leg_orders`**, declared **false** even though the venue has `TRIGGER`,
+  `OCO` and net-priced spreads. `place_order/3` takes a flat request, and growing it a
+  `:legs` key would put venue vocabulary into consumer code. The field makes the boundary
+  visible instead of leaving it to be discovered.
+
 ### Notable in the declaration
 
 - **Eight candle widths** — `1m 5m 10m 15m 30m 1d 1w 1M`. A width is a

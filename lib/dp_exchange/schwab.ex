@@ -190,6 +190,44 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Validate an order **without placing it**.
+
+  The only endpoint in the family that checks an order against the venue's own rules
+  before committing, and it earns its keep here specifically: order writes are throttled
+  on this venue and reads are not, so a rejection found by previewing costs nothing while
+  one found by placing costs a scarce write.
+
+  Builds the same payload `place_order/3` would, so a preview that passes describes the
+  order that would actually be sent.
+  """
+  @impl true
+  def preview_order(credentials, request, opts \\ []) do
+    with {:ok, hash} <- account_hash(opts),
+         {:ok, payload} <- Orders.build(request, opts) do
+      Rest.preview_order(credentials, hash, payload, with_limiter(opts))
+    end
+  end
+
+  @doc """
+  Replace an open order **atomically**.
+
+  Schwab amends in one call. Every other venue in the family cancels and re-places, and
+  those are **not equivalent here**: cancel-then-place opens a window in which no order is
+  live, and it spends two throttled writes rather than one.
+
+  Returns the **new** order id. Schwab treats a replacement as a new order, so the old id
+  is dead afterwards and a caller still holding it would be tracking something that no
+  longer exists.
+  """
+  @impl true
+  def replace_order(credentials, order_id, request, opts \\ []) do
+    with {:ok, hash} <- account_hash(opts),
+         {:ok, payload} <- Orders.build(request, opts) do
+      Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts))
+    end
+  end
+
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
     with {:ok, hash} <- account_hash(opts) do

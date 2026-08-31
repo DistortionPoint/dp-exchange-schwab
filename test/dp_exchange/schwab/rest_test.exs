@@ -418,6 +418,77 @@ defmodule DpExchange.Schwab.RestTest do
     end
   end
 
+  describe "preview and atomic replace — the two the contract had no room for" do
+    test "a preview returns the venue's own validation and cost estimate" do
+      body = %{
+        "orderStrategy" => %{"orderType" => "MARKET"},
+        "orderValidationResult" => %{"rejects" => []},
+        "commissionAndFee" => %{"commission" => %{"commissionLegs" => []}}
+      }
+
+      assert {:ok, preview} =
+               Rest.preview_order(@creds, "ABCDEF", %{"orderType" => "MARKET"},
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert preview["orderValidationResult"] == %{"rejects" => []}
+    end
+
+    test "a rejected preview is a refusal carrying the venue's reason" do
+      # The whole point: learn this WITHOUT spending one of a small number of writes.
+      body = %{"message" => "Insufficient buying power"}
+
+      assert {:refused, {:venue_error, 400, "Insufficient buying power"}} =
+               Rest.preview_order(@creds, "ABCDEF", %{},
+                 plug: responding(body, 400),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a replacement returns a NEW order id, because it is a new order" do
+      # A caller still holding the old id would be tracking an order that no longer
+      # exists.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "/orders/2001")
+        |> Plug.Conn.resp(201, "")
+      end
+
+      assert {:ok, "2001"} =
+               Rest.replace_order(@creds, "ABCDEF", "1005", %{}, plug: plug, retry_attempts: 0)
+    end
+
+    test "a replacement the venue refuses is a refusal, not an error" do
+      assert {:refused, {:venue_error, 404}} =
+               Rest.replace_order(@creds, "ABCDEF", "1005", %{},
+                 plug: responding("", 404),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a 5xx on either is an error worth retrying" do
+      assert {:error, {:exchange_error, :schwab, _m}} =
+               Rest.preview_order(@creds, "H", %{}, plug: responding(%{}, 500), retry_attempts: 0)
+
+      assert {:error, {:exchange_error, :schwab, _m}} =
+               Rest.replace_order(@creds, "H", "1", %{},
+                 plug: responding(%{}, 500),
+                 retry_attempts: 0
+               )
+    end
+
+    test "neither is sent without credentials" do
+      exploding = fn _conn -> raise "an unauthenticated order call was sent" end
+
+      assert Rest.preview_order(%{}, "H", %{}, plug: exploding) ==
+               {:error, {:missing_credentials, :schwab}}
+
+      assert Rest.replace_order(%{}, "H", "1", %{}, plug: exploding) ==
+               {:error, {:missing_credentials, :schwab}}
+    end
+  end
+
   describe "base URLs" do
     test "two servers, both overridable" do
       assert Rest.market_data_url([]) == "https://api.schwabapi.com/marketdata/v1"

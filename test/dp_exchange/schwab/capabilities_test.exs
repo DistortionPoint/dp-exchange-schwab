@@ -73,8 +73,19 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
   end
 
   describe "the order vocabulary is mapped, not approximated" do
-    test "the four order types Core can name" do
-      assert Subject.declaration().supported_order_types == [:market, :limit, :stop, :stop_limit]
+    test "the eight order types this venue serves, now that Core can name them" do
+      # TRAILING_STOP, TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE were real
+      # order types with no Core atom; this list read as four and under-declared the venue.
+      assert Subject.declaration().supported_order_types == [
+               :market,
+               :limit,
+               :stop,
+               :stop_limit,
+               :trailing_stop,
+               :trailing_stop_limit,
+               :market_on_close,
+               :limit_on_close
+             ]
     end
 
     test ":ioc and :fok are time-in-force here, NOT order types" do
@@ -165,6 +176,47 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       # :unsupported.
       assert Subject.declaration().endpoints[{:get_symbols, 1}] == :experimental
       refute {:get_symbols, 1} in Subject.venue_does_not_serve()
+    end
+  end
+
+  describe "what this venue taught Core to say" do
+    test "preview and atomic replace are declared, because both are real here" do
+      caps = Subject.declaration()
+
+      assert caps.supports_order_preview
+      assert caps.supports_order_replace
+    end
+
+    test "multi-leg is NOT declared, because the contract cannot build one" do
+      # The venue has TRIGGER, OCO and net-priced spreads. `place_order/3` takes a flat
+      # request, so declaring this true would advertise a path the facade cannot reach.
+      refute Subject.declaration().supports_multi_leg_orders
+    end
+
+    test "sessions are declared, because this is the venue whose market closes" do
+      caps = Subject.declaration()
+
+      assert :pre_market in caps.supported_sessions
+      assert :post_market in caps.supported_sessions
+      assert length(caps.supported_sessions) > 1
+    end
+
+    test "catalog_access is :query_only, which is not the same as unsupported" do
+      caps = Subject.declaration()
+
+      assert caps.catalog_access == :query_only
+      assert caps.endpoints[{:get_symbols, 1}] == :experimental
+    end
+
+    test "instrument types name what the venue trades, not the nearest crypto word" do
+      # This read `[:spot]` with a comment saying it understated the venue. A declaration
+      # that needs a comment to be true is what the struct exists to prevent.
+      types = Subject.declaration().supported_instrument_types
+
+      assert :option in types
+      assert :future in types
+      assert :mutual_fund in types
+      assert length(types) > 1
     end
   end
 

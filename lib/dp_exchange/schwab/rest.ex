@@ -604,6 +604,87 @@ defmodule DpExchange.Schwab.Rest do
 
   defp header(_headers, _name), do: nil
 
+  @doc """
+  Validate an order **without placing it**, returning the venue's own estimate.
+
+  `POST /accounts/{hash}/previewOrder`. This is the only endpoint in the family that
+  checks an order against the venue's own rules before committing to it, and on this venue
+  it is worth more than elsewhere: **order writes are throttled and reads are not**, so a
+  rejection discovered by previewing costs nothing while one discovered by placing costs a
+  scarce write.
+
+  Returns the venue's response as-is. `Core` has no type for a preview — the fields are
+  `orderStrategy`, `orderValidationResult` and `commissionAndFee`, none of which map onto
+  anything the contract names — and inventing one would put a shape in `Core.Types` that
+  exactly one venue can fill.
+  """
+  @spec preview_order(map(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_order(credentials, account_hash, payload, opts) do
+    path = "/accounts/" <> URI.encode(account_hash) <> "/previewOrder"
+
+    post_json(credentials, trader_url(opts) <> path, payload, opts)
+  end
+
+  @doc """
+  Replace an open order **atomically**.
+
+  `PUT /accounts/{hash}/orders/{orderId}`. Every other venue in the family cancels and
+  re-places, and on this venue those two calls are **not equivalent**: cancel-then-place
+  opens a window in which no order is live, and on a moving market that window is the
+  risk. It also costs two throttled writes instead of one.
+
+  The new order's id comes back in `Location`, as it does for a placed order — Schwab
+  treats a replacement as a new order, so the old id is dead afterwards and a caller
+  holding it would be tracking an order that no longer exists.
+  """
+  @spec replace_order(map(), String.t(), String.t(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()} | {:refused, term()}
+  def replace_order(credentials, account_hash, order_id, payload, opts) do
+    path = "/accounts/" <> URI.encode(account_hash) <> "/orders/" <> URI.encode(order_id)
+
+    with {:ok, headers} <- Auth.headers(credentials, opts),
+         {:ok, body} <- Jason.encode(payload) do
+      headers = [{"Content-Type", "application/json"} | headers]
+      url = trader_url(opts) <> path
+
+      case HttpClient.request(:put, url, headers, body, request_opts(opts)) do
+        {:ok, %{status: status} = response} when status in 200..299 ->
+          order_id_from_location(response)
+
+        {:ok, %{status: status, body: response}} when status in [400, 401, 403, 404] ->
+          {:refused, refusal(status, response)}
+
+        {:ok, %{status: status, body: response}} ->
+          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp post_json(credentials, url, payload, opts) do
+    with {:ok, headers} <- Auth.headers(credentials, opts),
+         {:ok, body} <- Jason.encode(payload) do
+      headers = [{"Content-Type", "application/json"} | headers]
+
+      case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
+        {:ok, %{status: status, body: response}} when status in 200..299 ->
+          {:ok, decode(response)}
+
+        {:ok, %{status: status, body: response}} when status in [400, 401, 403, 404] ->
+          {:refused, refusal(status, response)}
+
+        {:ok, %{status: status, body: response}} ->
+          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
   @doc "Cancel an order."
   @spec cancel_order(map(), String.t(), String.t(), keyword()) ::
           :ok | {:error, term()} | {:refused, term()}

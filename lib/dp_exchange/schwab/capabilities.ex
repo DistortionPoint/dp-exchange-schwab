@@ -139,7 +139,24 @@ defmodule DpExchange.Schwab.Capabilities do
       # FIXED_INCOME and more; Core's vocabulary is `[:spot, :perp]`, which was written
       # for crypto. Recorded as a Core gap (7.5) rather than papered over — declaring
       # `:spot` and saying nothing would imply the venue trades only spot equities.
-      supported_instrument_types: [:spot],
+      # Now expressible. `assetType` admits eleven values; these are the ones this venue
+      # trades and quotes. Until Core learned them, this read `[:spot]` with a comment
+      # saying the declaration understated the venue — and a declaration that needs a
+      # comment to be true is exactly what the struct exists to prevent.
+      #
+      # `EQUITY` maps to `:spot`: a share bought outright is a spot instrument. The rest
+      # are their own thing and were being flattened into it.
+      supported_instrument_types: [
+        :spot,
+        :option,
+        :future,
+        :future_option,
+        :index,
+        :mutual_fund,
+        :bond,
+        :forex,
+        :cash_equivalent
+      ],
 
       # `instruction` admits SELL_SHORT, SELL_SHORT_EXEMPT and BUY_TO_COVER, and
       # `MarginBalance` carries `shortBalance` and `shortMarginValue`.
@@ -167,6 +184,34 @@ defmodule DpExchange.Schwab.Capabilities do
       # dollar-denominated order necessarily yields a fractional share count.
       supports_fractional_shares: true,
 
+      # **Both are real here, and both were Core gaps until this venue arrived.**
+      #
+      # `previewOrder` validates an order and returns estimated commission without
+      # placing it. It is worth more on this venue than it would be elsewhere: order
+      # writes are throttled and reads are not, so a rejection found by previewing costs
+      # nothing while one found by placing costs a scarce write.
+      #
+      # `PUT .../orders/{orderId}` amends atomically. Every other venue in the family
+      # cancels and re-places, and here those are **not equivalent** — cancel-then-place
+      # opens a window in which no order is live, and spends two throttled writes rather
+      # than one. So this is a claim about risk, not convenience.
+      supports_order_preview: true,
+      supports_order_replace: true,
+
+      # `orderStrategyType` admits TRIGGER and OCO, and a vertical spread carries two
+      # legs at one NET_DEBIT price. `place_order/3` takes a flat request, so this
+      # package cannot build them and says so rather than declaring a capability the
+      # facade cannot reach.
+      supports_multi_leg_orders: false,
+
+      # `session` is on every documented order, including the simplest market order.
+      # Nothing in the family needed this until a venue whose market closes arrived.
+      supported_sessions: [:pre_market, :regular, :post_market, :extended],
+
+      # `/instruments` has no list-everything projection — all six of its projections
+      # search against a term. `get_symbols/1` is active and requires `:query`.
+      catalog_access: :query_only,
+
       # Four of Core's seven map. The three that do not are named rather than
       # approximated:
       #
@@ -182,7 +227,20 @@ defmodule DpExchange.Schwab.Capabilities do
       # TRAILING_STOP, TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE are real
       # order types this venue supports that Core has no vocabulary for. The honest
       # declaration lists only what Core can name; the gap is recorded at 7.5.
-      supported_order_types: [:market, :limit, :stop, :stop_limit],
+      # Eight, now that Core has words for four of them. TRAILING_STOP,
+      # TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE are real order types this
+      # venue accepts, and until Core learned them this list read as four — under-declaring,
+      # which is the safe direction and still a lie about the venue.
+      supported_order_types: [
+        :market,
+        :limit,
+        :stop,
+        :stop_limit,
+        :trailing_stop,
+        :trailing_stop_limit,
+        :market_on_close,
+        :limit_on_close
+      ],
 
       # `duration`: DAY, GOOD_TILL_CANCEL, FILL_OR_KILL, IMMEDIATE_OR_CANCEL.
       #
@@ -224,26 +282,21 @@ defmodule DpExchange.Schwab.Capabilities do
       # ceiling to state, not an unlimited one.
       public_ceiling: nil,
 
-      # **Deliberately nil, and this one is a contract gap rather than an absence.**
+      # **Still nil, and now for a stated reason rather than for want of a way to say it.**
       #
       # Schwab's documented limit is `0..120` order writes per minute **per account**, set
-      # per application at registration. Three things follow, and each defeats a fixed
-      # value here:
+      # **per application at registration**. Reads are unthrottled.
       #
-      #   It is a property of *an application*, not of the venue. A number written here
-      #   would be a claim about somebody else's registration.
+      # Core can now express the two halves that were missing — `:scope` says a ceiling is
+      # counted per account rather than per credential, and `limit: 0` is legal, so a
+      # registration granted no order throughput is expressible and is distinguishable
+      # from `:unsupported`. What Core still cannot do, and should not, is invent the
+      # number: it is a property of *the consumer's own registration*, so any value here
+      # would be a claim about somebody else's.
       #
-      #   Zero is legal. An app can be registered with no order throughput at all, and a
-      #   ceiling of zero is not the same as `:unsupported` — the endpoint exists, it is
-      #   the app that cannot use it.
-      #
-      #   It is per *account*. Every other venue in this family limits by credential, and
-      #   `Core`'s ceiling type has `limit`, `per_ms` and `burst` with no per-account
-      #   dimension.
-      #
-      # Reads are documented as unthrottled for orders. Nothing in either document states
-      # a market-data limit and no 429 appears in either spec — that is an absence of
-      # evidence, recorded as unmeasured rather than as permission.
+      # So this stays `nil` — meaning "there is no venue constant" — and the host passes
+      # `:order_limit_per_minute` to the supervisor, which builds the ceiling with
+      # `scope: :account`. `Supervisor.limits/1` is where the shape now lives.
       authenticated_ceiling: nil,
       measured_at: ~D[2026-08-31],
       measured_against:

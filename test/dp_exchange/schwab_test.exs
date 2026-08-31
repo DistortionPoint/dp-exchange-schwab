@@ -339,6 +339,7 @@ defmodule DpExchange.SchwabTest do
       {:get_historical_prices, 4} -> ["AAPL", "1d", [], []]
       {:get_order_book, 2} -> ["AAPL", []]
       {:place_order, 3} -> [@creds, %{}, []]
+      {:replace_order, 4} -> [@creds, "id", %{}, []]
       {_name, 3} -> [@creds, "id", []]
       {_name, 2} -> [@creds, []]
       {_name, 1} -> [[]]

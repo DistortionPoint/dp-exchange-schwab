@@ -94,6 +94,47 @@ Schwab publishes which instructions each asset type accepts, and this package en
 `_TO_OPEN`/`_TO_CLOSE` forms are option-only. Order writes are throttled and reads are not,
 so a locally-catchable rejection is worth catching.
 
+## 7a. Preview before you place, and replace rather than cancel
+
+Two things this venue can do that no other in the family can. Both are declared —
+`supports_order_preview` and `supports_order_replace` — so you can branch on capability
+rather than on venue name.
+
+```elixir
+{:ok, preview} = DpExchange.Schwab.preview_order(credentials, request, account_hash: hash)
+```
+
+**Preview is close to free and placing is not.** Order writes are throttled here to
+somewhere between 0 and 120 a minute per account; reads are unthrottled. A rejection found
+by previewing costs nothing. One found by placing costs a scarce write.
+
+```elixir
+{:ok, new_id} = DpExchange.Schwab.replace_order(credentials, old_id, request, account_hash: hash)
+```
+
+**`replace_order/4` returns a NEW id.** Schwab treats a replacement as a new order, so the
+id you passed in is dead afterwards — keep the one you get back, or you will be tracking an
+order that no longer exists.
+
+Use it instead of cancel-then-place wherever you can. The two are **not equivalent**:
+cancel-then-place leaves a window with no order live, and spends two throttled writes
+rather than one.
+
+## 7b. Sessions, and the order types Core learned here
+
+Every order carries a `session` — `NORMAL` unless you say otherwise. Pass `:session` in
+the request or `session:` in options. `supported_sessions` lists what the venue takes;
+this is the only venue in the family where the field is non-empty, because it is the only
+one whose market closes.
+
+Eight order types, not four: `:market`, `:limit`, `:stop`, `:stop_limit`,
+`:trailing_stop`, `:trailing_stop_limit`, `:market_on_close`, `:limit_on_close`.
+
+A trailing stop **requires `:stop_price_offset`** and is refused locally without one — the
+offset is the order. `:stop_price_link_basis` (`"BID"`) and `:stop_price_link_type`
+(`"VALUE"`, `"PERCENT"`, `"TICK"`) ride along under the venue's own names, because `Core`
+names none of the three.
+
 ## 8. The market closes, and silence is usually correct
 
 Call `market_status/1` before concluding a quiet feed is broken. This is the only venue in

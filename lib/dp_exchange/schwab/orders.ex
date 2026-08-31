@@ -44,8 +44,21 @@ defmodule DpExchange.Schwab.Orders do
     market: "MARKET",
     limit: "LIMIT",
     stop: "STOP",
-    stop_limit: "STOP_LIMIT"
+    stop_limit: "STOP_LIMIT",
+    trailing_stop: "TRAILING_STOP",
+    trailing_stop_limit: "TRAILING_STOP_LIMIT",
+    market_on_close: "MARKET_ON_CLOSE",
+    limit_on_close: "LIMIT_ON_CLOSE"
   }
+
+  # A trailing stop is not a price, it is an *offset from a moving reference*, and Schwab
+  # needs all three parts: what to trail (`stopPriceLinkBasis`), whether the offset is a
+  # value, a percent or ticks (`stopPriceLinkType`), and the offset itself
+  # (`stopPriceOffset`). Nothing in `Core`'s request vocabulary names them, so they are
+  # taken from the request under their venue names and **required** — a trailing stop
+  # missing its offset is not a trailing stop, and the venue would reject it after
+  # spending one of a small number of writes per minute.
+  @trailing_types ["TRAILING_STOP", "TRAILING_STOP_LIMIT"]
 
   # `duration` is Schwab's name for time-in-force. `:gtd` is deliberately absent: Schwab
   # offers END_OF_WEEK, END_OF_MONTH and NEXT_END_OF_MONTH, which are three fixed
@@ -106,7 +119,10 @@ defmodule DpExchange.Schwab.Orders do
          ]
        }
        |> maybe_put("price", request[:price])
-       |> maybe_put("stopPrice", request[:stop_price])}
+       |> maybe_put("stopPrice", request[:stop_price])
+       |> maybe_put("stopPriceOffset", request[:stop_price_offset])
+       |> maybe_put("stopPriceLinkBasis", request[:stop_price_link_basis])
+       |> maybe_put("stopPriceLinkType", request[:stop_price_link_type])}
     end
   end
 
@@ -185,6 +201,11 @@ defmodule DpExchange.Schwab.Orders do
   # A limit order without a price and a stop order without a stop price are both
   # rejected by the venue. Refusing here costs nothing; letting them through costs one
   # of a small number of writes per minute.
+  defp check_prices(type, request) when type in @trailing_types,
+    do: require_fields(request, [:stop_price_offset])
+
+  defp check_prices("LIMIT_ON_CLOSE", request), do: require_fields(request, [:price])
+
   defp check_prices("LIMIT", request), do: require_fields(request, [:price])
   defp check_prices("STOP", request), do: require_fields(request, [:stop_price])
   defp check_prices("STOP_LIMIT", request), do: require_fields(request, [:stop_price, :price])

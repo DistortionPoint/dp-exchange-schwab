@@ -470,6 +470,47 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Schwab.place_order(@creds, request, [account_hash: "H"] ++ opts(plug))
     end
 
+    test "preview and replace route through Orders, so both refuse an invalid order" do
+      exploding = fn _conn -> raise "an order the venue publishes as invalid was sent" end
+      bad = %{symbol: "AAPL", instruction: "BUY_TO_OPEN", quantity: 1}
+
+      assert {:error, {:instruction_not_valid_for_asset, "BUY_TO_OPEN", "EQUITY"}} =
+               Schwab.preview_order(@creds, bad, account_hash: "H", plug: exploding)
+
+      assert {:error, {:instruction_not_valid_for_asset, "BUY_TO_OPEN", "EQUITY"}} =
+               Schwab.replace_order(@creds, "1", bad, account_hash: "H", plug: exploding)
+    end
+
+    test "both require an account hash, like every other account-scoped call" do
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+
+      assert Schwab.preview_order(@creds, request) ==
+               {:error, {:missing_account_hash, :schwab}}
+
+      assert Schwab.replace_order(@creds, "1", request) ==
+               {:error, {:missing_account_hash, :schwab}}
+    end
+
+    test "both reach Rest when the request is good" do
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      base = [account_hash: "H"]
+
+      assert {:ok, %{"orderValidationResult" => _r}} =
+               Schwab.preview_order(
+                 @creds,
+                 request,
+                 base ++ opts(responding(%{"orderValidationResult" => %{}}))
+               )
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "/orders/9")
+        |> Plug.Conn.resp(201, "")
+      end
+
+      assert {:ok, "9"} = Schwab.replace_order(@creds, "1", request, base ++ opts(plug))
+    end
+
     test "an invalid order never reaches the venue" do
       exploding = fn _conn -> raise "an order the venue publishes as invalid was sent" end
 

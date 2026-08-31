@@ -232,6 +232,34 @@ defmodule DpExchange.Schwab.Fake do
     end
   end
 
+  # Both are real on this venue, so the fake answers rather than refusing — and it builds
+  # through `Orders` for the same reason `place_order/3` does: an order the venue
+  # publishes as invalid must be refused here too.
+  @impl true
+  def preview_order(credentials, request, opts \\ []) do
+    with :ok <- require_credentials(credentials: credentials),
+         {:ok, _hash} <- require_account(opts),
+         {:ok, _payload} <- Orders.build(request, opts) do
+      {:ok,
+       %{
+         "orderStrategy" => %{"orderType" => "MARKET"},
+         "orderValidationResult" => %{"rejects" => []},
+         "commissionAndFee" => %{"commission" => %{}}
+       }}
+    end
+  end
+
+  @impl true
+  def replace_order(credentials, _order_id, request, opts \\ []) do
+    with :ok <- require_credentials(credentials: credentials),
+         {:ok, _hash} <- require_account(opts),
+         {:ok, _payload} <- Orders.build(request, opts) do
+      # A replacement is a NEW order on this venue, so the id differs from the one
+      # replaced. A fake returning the old id would hide that from a consumer's test.
+      {:ok, "fake-order-2"}
+    end
+  end
+
   @impl true
   def cancel_order(credentials, _order_id, opts \\ []) do
     with :ok <- require_credentials(credentials: credentials),

@@ -68,7 +68,20 @@ defmodule DpExchange.Schwab.Supervisor do
     %{
       default: %{limit: reads, per_ms: 60_000, burst: reads},
       schwab: %{limit: reads, per_ms: 60_000, burst: reads},
-      schwab_orders: %{limit: max(orders, 1), per_ms: 60_000, burst: max(orders, 1)}
+      # `scope: :account` because that is what Schwab counts against, and a limiter keyed
+      # by credential would silently over-permit a host running several accounts through
+      # one registration.
+      #
+      # `max(orders, 1)` is not a floor on the DECLARATION — zero is legal there and means
+      # a registration granted no order throughput. It is a floor on the GCRA arithmetic,
+      # which divides by the rate. A host registered at zero should not be placing orders
+      # at all, and `capabilities/0` is where that is said.
+      schwab_orders: %{
+        limit: max(orders, 1),
+        per_ms: 60_000,
+        burst: max(orders, 1),
+        scope: :account
+      }
     }
   end
 

@@ -143,13 +143,54 @@ defmodule DpExchange.Schwab.OrdersTest do
   end
 
   describe "vocabulary outside the venue is named, not mapped to something near" do
-    test "an order type Core admits but this venue has no atom for is refused" do
+    test "an order type Core admits but this venue does not serve is refused" do
       # `:post_only` has no Schwab equivalent; NON_MARKETABLE is close and is not the
       # same thing. `:ioc` and `:fok` are durations here, not order types.
-      for type <- [:post_only, :ioc, :fok, :trailing_stop] do
+      for type <- [:post_only, :ioc, :fok] do
         assert {:error, {:unsupported_order_type, ^type}} =
                  Orders.build(Map.put(@buy, :order_type, type))
       end
+    end
+
+    test "the four equity order types Core learned from this venue now build" do
+      # Until Core had atoms for these, the declaration listed four types and the venue
+      # served eight. Under-declaring is the safe direction and was still a lie.
+      assert {:ok, %{"orderType" => "MARKET_ON_CLOSE"}} =
+               Orders.build(Map.put(@buy, :order_type, :market_on_close))
+
+      assert {:ok, %{"orderType" => "LIMIT_ON_CLOSE"}} =
+               Orders.build(Map.merge(@buy, %{order_type: :limit_on_close, price: 1}))
+
+      trailing = Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: 10})
+
+      assert {:ok, %{"orderType" => "TRAILING_STOP", "stopPriceOffset" => "10"}} =
+               Orders.build(trailing)
+    end
+
+    test "a trailing stop without an offset is refused — that is not a trailing stop" do
+      # The offset IS the order. Sending one without it spends a throttled write to be
+      # told something knowable locally.
+      assert Orders.build(Map.put(@buy, :order_type, :trailing_stop)) ==
+               {:error, {:missing_order_field, :stop_price_offset}}
+
+      assert Orders.build(Map.put(@buy, :order_type, :trailing_stop_limit)) ==
+               {:error, {:missing_order_field, :stop_price_offset}}
+    end
+
+    test "the trailing reference and offset type ride along when given" do
+      # Core names none of these three, so they are taken under the venue's own names —
+      # a documented seam rather than an invented mapping.
+      request =
+        Map.merge(@buy, %{
+          order_type: :trailing_stop,
+          stop_price_offset: 10,
+          stop_price_link_basis: "BID",
+          stop_price_link_type: "VALUE"
+        })
+
+      assert {:ok, payload} = Orders.build(request)
+      assert payload["stopPriceLinkBasis"] == "BID"
+      assert payload["stopPriceLinkType"] == "VALUE"
     end
 
     test ":gtd is refused because three fixed horizons are not an arbitrary date" do
