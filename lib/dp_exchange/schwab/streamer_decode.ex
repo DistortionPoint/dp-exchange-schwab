@@ -26,7 +26,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
   difference between "quoted at 14:53:02" and "seen at 14:53:02".
   """
 
-  alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
 
   @doc """
   A `Quote` from a `LEVELONE_*` frame.
@@ -106,6 +106,64 @@ defmodule DpExchange.Schwab.StreamerDecode do
        }}
     end
   end
+
+  @doc """
+  An `OrderBook` from a `NYSE_BOOK`, `NASDAQ_BOOK` or `OPTIONS_BOOK` frame.
+
+  **These frames carry the venue's own timestamp**, unlike the `LEVELONE_*` services — field
+  1 is "Market Snapshot Time, milliseconds since Epoch". A book without it is refused: a
+  depth snapshot wearing the arrival time cannot be told from a current one, and a stale
+  book read as current is the most expensive wrong number this venue produces.
+
+  ## Each level is an array, and the size that survives is the aggregate
+
+  A level is `[price, aggregate_size, market_maker_count, market_makers]`, and each market
+  maker beneath it carries its own id, size and quote time. `Core.Types.OrderBook` levels
+  are `{price, size}`, so **the per-maker attribution is dropped** — a real loss on a lit
+  book, and one worth naming rather than leaving silent.
+
+  The size kept is the venue's **aggregate** for the level, not a sum over the makers: those
+  are different numbers when attribution is partial, and the aggregate is the one the venue
+  stands behind.
+  """
+  @spec to_order_book(map(), String.t()) :: {:ok, OrderBook.t()} | {:error, term()}
+  def to_order_book(fields, symbol) do
+    with {:ok, timestamp} <- snapshot_time(Map.get(fields, :snapshot_time)) do
+      {:ok,
+       %OrderBook{
+         symbol: symbol,
+         bids: levels(Map.get(fields, :bids)),
+         asks: levels(Map.get(fields, :asks)),
+         timestamp: timestamp,
+         # The Streamer publishes no sequence on a book frame. `nil` means the venue did
+         # not say, so a caller cannot use this to detect a dropped update.
+         sequence: nil,
+         provider: :schwab
+       }}
+    end
+  end
+
+  defp snapshot_time(ms) when is_integer(ms), do: {:ok, DateTime.from_unix!(ms, :millisecond)}
+  defp snapshot_time(_absent), do: {:error, :missing_venue_timestamp}
+
+  # A level is `[price, aggregate_size, …]`. A level without a price is not a level, and
+  # keeping it would put `{nil, size}` into a book a caller folds over.
+  defp levels(rows) when is_list(rows) do
+    for row <- rows,
+        price = level_at(row, 0),
+        not is_nil(price),
+        do: {price, level_at(row, 1)}
+  end
+
+  defp levels(_absent), do: []
+
+  defp level_at(row, index) when is_list(row), do: row |> Enum.at(index) |> decimal()
+
+  # The venue also documents an object form for a level in some renderings; read both rather
+  # than assuming the array.
+  defp level_at(%{} = row, 0), do: decimal(row["price"] || row["0"])
+  defp level_at(%{} = row, 1), do: decimal(row["aggregateSize"] || row["1"])
+  defp level_at(_row, _index), do: nil
 
   defp chart_time(ms) when is_integer(ms), do: {:ok, DateTime.from_unix!(ms, :millisecond)}
 

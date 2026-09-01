@@ -293,7 +293,10 @@ defmodule DpExchange.Schwab.StreamerTest do
     end
 
     test "a service with no map is an error, never another service's numbering" do
-      assert {:error, {:no_field_map, "NYSE_BOOK"}} = StreamerFields.for_service("NYSE_BOOK")
+      # SCREENER_EQUITY has no map yet — its field table is not transcribed. The point is
+      # that an untranscribed service errors rather than borrowing another's numbering.
+      assert {:error, {:no_field_map, "SCREENER_EQUITY"}} =
+               StreamerFields.for_service("SCREENER_EQUITY")
     end
 
     test "renaming drops numbers it has no name for" do
@@ -413,6 +416,84 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert Decimal.equal?(candle.high, Decimal.new("11.0"))
       assert Decimal.equal?(candle.low, Decimal.new("9.5"))
       assert Decimal.equal?(candle.close, Decimal.new("10.5"))
+    end
+  end
+
+  describe "the three book services" do
+    test "all three share one field table, which is the vendor's own arrangement" do
+      # The only place in the Streamer where a shared map is correct: the vendor documents
+      # "Book Fields for Streamer" once and names the three services against it.
+      {:ok, nyse} = StreamerFields.for_service("NYSE_BOOK")
+      {:ok, nasdaq} = StreamerFields.for_service("NASDAQ_BOOK")
+      {:ok, options} = StreamerFields.for_service("OPTIONS_BOOK")
+
+      assert nyse == nasdaq
+      assert nasdaq == options
+      assert nyse["1"] == :snapshot_time
+    end
+
+    test "a book carries the VENUE's timestamp, unlike a LEVELONE frame" do
+      fields = %{
+        snapshot_time: 1_787_936_147_000,
+        bids: [[10.50, 300, 2, []], [10.49, 100, 1, []]],
+        asks: [[10.60, 200, 1, []]]
+      }
+
+      assert {:ok, %Types.OrderBook{} = book} = StreamerDecode.to_order_book(fields, "AAPL")
+
+      assert book.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert book.symbol == "AAPL"
+      assert book.provider == :schwab
+    end
+
+    test "the aggregate size survives, not a sum over the market makers" do
+      # Those are different numbers when attribution is partial, and the aggregate is the
+      # one the venue stands behind.
+      fields = %{
+        snapshot_time: 1_787_936_147_000,
+        bids: [[10.50, 300, 2, [["NSDQ", 100, 1], ["ARCA", 50, 1]]]],
+        asks: []
+      }
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert [{price, size}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("10.50"))
+      assert Decimal.equal?(size, Decimal.new("300"))
+      refute Decimal.equal?(size, Decimal.new("150"))
+    end
+
+    test "a book with no snapshot time is REFUSED, not stamped on arrival" do
+      assert {:error, :missing_venue_timestamp} =
+               StreamerDecode.to_order_book(%{bids: [], asks: []}, "AAPL")
+    end
+
+    test "levels keep the venue's ordering" do
+      fields = %{
+        snapshot_time: 1_787_936_147_000,
+        bids: [[10.49, 100, 1, []], [10.50, 300, 1, []]],
+        asks: []
+      }
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert [{first, _size1}, {second, _size2}] = book.bids
+      assert Decimal.equal?(first, Decimal.new("10.49"))
+      assert Decimal.equal?(second, Decimal.new("10.50"))
+    end
+
+    test "a level with no price is dropped rather than carried as nil" do
+      fields = %{snapshot_time: 1_787_936_147_000, bids: [[nil, 100, 1, []]], asks: []}
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert book.bids == []
+    end
+
+    test "an empty side is an empty list and the sequence is nil" do
+      fields = %{snapshot_time: 1_787_936_147_000, bids: [[10.50, 1, 1, []]], asks: []}
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert book.asks == []
+      # No sequence on a book frame, so a caller cannot use it to detect a dropped update.
+      assert book.sequence == nil
     end
   end
 end

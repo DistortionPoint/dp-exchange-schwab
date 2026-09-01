@@ -33,6 +33,25 @@ an acceptable changelog line.
 
 ### Added
 
+- **The three book services — `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` — with an
+  `OrderBook` decoder.** These are the depth services this package declared `:unsupported`
+  while saying the venue had no streaming API at all.
+
+  **All three share one field table**, which the vendor documents once and names the three
+  against — the only place in the Streamer where a shared map is correct, and the contrast
+  with the `LEVELONE_*` services is the reason the others are separate.
+
+  **A book frame carries the venue's own timestamp** at field 1, unlike the `LEVELONE_*`
+  frames. A book without it is refused rather than stamped on arrival: a depth snapshot
+  wearing the client's clock cannot be told from a current one.
+
+  Each level is `[price, aggregate_size, market_maker_count, market_makers]`. The size kept
+  is the venue's **aggregate**, not a sum over the makers — those differ when attribution is
+  partial. The per-maker ids, sizes and quote times are **dropped**, which is a real loss on
+  a lit book and is named here rather than left silent. `sequence` is `nil`: the Streamer
+  publishes none on a book frame, so a caller cannot use one to detect a dropped update.
+
+
 - **Field maps for the four `LEVELONE_*` services, and they disagree with each other more
   than expected.** Transcribed from the vendor's numbered tables, 2026-09-01:
 

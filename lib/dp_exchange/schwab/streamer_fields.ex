@@ -110,6 +110,25 @@ defmodule DpExchange.Schwab.StreamerFields do
     "7" => :last_size
   }
 
+  # NYSE_BOOK, NASDAQ_BOOK and OPTIONS_BOOK. **All three share one field table** — the
+  # vendor documents "Book Fields for Streamer" once and names the three services against
+  # it — which makes this the only place in the Streamer where a shared map is correct.
+  #
+  # Unlike the LEVELONE services, a book frame **carries the venue's own timestamp** at
+  # field 1: "Market Snapshot Time, milliseconds since Epoch". A book decoded without it
+  # would wear the arrival time, and a stale depth snapshot read as current is the most
+  # expensive wrong number this venue can produce.
+  #
+  # Fields 2 and 3 are arrays of price levels, each level itself
+  # `[price, aggregate_size, market_maker_count, market_makers]` — nested two deep, which
+  # `StreamerDecode.to_order_book/2` unpacks.
+  @book %{
+    "0" => :symbol,
+    "1" => :snapshot_time,
+    "2" => :bids,
+    "3" => :asks
+  }
+
   # CHART_EQUITY. Note field 1 is the OPEN here and the BID in LEVELONE_EQUITIES — the
   # reason this module exists.
   @chart_equity %{
@@ -134,6 +153,9 @@ defmodule DpExchange.Schwab.StreamerFields do
     # The vendor documents futures options with the futures numbering.
     "LEVELONE_FUTURES_OPTIONS" => @level_one_futures,
     "LEVELONE_FOREX" => @level_one_forex,
+    "NYSE_BOOK" => @book,
+    "NASDAQ_BOOK" => @book,
+    "OPTIONS_BOOK" => @book,
     "CHART_EQUITY" => @chart_equity,
     "CHART_FUTURES" => @chart_equity
   }
