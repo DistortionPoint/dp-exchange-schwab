@@ -31,6 +31,43 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`streamable` now names what the Streamer carries** — quotes, top of book, **depth** and
+  candles, plus order and fill events with a credential. It said `[:quotes]` while this
+  package could not speak the socket; it can, so it does not any more.
+
+  **`:trades` stays out, and that is a distinction rather than an omission.** No Streamer
+  service publishes a tape: `LEVELONE_*` carries a *last* price, which is one print restated
+  on every update rather than the sequence of them. Declaring it would promise a consumer
+  something it would have to reconstruct from a field that skips prints. `:balances` and
+  `:positions` stay out for the same kind of reason — `ACCT_ACTIVITY` reports activity, not
+  state.
+
+  Both streaming lists are **identical**, and that says something rather than being an
+  oversight: there is no public market data on this venue and no anonymous socket.
+
+- **Every negative this package makes is audited** —
+  `docs/reference/schwab/negative-claims.md`, fourteen claims with the source and date
+  consulted for each. Thirteen hold. The one that did not is the one this package is known
+  for: *"Schwab has no streaming API"* was made from the OpenAPI documents alone, and the
+  Streamer is not REST and is therefore absent from them by construction.
+
+  The lesson is written down so it is not re-learned: **check every page a vendor publishes,
+  not the endpoint list alone.**
+
+- **`usage-rules.md` gains the Streamer, options, and transactions**, and its
+  "what this package does not implement" section is now backed by that audit rather than by
+  assertion. It records the per-service field numbering — field 1 is `bid` on equities and
+  `description` on options; fields 6 and 7 are swapped between equities and futures — and
+  that `SUBS` replaces where `ADD` accumulates.
+
+- **`AGENTS.md` is a pointer, not a second copy.** This package carried a byte-identical
+  duplicate of its own `usage-rules.md` while the other five carried the generated
+  `usage_rules` file. A duplicate drifts, and a reader who finds two documents cannot tell
+  which is current. All six now carry the generated file plus a pointer to the package's own
+  rules.
+
 ### Changed
 
 - **Core dependency moves to `~> 0.1.36`**, and `place_orders/3` is declared **absent with

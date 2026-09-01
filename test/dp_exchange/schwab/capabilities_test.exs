@@ -234,11 +234,33 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       assert Subject.declaration().authenticated_ceiling == nil
     end
 
-    test "quotes stream, and volume is real" do
+    test "the Streamer's six kinds are declared, and a tape is not among them" do
       caps = Subject.declaration()
 
-      assert caps.streamable == [:quotes]
+      # This asserted `[:quotes]` until 2026-09-01, when the package started speaking the
+      # Streamer. Depth, candles, order events and fill events all arrive on it.
+      assert caps.streamable ==
+               [:quotes, :top_of_book, :order_book, :candles, :orders, :fills]
+
+      # `:trades` is the one to keep out. `LEVELONE_*` carries a *last* price — one print
+      # restated on every update, not the sequence of them — so declaring a tape would
+      # promise a consumer something it would have to reconstruct from a field that skips
+      # prints.
+      refute :trades in caps.streamable
+
+      # `ACCT_ACTIVITY` reports activity, not state.
+      refute :balances in caps.streamable
+      refute :positions in caps.streamable
+
       assert caps.reports_trade_volume
+    end
+
+    test "both streaming lists are identical, because everything here needs a credential" do
+      # There is no public market data on this venue and no anonymous socket: the
+      # Streamer's login is built from `/userPreference`, which is itself authenticated.
+      caps = Subject.declaration()
+
+      assert caps.authenticated_streamable == caps.streamable
     end
 
     test "the catalogue is vast and cannot be enumerated" do

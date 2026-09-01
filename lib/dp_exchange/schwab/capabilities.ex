@@ -32,13 +32,22 @@ defmodule DpExchange.Schwab.Capabilities do
   `:unsupported`, and the difference is the point: "needs a search term" and "has no
   endpoint" are different facts, and a caller has to be able to act on each.
 
-  **No order book and no socket *here*; the venue has both.** No endpoint in either
-  OpenAPI document returns depth, and neither describes a streaming surface — both true,
-  and both statements about the documents rather than the venue. Schwab's WebSocket
-  **Streamer** carries `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is documented in
-  the prose beside those specifications. `get_order_book/2` stays `:unsupported` because
-  this package does not speak the Streamer yet, and `streamable` stays `[:quotes]` for the
-  same reason. Both change when it does.
+  **The order book and the socket are both here now.** Neither OpenAPI document returns
+  depth and neither describes a streaming surface — both still true, and both statements
+  about *the documents* rather than the venue. Schwab's WebSocket **Streamer** carries
+  fifteen services including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is
+  documented in the prose beside those specifications. This package speaks it as of
+  2026-09-01, so `streamable` names quotes, top of book, depth and candles, and
+  `authenticated_streamable` adds the order and fill events `ACCT_ACTIVITY` carries.
+
+  **`get_order_book/2` stays `:unsupported` and that is now a narrower claim**: there is no
+  *REST* order book, and the contract's callback is a request-response read. Depth arrives
+  through the feed, which is a different shape and a different callback.
+
+  **`:trades` is not in either list.** No Streamer service publishes a tape: `LEVELONE_*`
+  carries a *last* price, which is one print restated on every update rather than the
+  sequence of them. Declaring it would promise a consumer a tape it would have to
+  reconstruct from a field that skips prints.
 
   **The market closes.** `/markets` answers `isOpen` directly. This is the venue
   `market_status/1` was added to the contract for — a feed that alarms on silence would
@@ -345,8 +354,25 @@ defmodule DpExchange.Schwab.Capabilities do
       # Quotes, and they arrive by poll. What a consumer receives is identical to a
       # streaming venue's; `coverage/1` reports `:internal_poll`, so the difference is
       # visible as what is arriving rather than as how it got here.
-      streamable: [:quotes],
-      authenticated_streamable: [:quotes],
+      # **What the Streamer actually carries, now that this package speaks it.**
+      #
+      # `LEVELONE_*` gives quotes and top of book, `CHART_*` gives candles, `NYSE_BOOK`,
+      # `NASDAQ_BOOK` and `OPTIONS_BOOK` give depth, and `ACCT_ACTIVITY` gives order and
+      # fill events.
+      #
+      # **`:trades` is absent, and that is a real distinction rather than an omission.** No
+      # Streamer service publishes a tape: `LEVELONE_*` carries a *last* price, which is one
+      # print restated on every update and not the sequence of them. Declaring `:trades`
+      # would promise a consumer a tape it would then have to reconstruct from a field that
+      # skips prints. `:balances` and `:positions` are absent for the same kind of reason —
+      # `ACCT_ACTIVITY` reports activity, not state.
+      streamable: [:quotes, :top_of_book, :order_book, :candles, :orders, :fills],
+
+      # **Identical, because this venue requires a credential for everything.** There is no
+      # public market data here and no anonymous socket: the Streamer's login is built from
+      # `/userPreference`, which is itself authenticated. The two lists being the same is
+      # the declaration saying so rather than an oversight.
+      authenticated_streamable: [:quotes, :top_of_book, :order_book, :candles, :orders, :fills],
       historical_timeframes: timeframes(),
 
       # Not a fixed number. The cap is a *period*, not a bar count, and it differs per

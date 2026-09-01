@@ -1,173 +1,149 @@
-# Using `dp_exchange_schwab`
+<!-- usage-rules-start -->
+<!-- usage_rules-start -->
+## usage_rules usage
+_A config-driven dev tool for Elixir projects to manage AGENTS.md files and agent skills from dependencies_
 
-Rules for an agent or developer writing code against this package. Read this before the
-README; it is what the Hex tarball ships for consumers.
+## Using Usage Rules
 
-## 1. This package is EXPERIMENTAL and cannot be proven here
+Many packages have usage rules, which you should *thoroughly* consult before taking any
+action. These usage rules contain guidelines and rules *directly from the package authors*.
+They are your best source of knowledge for making decisions.
 
-Nothing in it has run against the live API. Every endpoint needs OAuth credentials this
-repository must never hold, and **Schwab publishes no sandbox** — its documentation promises
-Trader API sandboxes "later this year" and neither specification declares a non-production
-server. There is nowhere to exercise this that is not real money.
+## Modules & functions in the current app and dependencies
 
-Check `DpExchange.Schwab.capabilities().endpoints` before calling anything. Maturity is per
-endpoint.
+When looking for docs for modules & functions that are dependencies of the current project,
+or for Elixir itself, use `mix usage_rules.docs`
 
-## 2. Credentials are arguments, never configuration
+```
+# Search a whole module
+mix usage_rules.docs Enum
 
-Pass them per call. This package never reads a vault, never caches a token, and never logs
-one.
+# Search a specific function
+mix usage_rules.docs Enum.zip
 
-```elixir
-credentials = %{access_token: "…", refresh_token: "…", client_id: "…", client_secret: "…"}
+# Search a specific function & arity
+mix usage_rules.docs Enum.zip/1
 ```
 
-`:access_token` alone is enough to sign. The rest are needed to refresh.
 
-**There is no anonymous surface — market data included.** A call without a token is refused
-locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent.
+## Searching Documentation
 
-## 3. Refresh, and persist what you get back
+You should also consult the documentation of any tools you are using, early and often. The best 
+way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
+found what you are looking for, use the links in the search results to get more detail. For example:
 
-The access token lives **30 minutes**. `DpExchange.Schwab.Auth.refresh/2` renews it.
+```
+# Search docs for all packages in the current application, including Elixir
+mix usage_rules.search_docs Enum.zip
 
-**The refresh token is one-time use.** Every refresh spends the old one and returns a new one
-carrying a fresh seven days. So:
+# Search docs for specific packages
+mix usage_rules.search_docs Req.get -p req
 
-- **Persist the returned credential before using it.** Refreshing and then crashing before
-  storing costs the grant, and only a person at a browser can restore it.
-- **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
-  token may already have been spent; try again with the credential you still hold, not the
-  one you just sent.
-- `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. Seven days
-  elapsed with no refresh, or the user reset their password. Send a person to the login
-  page; do not retry.
+# Search docs for multi-word queries
+mix usage_rules.search_docs "making requests" -p req
 
-Refreshing at least once a week means never needing a person again.
-
-## 4. A symbol is one instrument, not a pair
-
-`"AAPL"`, not `"AAPL-USD"`. Pair-shaped input is refused, and this matters more than it
-looks: `BTC`, `ETH` and `SOL` are real listed equity tickers, so a crypto pair routed here
-by mistake has a plausible wrong answer available.
-
-Option symbols are fixed-width and positional — `"XYZ   240315C00500000"`. The padding is
-part of the format; do not trim it.
-
-## 5. Candles: eight widths, and a hard lookback cap
-
-`1m 5m 10m 15m 30m 1d 1w 1M`.
-
-**Minute widths reach at most ten days back.** A longer range returns
-`{:error, {:lookback_exceeds_venue, timeframe, requested_days, max_days}}`. It is not
-truncated and not downgraded to a coarser width — handle the error; do not assume a series.
-
-An unsupported width returns `{:error, {:unsupported_timeframe, width}}`.
-
-## 6. Account calls need a hash, not an account number
-
-`get_accounts/2` returns `%{account_number: …, hash: …}`. **Every other account path takes
-the hash**, passed as `:account_hash`. Nothing is defaulted — placing an order against a
-silently-chosen account is not something this package will do for you.
-
-```elixir
-{:ok, [account]} = DpExchange.Schwab.get_accounts(credentials)
-DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
+# Search only in titles (useful for finding specific functions/modules)
+mix usage_rules.search_docs "Enum.zip" --query-by title
 ```
 
-## 7. Orders: only what Core can name
 
-Order types: `:market`, `:limit`, `:stop`, `:stop_limit`. Time in force: `:day`, `:gtc`,
-`:fok`, `:ioc`.
+<!-- usage_rules-end -->
+<!-- usage_rules:elixir-start -->
+## usage_rules:elixir usage
+# Elixir Core Usage Rules
 
-- **`:ioc` and `:fok` are time-in-force here, not order types.** Schwab spells them as
-  `duration`.
-- **`:post_only` and `:gtd` do not exist on this venue** and are refused rather than mapped
-  to something near. Schwab's dated expiries are three fixed horizons, not an arbitrary date.
-- The venue supports `TRAILING_STOP`, `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, which `Core`
-  has no vocabulary for. They are not reachable through this facade.
-- Multi-leg spreads and `OCO`/`TRIGGER` orders are not reachable either — `place_order/3`
-  takes a flat request.
+## Pattern Matching
+- Use pattern matching over conditional logic when possible
+- Prefer to match on function heads instead of using `if`/`else` or `case` in function bodies
+- `%{}` matches ANY map, not just empty maps. Use `map_size(map) == 0` guard to check for truly empty maps
 
-Schwab publishes which instructions each asset type accepts, and this package enforces it
-**before sending**: `BUY`/`SELL`/`SELL_SHORT`/`BUY_TO_COVER` are equity-only, and the
-`_TO_OPEN`/`_TO_CLOSE` forms are option-only. Order writes are throttled and reads are not,
-so a locally-catchable rejection is worth catching.
+## Error Handling
+- Use `{:ok, result}` and `{:error, reason}` tuples for operations that can fail
+- Avoid raising exceptions for control flow
+- Use `with` for chaining operations that return `{:ok, _}` or `{:error, _}`
 
-## 7a. Preview before you place, and replace rather than cancel
+## Common Mistakes to Avoid
+- Elixir has no `return` statement, nor early returns. The last expression in a block is always returned.
+- Don't use `Enum` functions on large collections when `Stream` is more appropriate
+- Avoid nested `case` statements - refactor to a single `case`, `with` or separate functions
+- Don't use `String.to_atom/1` on user input (memory leak risk)
+- Lists and enumerables cannot be indexed with brackets. Use pattern matching or `Enum` functions
+- Prefer `Enum` functions like `Enum.reduce` over recursion
+- When recursion is necessary, prefer to use pattern matching in function heads for base case detection
+- Using the process dictionary is typically a sign of unidiomatic code
+- Only use macros if explicitly requested
+- There are many useful standard library functions, prefer to use them where possible
 
-Two things this venue can do that no other in the family can. Both are declared —
-`supports_order_preview` and `supports_order_replace` — so you can branch on capability
-rather than on venue name.
+## Function Design
+- Use guard clauses: `when is_binary(name) and byte_size(name) > 0`
+- Prefer multiple function clauses over complex conditional logic
+- Name functions descriptively: `calculate_total_price/2` not `calc/2`
+- Predicate function names should not start with `is` and should end in a question mark.
+- Names like `is_thing` should be reserved for guards
 
-```elixir
-{:ok, preview} = DpExchange.Schwab.preview_order(credentials, request, account_hash: hash)
-```
+## Data Structures
+- Use structs over maps when the shape is known: `defstruct [:name, :age]`
+- Prefer keyword lists for options: `[timeout: 5000, retries: 3]`
+- Use maps for dynamic key-value data
+- Prefer to prepend to lists `[new | list]` not `list ++ [new]`
 
-**Preview is close to free and placing is not.** Order writes are throttled here to
-somewhere between 0 and 120 a minute per account; reads are unthrottled. A rejection found
-by previewing costs nothing. One found by placing costs a scarce write.
+## Mix Tasks
 
-```elixir
-{:ok, new_id} = DpExchange.Schwab.replace_order(credentials, old_id, request, account_hash: hash)
-```
+- Use `mix help` to list available mix tasks
+- Use `mix help task_name` to get docs for an individual task
+- Read the docs and options fully before using tasks
 
-**`replace_order/4` returns a NEW id.** Schwab treats a replacement as a new order, so the
-id you passed in is dead afterwards — keep the one you get back, or you will be tracking an
-order that no longer exists.
+## Testing
+- Run tests in a specific file with `mix test test/my_test.exs` and a specific test with the line number `mix test path/to/test.exs:123`
+- Limit the number of failed tests with `mix test --max-failures n`
+- Use `@tag` to tag specific tests, and `mix test --only tag` to run only those tests
+- Use `assert_raise` for testing expected exceptions: `assert_raise ArgumentError, fn -> invalid_function() end`
+- Use `mix help test` to for full documentation on running tests
 
-Use it instead of cancel-then-place wherever you can. The two are **not equivalent**:
-cancel-then-place leaves a window with no order live, and spends two throttled writes
-rather than one.
+## Debugging
 
-## 7b. Sessions, and the order types Core learned here
+- Use `dbg/1` to print values while debugging. This will display the formatted value and other relevant information in the console.
 
-Every order carries a `session` — `NORMAL` unless you say otherwise. Pass `:session` in
-the request or `session:` in options. `supported_sessions` lists what the venue takes;
-this is the only venue in the family where the field is non-empty, because it is the only
-one whose market closes.
+<!-- usage_rules:elixir-end -->
+<!-- usage_rules:otp-start -->
+## usage_rules:otp usage
+# OTP Usage Rules
 
-Eight order types, not four: `:market`, `:limit`, `:stop`, `:stop_limit`,
-`:trailing_stop`, `:trailing_stop_limit`, `:market_on_close`, `:limit_on_close`.
+## GenServer Best Practices
+- Keep state simple and serializable
+- Handle all expected messages explicitly
+- Use `handle_continue/2` for post-init work
+- Implement proper cleanup in `terminate/2` when necessary
 
-A trailing stop **requires `:stop_price_offset`** and is refused locally without one — the
-offset is the order. `:stop_price_link_basis` (`"BID"`) and `:stop_price_link_type`
-(`"VALUE"`, `"PERCENT"`, `"TICK"`) ride along under the venue's own names, because `Core`
-names none of the three.
+## Process Communication
+- Use `GenServer.call/3` for synchronous requests expecting replies
+- Use `GenServer.cast/2` for fire-and-forget messages.
+- When in doubt, use `call` over `cast`, to ensure back-pressure
+- Set appropriate timeouts for `call/3` operations
 
-## 8. The market closes, and silence is usually correct
+## Fault Tolerance
+- Set up processes such that they can handle crashing and being restarted by supervisors
+- Use `:max_restarts` and `:max_seconds` to prevent restart loops
 
-Call `market_status/1` before concluding a quiet feed is broken. This is the only venue in
-the family where delivering nothing is the normal overnight state.
+## Task and Async
+- Use `Task.Supervisor` for better fault tolerance
+- Handle task failures with `Task.yield/2` or `Task.shutdown/2`
+- Set appropriate task timeouts
+- Use `Task.async_stream/3` for concurrent enumeration with back-pressure
 
-`coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
-not a fault.
+<!-- usage_rules:otp-end -->
+<!-- usage-rules-end -->
 
-## 9. What this package does not implement
+---
 
-*This section used to be headed "what this venue does not have". That was wrong for at
-least one entry, and the distinction is the point: a capability this package lacks is not
-the same as one the venue lacks, and only the second would justify routing the work
-somewhere else permanently.*
+## This package's own rules
 
-`get_order_book/2`, `get_market_overview/1`, `list_instruments/1`, `get_fees/2`,
-`get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2` all
-return `{:error, :not_supported}`. Route that work elsewhere rather than discovering an
-empty result.
+**`usage-rules.md`, in the root of this package and inside its Hex tarball, is the document
+to read before writing code against it.** Everything above this line is generated by the
+`usage_rules` dev tool and is about Elixir and OTP in general; everything a consumer needs
+to know about *this* package is there.
 
-**Two of those are the venue's, and two are not:**
-
-- **`get_order_book/2`** — the venue *does* publish depth, over its WebSocket **Streamer**
-  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`). This package does not speak the Streamer
-  yet. Expect this to become supported.
-- **`get_trade_history/2`** — the venue publishes `GET /accounts/{n}/transactions`, which is
-  where fills live. Not implemented here yet. Expect this to become supported.
-
-`get_symbols/1` is **not** in that list. It works, but requires `:query` — the venue has no
-list-everything projection.
-
-## 10. Rate limits are yours, not the venue's
-
-The documented ceiling is `0..120` order writes per minute **per account**, set **per
-application at registration**. Pass `:order_limit_per_minute` matching your own app's. Zero
-is a legal registration value.
+**AGENTS.md is a pointer, not a second copy.** This was decided on 2026-09-01 because the
+family disagreed with itself: five packages carried the generated file and one carried a
+byte-identical duplicate of its own `usage-rules.md`. A duplicate drifts — and a reader who
+finds two documents has no way to tell which is current.

@@ -143,30 +143,80 @@ the family where delivering nothing is the normal overnight state.
 `coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
 not a fault.
 
-## 9. What this package does not implement
+## 9. The Streamer, and what arrives only there
+
+**This package speaks the WebSocket Streamer as of 2026-09-01.** Fifteen services, and the
+four kinds a consumer subscribes to are quotes, top of book, **depth** and candles; with a
+credential — which is every call here — order and fill events arrive too.
+
+```elixir
+DpExchange.Schwab.capabilities().streamable
+# [:quotes, :top_of_book, :order_book, :candles, :orders, :fills]
+```
+
+**Depth arrives on the socket and nowhere else.** `get_order_book/2` still returns
+`{:error, :not_supported}`, and that is now a narrow and accurate claim: there is no
+*request-response* order book, and the contract's callback is a read. Subscribe instead.
+
+**`:trades` is deliberately not in that list.** `LEVELONE_*` carries a *last* price — one
+print restated on every update, not the sequence of them. If you need a tape, this venue
+does not publish one, and reconstructing it from `last` skips prints.
+
+**Field numbers differ per service, and that is the trap.** Field 1 is `bid` on
+`LEVELONE_EQUITIES` and `description` on `LEVELONE_OPTIONS`; fields 6 and 7 are
+`ask_id`/`bid_id` on equities and `bid_id`/`ask_id` on futures — swapped, per the vendor.
+`DpExchange.Schwab.StreamerFields` holds the per-service maps; do not reuse one service's
+numbering for another.
+
+**`SUBS` replaces and `ADD` accumulates.** There is no default: pass the command you mean.
+A `SUBS` sent to extend a subscription silently drops everything not in it.
+
+## 10. Reference data, options and transactions
+
+**The option chain is expiry × strike, both sides** — `get_option_chain/2` rebuilds
+Schwab's `callExpDateMap`/`putExpDateMap` into that grid. A strike listed on one side keeps
+a `nil` on the other; iterate strikes rather than assuming both.
+
+`underlying_price` is carried **only when you ask for it** (`include_underlying_quote:
+true`). `nil` means the venue did not send it — not that the underlying has no price, and
+not an invitation to fetch one separately and pair two observations taken at two times.
+
+**Four of `/chains`'s parameters are model inputs, not filters.** `volatility`,
+`underlying_price`, `interest_rate` and `days_to_expiration` are what Schwab prices an
+`ANALYTICAL` chain with. This package supplies none of them; if you pass one, you are asking
+the venue to price against a number you chose.
+
+**`get_transactions/2` needs four things and defaults none of them**: `:account_hash`,
+`:from`, `:to` and `:types`. There is no "all" in the venue's type enum —
+`DpExchange.Schwab.transaction_types/0` lists the fifteen, and passing all fifteen is how
+you ask for everything. A default here would hand you a real ledger missing whichever kinds
+it left out.
+
+`get_all_orders/2` needs both ends of a window for the same reason.
+
+## 11. What this package does not implement
 
 *This section used to be headed "what this venue does not have". That was wrong for at
 least one entry, and the distinction is the point: a capability this package lacks is not
 the same as one the venue lacks, and only the second would justify routing the work
 somewhere else permanently.*
 
+**Every negative this package makes is now audited**, with the source and date consulted:
+see `docs/reference/schwab/negative-claims.md`, which ships in the tarball.
+
 `get_order_book/2`, `get_market_overview/1`, `list_instruments/1`, `get_fees/2`,
-`get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2` all
-return `{:error, :not_supported}`. Route that work elsewhere rather than discovering an
-empty result.
+`get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2`
+return `{:error, :not_supported}`. So do the twelve money-movement callbacks: **a stock
+broker moves money through cheques, ACH and wires arranged with a person, not through an
+API**, and the Accounts and Trading specification has no payment method, transfer, allowlist
+or network list. `get_transactions/2` *reports* money that moved and is served.
 
-**Two of those are the venue's, and two are not:**
+- **`get_order_book/2`** — the venue publishes depth on the Streamer, and this package now
+  reads it there. The REST callback stays unsupported because there is no REST endpoint.
+- **`get_trade_history/2`** — `get_transactions/2` is where fills live on this venue, and it
+  is implemented. Use that.
 
-- **`get_order_book/2`** — the venue *does* publish depth, over its WebSocket **Streamer**
-  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`). This package does not speak the Streamer
-  yet. Expect this to become supported.
-- **`get_trade_history/2`** — the venue publishes `GET /accounts/{n}/transactions`, which is
-  where fills live. Not implemented here yet. Expect this to become supported.
-
-`get_symbols/1` is **not** in that list. It works, but requires `:query` — the venue has no
-list-everything projection.
-
-## 10. Rate limits are yours, not the venue's
+## 12. Rate limits are yours, not the venue's
 
 The documented ceiling is `0..120` order writes per minute **per account**, set **per
 application at registration**. Pass `:order_limit_per_minute` matching your own app's. Zero
