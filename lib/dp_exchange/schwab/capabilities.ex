@@ -87,6 +87,9 @@ defmodule DpExchange.Schwab.Capabilities do
   # — a declaration that disagreed with the code would be the worse of the two errors.
   # This one moves when someone with a credential can check the shape.
   @venue_does_not_serve [
+    # Schwab places one order per request. Its multi-leg orders are one *order* with several
+    # legs, which the venue accepts or rejects as one — a different thing from a batch.
+    {:place_orders, 3},
     # **A stock broker moves money through cheques, ACH and wires arranged with a person**,
     # not through an API. The Accounts and Trading specification has no payment method, no
     # transfer, no allowlist and no network list, and no FX, notional-valuation or custody

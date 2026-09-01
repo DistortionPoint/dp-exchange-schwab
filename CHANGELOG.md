@@ -31,6 +31,13 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Core dependency moves to `~> 0.1.36`**, and `place_orders/3` is declared **absent with
+  the reason**: this venue places one order per request. A batch is one request the venue
+  accepts or rejects as a unit, and a caller placing several here calls `place_order/3`
+  several times and reconciles the outcomes itself.
+
 ### Added
 
 - **The eleven REST endpoints this package did not reach** — the single-symbol quote, option

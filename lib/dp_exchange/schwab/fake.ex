@@ -274,6 +274,9 @@ defmodule DpExchange.Schwab.Fake do
     end
   end
 
+  @impl true
+  def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
+
   # Both are real on this venue, so the fake answers rather than refusing — and it builds
   # through `Orders` for the same reason `place_order/3` does: an order the venue
   # publishes as invalid must be refused here too.
