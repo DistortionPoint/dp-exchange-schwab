@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Core 0.1.21's three new callbacks are declared, each read from the specification.**
+  `/accounts/{accountNumber}/previewOrder` prices an order that does not exist yet and
+  there is no `previewReplaceOrder`, so `preview_replace/4` has no endpoint — replacing is
+  `PUT` on the order itself, priced only by making it. Cancelling is `DELETE` on one order,
+  so there is no bulk cancel. Positions are read through the account and closed by placing
+  the order yourself, which sizes against the last read rather than against the position
+  now — so there is no `close_position/3` either.
+
+  Recorded against the Accounts and Trading Production specification, 2026-09-01. This is
+  the package that spent a year asserting the venue had no streaming API when it had
+  fifteen services; absence here is read, not assumed.
+
 ### Fixed
 - **This package no longer claims Schwab has no streaming API.** It does: a WebSocket
   **Streamer** with 15 services, including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK` for

@@ -142,6 +142,15 @@ defmodule DpExchange.Schwab do
   end
 
   @impl true
+  def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
   def get_order_book(_symbol, _opts \\ []), do: Venue.not_supported()
 
   @impl true

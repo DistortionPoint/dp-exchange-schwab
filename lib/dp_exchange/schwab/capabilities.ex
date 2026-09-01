@@ -98,6 +98,17 @@ defmodule DpExchange.Schwab.Capabilities do
     # chains and expirations (`/chains`, `/expirationchain`), movers as a screener
     # (`/movers/{symbol_id}`), and positions via the accounts endpoint. Each is a Phase
     # 3–13 item, recorded in `docs/reference/schwab/coverage-matrix.md`.
+    # **Schwab previews an order and replaces one, and does neither for an amendment in
+    # advance.** `/accounts/{accountNumber}/previewOrder` prices an order that does not
+    # exist yet; there is no `previewReplaceOrder`. Replacing is `PUT` on the order itself,
+    # priced only by making it. Read from the Accounts and Trading specification,
+    # 2026-09-01.
+    {:preview_replace, 4},
+    # No bulk cancel: cancelling is `DELETE` on one order. No position-closing endpoint
+    # either — positions are read through the account and closed by placing the order
+    # yourself, which sizes against the last read rather than against the position now.
+    {:cancel_all_orders, 2},
+    {:close_position, 3},
     {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
