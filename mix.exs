@@ -55,18 +55,18 @@ defmodule DpExchangeSchwab.MixProject do
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.
-      # No `websockex` — **yet**. This package does not speak the venue's socket; that is
-      # not the same as the venue not having one, and this comment used to say it was.
       #
-      # It read "this venue has no streaming API at all". **That is false.** Schwab
-      # publishes a WebSocket **Streamer** with 15 services, including three book services
-      # and `ACCT_ACTIVITY`. It is described in the prose documentation this repository
-      # already held (`docs/reference/schwab/documentation/market-data-production.txt`),
-      # and it is absent from both OpenAPI documents — which is exactly how the error was
-      # made: the specifications were read, the prose beside them was not.
+      # **This package now speaks the venue's Streamer.** The comment here used to read
+      # "this venue has no streaming API at all", which was false — Schwab publishes a
+      # WebSocket Streamer with 15 services, including three book services and
+      # `ACCT_ACTIVITY`. It is described in the prose documentation this repository already
+      # held (`docs/reference/schwab/documentation/market-data-production.txt`) and is
+      # absent from both OpenAPI documents, which is exactly how the error was made: the
+      # specifications were read and the prose beside them was not.
       #
-      # The feed is a REST poll served by `Core.PollingFeed` until the Streamer is
-      # implemented. Add `websockex` when it is, and not before.
+      # The comment then said "add `websockex` when it is implemented, and not before".
+      # It is, so it is here.
+      {:websockex, "~> 0.4"},
       {:jason, "~> 1.4"},
       {:decimal, "~> 2.0"},
 

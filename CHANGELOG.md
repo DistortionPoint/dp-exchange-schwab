@@ -33,6 +33,35 @@ an acceptable changelog line.
 
 ### Added
 
+- **`DpExchange.Schwab.Socket` — the Streamer connected.** `websockex` is now a dependency;
+  `mix.exs` said to add it "when it is implemented, and not before", and it is.
+
+  **LOGIN is a gate, not a greeting.** The vendor: *"This must be successful before sending
+  other commands."* The socket tracks whether login succeeded and **refuses a subscription
+  before it has** — a package that sent `SUBS` on connect would have it silently ignored and
+  then wait for data that never arrives, which looks exactly like a quiet market. Login is
+  asynchronous, so `subscribe/5` before the *response* returns rather than sending a frame
+  the venue drops.
+
+  **`:link_up` waits for the login response**, not the TCP connection. Announcing it on
+  connect would tell a consumer the feed is live while the venue is still ignoring every
+  command.
+
+  **A rejected login still arrives as a response.** `succeeded?/1` checks the code inside
+  `content`, and a rejection emits a `:degraded` notice carrying the venue's own message
+  rather than leaving the socket to wait forever.
+
+  **Reconnection is not resubscription.** A disconnect clears both the logged-in flag and
+  the recorded subscriptions: the venue's session is gone, and a socket that kept believing
+  it was subscribed would report a healthy feed that receives nothing.
+
+  **A `LEVELONE` frame emits both a `Quote` and a `TopOfBook`** — one frame, two facts — and
+  emits only the top of book when the venue reported no traded price. A service with no
+  field map emits **nothing** rather than a value decoded with another service's numbering;
+  a heartbeat is not data; and a malformed frame is dropped rather than taking down a live
+  feed.
+
+
 - **The two screeners and `ACCT_ACTIVITY`.** Fourteen of the fifteen services now have field
   maps; `ADMIN` has none because it is the login/logout channel and carries no market data,
   and that gap is asserted rather than left to be noticed.
