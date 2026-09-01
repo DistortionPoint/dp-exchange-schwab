@@ -293,10 +293,10 @@ defmodule DpExchange.Schwab.StreamerTest do
     end
 
     test "a service with no map is an error, never another service's numbering" do
-      # SCREENER_EQUITY has no map yet — its field table is not transcribed. The point is
-      # that an untranscribed service errors rather than borrowing another's numbering.
-      assert {:error, {:no_field_map, "SCREENER_EQUITY"}} =
-               StreamerFields.for_service("SCREENER_EQUITY")
+      # ADMIN has no map: it is the login/logout channel and carries no market data. The
+      # point is that a service without one errors rather than borrowing another's
+      # numbering.
+      assert {:error, {:no_field_map, "ADMIN"}} = StreamerFields.for_service("ADMIN")
     end
 
     test "renaming drops numbers it has no name for" do
@@ -494,6 +494,62 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert book.asks == []
       # No sequence on a book frame, so a caller cannot use it to detect a dropped update.
       assert book.sequence == nil
+    end
+  end
+
+  describe "the screeners and account activity" do
+    test "the screeners share a table and keep the parameters that produced the list" do
+      # The same symbol returns a different list at a different sortField. A caller storing
+      # results without them cannot tell two screens apart.
+      {:ok, equity} = StreamerFields.for_service("SCREENER_EQUITY")
+      {:ok, option} = StreamerFields.for_service("SCREENER_OPTION")
+
+      assert equity == option
+      assert equity["2"] == :sort_field
+      assert equity["3"] == :frequency
+      assert equity["4"] == :items
+    end
+
+    test "ACCT_ACTIVITY is keyed on strings for two of its fields, not numbers" do
+      # The vendor names "seq" and "key" literally and numbers only the rest. A decoder
+      # assuming every key is a number would drop both.
+      {:ok, activity} = StreamerFields.for_service("ACCT_ACTIVITY")
+
+      assert activity["seq"] == :sequence
+      assert activity["key"] == :key
+      assert activity["1"] == :account
+      assert activity["2"] == :message_type
+      assert activity["3"] == :message_data
+    end
+
+    test "the activity sequence survives renaming, because a replay is not a new fill" do
+      # The vendor's own reason for the field: a client that reconnects can tell which
+      # messages it already saw. Dropping it makes a replayed activity indistinguishable
+      # from a new one — an order fill counted twice.
+      {:ok, map} = StreamerFields.for_service("ACCT_ACTIVITY")
+
+      renamed =
+        StreamerProtocol.rename(
+          %{"seq" => 42, "key" => "sub-1", "1" => "ACC", "2" => "OrderFill", "3" => "{}"},
+          map
+        )
+
+      assert renamed[:sequence] == 42
+      assert renamed[:message_type] == "OrderFill"
+      # Left as the venue sent it: its shape depends on message_type and the vendor does not
+      # publish a schema per type here.
+      assert renamed[:message_data] == "{}"
+    end
+
+    test "fourteen of the fifteen services are decodable, and the gap is visible" do
+      # A service with no map is undecoded, not undocumented. ADMIN carries no market data
+      # — it is the login/logout channel, not a data service — so it is named in services/0
+      # and has no field table, which is the gap being asserted.
+      decodable = StreamerFields.decodable()
+
+      assert length(decodable) == 14
+      assert "ADMIN" not in decodable
+      assert "ADMIN" in StreamerProtocol.services()
     end
   end
 end

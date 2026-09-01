@@ -33,6 +33,25 @@ an acceptable changelog line.
 
 ### Added
 
+- **The two screeners and `ACCT_ACTIVITY`.** Fourteen of the fifteen services now have field
+  maps; `ADMIN` has none because it is the login/logout channel and carries no market data,
+  and that gap is asserted rather than left to be noticed.
+
+  The screeners keep `sort_field` and `frequency` alongside the items, because **the same
+  symbol returns a different list at a different sort** — a caller storing results without
+  them cannot tell two screens apart.
+
+  **`ACCT_ACTIVITY` is keyed on strings for two of its four fields**: the vendor names
+  `"seq"` and `"key"` literally and numbers only the rest, so a decoder assuming every key
+  is a number would drop both. `seq` is kept for the reason the vendor gives it — a client
+  that reconnects can tell which messages it already saw, and **dropping it makes a replayed
+  activity indistinguishable from a new one**, which is an order fill counted twice.
+
+  `message_data` is left as the venue sent it. Its shape depends on `message_type` and the
+  vendor publishes no schema per type in this document; decoding it on a guess would turn an
+  unknown activity into a wrongly-shaped known one.
+
+
 - **The three book services — `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` — with an
   `OrderBook` decoder.** These are the depth services this package declared `:unsupported`
   while saying the venue had no streaming API at all.

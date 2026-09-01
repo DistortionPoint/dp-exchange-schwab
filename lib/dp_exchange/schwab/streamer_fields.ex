@@ -144,6 +144,41 @@ defmodule DpExchange.Schwab.StreamerFields do
     "8" => :chart_day
   }
 
+  # SCREENER_EQUITY and SCREENER_OPTION share a table, as the two book-style pairs do.
+  #
+  # **Field 4 is an array of items, not a scalar**, and each item carries its own
+  # description, last price, market share, net change and volume. `Core.Types.ScreenerResult`
+  # is the shape for those; the frame-level fields here are the screener's *parameters* —
+  # which sort and which frequency produced the list — and they matter because **the same
+  # symbol returns a different list at a different `sortField`**. A caller storing results
+  # without them cannot tell two screens apart.
+  @screener %{
+    "0" => :symbol,
+    "1" => :snapshot_time,
+    "2" => :sort_field,
+    "3" => :frequency,
+    "4" => :items
+  }
+
+  # ACCT_ACTIVITY. **Keyed on strings, not numbers, for two of its four fields** — the vendor
+  # names `"seq"` and `"key"` literally and numbers only the rest.
+  #
+  # `seq` is the message number and the vendor is explicit about why it exists: a client
+  # that reconnects can tell which messages it already saw. **Dropping it would make a
+  # replayed activity indistinguishable from a new one** — an order fill counted twice.
+  #
+  # `message_data` is a string carrying JSON whose shape depends on `message_type`. It is
+  # left as the venue sent it: decoding it here would require a schema per message type that
+  # the vendor does not publish in this document, and guessing one would turn an unknown
+  # activity into a wrongly-shaped known one.
+  @acct_activity %{
+    "seq" => :sequence,
+    "key" => :key,
+    "1" => :account,
+    "2" => :message_type,
+    "3" => :message_data
+  }
+
   @maps %{
     "LEVELONE_EQUITIES" => @level_one_equities,
     # The vendor lists both names; they carry the same field numbering.
@@ -156,6 +191,9 @@ defmodule DpExchange.Schwab.StreamerFields do
     "NYSE_BOOK" => @book,
     "NASDAQ_BOOK" => @book,
     "OPTIONS_BOOK" => @book,
+    "SCREENER_EQUITY" => @screener,
+    "SCREENER_OPTION" => @screener,
+    "ACCT_ACTIVITY" => @acct_activity,
     "CHART_EQUITY" => @chart_equity,
     "CHART_FUTURES" => @chart_equity
   }
