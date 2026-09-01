@@ -150,6 +150,17 @@ defmodule DpExchange.Schwab.Capabilities do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
+    # **No public tape through this API.** The Market Data Production specification
+    # publishes quotes, price history and movers; it does not publish a trade tape. Read
+    # 2026-09-01, not assumed — this is the package that spent a year asserting the venue
+    # had no streaming API when it had fifteen services.
+    {:get_trades, 2},
+    # **Neither is in the Accounts and Trading or Market Data specifications** — checked
+    # 2026-09-01. Schwab's equities do trade in opening and closing auctions, and the venue
+    # publishes no imbalance feed through this API; nor does it publish a volume-at-price
+    # split. Absence read, not assumed.
+    {:get_auction_imbalance, 2},
+    {:get_volume_profile, 3},
     {:get_order_book, 2},
     {:get_transfers, 2},
     {:get_fees, 2},

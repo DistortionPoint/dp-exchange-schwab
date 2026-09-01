@@ -70,6 +70,14 @@ an acceptable changelog line.
   publish — `get_order_book/2` and `get_trade_history/2` both exist upstream.
 
 ### Added
+
+- **`get_trades/2`, `get_auction_imbalance/2` and `get_volume_profile/3` are declared
+  unsupported, read rather than assumed.** The Market Data Production specification
+  publishes quotes, price history and movers and **no trade tape**; Schwab's equities do
+  trade in opening and closing auctions and the venue publishes no imbalance feed through
+  this API, nor a volume-at-price split. Checked 2026-09-01 — this is the package that spent
+  a year asserting the venue had no streaming API when it had fifteen services.
+
 - `docs/reference/schwab/portal-product-landscape.md` — the developer portal publishes **24
   products**; **7** are visible to this account and **1** is entitled. The other six return
   `204` from `lob-access/Status`, and Crypto and Thinkorswim are not among the seven at all.

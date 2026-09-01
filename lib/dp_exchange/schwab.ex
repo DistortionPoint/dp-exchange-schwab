@@ -154,6 +154,15 @@ defmodule DpExchange.Schwab do
   def get_order_book(_symbol, _opts \\ []), do: Venue.not_supported()
 
   @impl true
+  def get_trades(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
   def get_market_overview(_opts \\ []), do: Venue.not_supported()
 
   @impl true
