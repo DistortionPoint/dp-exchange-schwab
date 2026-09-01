@@ -33,6 +33,13 @@ an acceptable changelog line.
 
 ### Changed
 
+- **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported, for
+  different reasons.** Asset-for-asset conversion is not something this venue does at all —
+  Schwab is an equities and options broker and its equivalent is placing an order.
+  `get_trade_volume/2` is absent from the Accounts and Trading specification: the account
+  reports transactions, not an aggregated volume series.
+
+
 - **Core 0.1.21's three new callbacks are declared, each read from the specification.**
   `/accounts/{accountNumber}/previewOrder` prices an order that does not exist yet and
   there is no `previewReplaceOrder`, so `preview_replace/4` has no endpoint — replacing is

@@ -118,6 +118,14 @@ defmodule DpExchange.Schwab.Capabilities do
     {:get_staking_history, 1},
     {:stake, 3},
     {:unstake, 3},
+    # **Neither exists here, and the reason differs.** `convert/4` is asset-for-asset
+    # conversion, which this venue does not do at all — Schwab is an equities and options
+    # broker and its equivalent is placing an order. `get_trade_volume/2` is absent from the
+    # Accounts and Trading specification: the account reports transactions, not an
+    # aggregated volume series, and summing transactions here would be this package's
+    # arithmetic rather than the venue's.
+    {:convert, 4},
+    {:get_trade_volume, 2},
     {:quote_conversion, 4},
     {:commit_conversion, 2},
     {:get_conversion, 2},

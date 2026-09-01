@@ -413,6 +413,12 @@ defmodule DpExchange.Schwab do
   def get_conversion(_id, _opts), do: Venue.not_supported()
 
   @impl true
+  def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_trade_volume(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
   def list_portfolios(_opts), do: Venue.not_supported()
 
   @impl true
