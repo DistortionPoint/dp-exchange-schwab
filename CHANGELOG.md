@@ -33,6 +33,23 @@ an acceptable changelog line.
 
 ### Added
 
+- **Field maps for the four `LEVELONE_*` services, and they disagree with each other more
+  than expected.** Transcribed from the vendor's numbered tables, 2026-09-01:
+
+      field 1   EQUITIES bid        OPTIONS description
+      field 6   EQUITIES ask_id     FUTURES bid_id      FOREX total_volume
+      field 7   EQUITIES bid_id     FUTURES ask_id
+
+  **`LEVELONE_FUTURES` swaps the two exchange identifiers relative to `LEVELONE_EQUITIES`.**
+  A shared map would report the bid's exchange as the ask's on every futures frame — and
+  both values are real exchange codes, so nothing downstream would notice. `LEVELONE_OPTIONS`
+  diverges from field 1 onward and carries its sizes at 16–18 rather than 4–5, where
+  equities put them and where options put the last *price*.
+
+  This is what the per-service design was for, and the transcription confirmed it rather
+  than the other way round.
+
+
 - **The Streamer's protocol, bootstrap and decoders — the API this package spent a year
   saying the venue did not have.**
 

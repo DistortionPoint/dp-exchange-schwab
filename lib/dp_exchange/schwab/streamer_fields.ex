@@ -46,6 +46,70 @@ defmodule DpExchange.Schwab.StreamerFields do
     "13" => :exchange_id
   }
 
+  # LEVELONE_OPTIONS. **Numbered differently from LEVELONE_EQUITIES from field 1 onward** —
+  # field 1 is the description here and the bid there. This is the clearest case for why
+  # these maps are per service.
+  @level_one_options %{
+    "0" => :symbol,
+    "1" => :description,
+    "2" => :bid,
+    "3" => :ask,
+    "4" => :last,
+    "5" => :high,
+    "6" => :low,
+    # Previous day's close, per the vendor: "updated from the DB at 7:29AM ET."
+    "7" => :previous_close,
+    "8" => :total_volume,
+    "9" => :open_interest,
+    "10" => :volatility,
+    "11" => :money_intrinsic_value,
+    "12" => :expiration_year,
+    "16" => :bid_size,
+    "17" => :ask_size,
+    "18" => :last_size
+  }
+
+  # LEVELONE_FUTURES. Fields 0–5 match LEVELONE_EQUITIES and then they diverge:
+  #
+  #   EQUITIES  6 => Ask ID, 7 => Bid ID
+  #   FUTURES   6 => Bid ID, 7 => Ask ID
+  #
+  # **The exchange identifiers are swapped between the two services.** A shared map would
+  # report the bid's exchange as the ask's on every futures frame, and both values would be
+  # real exchange codes — nothing downstream would notice.
+  #
+  # Futures also carry their own `quote_time` and `trade_time` at 10 and 11, which
+  # LEVELONE_EQUITIES does not publish in the fields this package reads.
+  @level_one_futures %{
+    "0" => :symbol,
+    "1" => :bid,
+    "2" => :ask,
+    "3" => :last,
+    "4" => :bid_size,
+    "5" => :ask_size,
+    "6" => :bid_id,
+    "7" => :ask_id,
+    "8" => :total_volume,
+    "9" => :last_size,
+    "10" => :quote_time,
+    "11" => :trade_time,
+    "12" => :high
+  }
+
+  # LEVELONE_FOREX. Fields 0–5 match again, and then this one differs from BOTH of the
+  # others: 6 is the total volume here, where equities put an exchange id and futures put a
+  # bid id.
+  @level_one_forex %{
+    "0" => :symbol,
+    "1" => :bid,
+    "2" => :ask,
+    "3" => :last,
+    "4" => :bid_size,
+    "5" => :ask_size,
+    "6" => :total_volume,
+    "7" => :last_size
+  }
+
   # CHART_EQUITY. Note field 1 is the OPEN here and the BID in LEVELONE_EQUITIES — the
   # reason this module exists.
   @chart_equity %{
@@ -65,6 +129,11 @@ defmodule DpExchange.Schwab.StreamerFields do
     "LEVELONE_EQUITIES" => @level_one_equities,
     # The vendor lists both names; they carry the same field numbering.
     "LEVELONE_EQUITY" => @level_one_equities,
+    "LEVELONE_OPTIONS" => @level_one_options,
+    "LEVELONE_FUTURES" => @level_one_futures,
+    # The vendor documents futures options with the futures numbering.
+    "LEVELONE_FUTURES_OPTIONS" => @level_one_futures,
+    "LEVELONE_FOREX" => @level_one_forex,
     "CHART_EQUITY" => @chart_equity,
     "CHART_FUTURES" => @chart_equity
   }

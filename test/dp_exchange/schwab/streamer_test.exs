@@ -233,6 +233,65 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert chart["1"] == :open
     end
 
+    test "LEVELONE_OPTIONS numbers differently from LEVELONE_EQUITIES" do
+      # Field 1 is the description here and the bid there. The clearest case for per-service
+      # maps: a shared table would decode every option's name as its bid price.
+      {:ok, equities} = StreamerFields.for_service("LEVELONE_EQUITIES")
+      {:ok, options} = StreamerFields.for_service("LEVELONE_OPTIONS")
+
+      assert equities["1"] == :bid
+      assert options["1"] == :description
+      assert options["2"] == :bid
+    end
+
+    test "LEVELONE_FUTURES swaps the exchange ids relative to LEVELONE_EQUITIES" do
+      # EQUITIES 6 => Ask ID, 7 => Bid ID. FUTURES 6 => Bid ID, 7 => Ask ID.
+      # A shared map reports the bid's exchange as the ask's on every futures frame, and
+      # both values are real exchange codes — nothing downstream notices.
+      {:ok, equities} = StreamerFields.for_service("LEVELONE_EQUITIES")
+      {:ok, futures} = StreamerFields.for_service("LEVELONE_FUTURES")
+
+      assert equities["6"] == :ask_id
+      assert equities["7"] == :bid_id
+      assert futures["6"] == :bid_id
+      assert futures["7"] == :ask_id
+    end
+
+    test "field 6 means three different things across three LEVELONE services" do
+      {:ok, equities} = StreamerFields.for_service("LEVELONE_EQUITIES")
+      {:ok, futures} = StreamerFields.for_service("LEVELONE_FUTURES")
+      {:ok, forex} = StreamerFields.for_service("LEVELONE_FOREX")
+
+      assert equities["6"] == :ask_id
+      assert futures["6"] == :bid_id
+      assert forex["6"] == :total_volume
+    end
+
+    test "options carry their sizes at 16-18, not at 4-5" do
+      {:ok, options} = StreamerFields.for_service("LEVELONE_OPTIONS")
+
+      assert options["16"] == :bid_size
+      assert options["17"] == :ask_size
+      assert options["18"] == :last_size
+      # 4 is the last price on this service, and reading it as a bid size would be a price
+      # in a quantity field.
+      assert options["4"] == :last
+    end
+
+    test "futures options share the futures numbering, as the vendor documents" do
+      {:ok, futures} = StreamerFields.for_service("LEVELONE_FUTURES")
+      {:ok, futures_options} = StreamerFields.for_service("LEVELONE_FUTURES_OPTIONS")
+
+      assert futures == futures_options
+    end
+
+    test "every decodable service is one the venue actually carries" do
+      # A map for a service the venue does not publish would be dead code that looks live.
+      for service <- StreamerFields.decodable() do
+        assert service in StreamerProtocol.services()
+      end
+    end
+
     test "a service with no map is an error, never another service's numbering" do
       assert {:error, {:no_field_map, "NYSE_BOOK"}} = StreamerFields.for_service("NYSE_BOOK")
     end
