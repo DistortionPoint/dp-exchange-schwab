@@ -24,7 +24,8 @@ defmodule DpExchange.Schwab.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.Types.{Balance, Candle, Quote, TopOfBook}
-  alias DpExchange.Core.Venue
+
+  alias DpExchange.Core.{Types, Venue}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Orders, Rest, SymbolFormat}
 
@@ -405,7 +406,28 @@ defmodule DpExchange.Schwab.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_positions(_opts \\ []) do
+    # A short, and no liquidation price — Schwab publishes none per position, and `nil`
+    # there is not safety.
+    {:ok,
+     [
+       %Types.Position{
+         symbol: "AAPL",
+         side: :short,
+         quantity: Decimal.new("100"),
+         instrument_type: :equity,
+         average_cost: Decimal.new("180.25"),
+         mark_price: nil,
+         notional_value: Decimal.new("-17500"),
+         realised_pnl: Decimal.new("25"),
+         unrealised_pnl: Decimal.new("-125"),
+         liquidation_price: nil,
+         leverage: nil,
+         venue_time: nil,
+         provider: :schwab
+       }
+     ]}
+  end
 
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
@@ -466,10 +488,47 @@ defmodule DpExchange.Schwab.Fake do
     do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_option_chain(underlying, _opts \\ []) do
+    call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :call)
+    put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :put)
+    lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("220"), :call)
+
+    {:ok,
+     %Types.OptionChain{
+       underlying: underlying,
+       expiries: %{
+         ~D[2026-03-20] => %{Decimal.new("200") => %{call: call, put: put}},
+         # A strike with one side only, which a caller iterating strikes has to see.
+         ~D[2026-06-19] => %{Decimal.new("220") => %{call: lone, put: nil}}
+       },
+       # Carried only when the venue sent it, and this fake did not ask for it.
+       underlying_price: nil,
+       venue_time: nil,
+       provider: :schwab
+     }}
+  end
 
   @impl true
-  def get_option_expirations(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_option_expirations(_underlying, _opts \\ []),
+    do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+
+  defp fake_contract(underlying, expiry, strike, right) do
+    %Types.OptionContract{
+      underlying: underlying,
+      expiry: expiry,
+      strike: strike,
+      right: right,
+      venue_symbol: "#{underlying}  #{Date.to_iso8601(expiry)}#{right}",
+      multiplier: Decimal.new("100"),
+      settlement_type: "P",
+      expiration_type: "S",
+      last_trading_day: nil,
+      index_option: nil,
+      mini: nil,
+      non_standard: false,
+      provider: :schwab
+    }
+  end
 
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
@@ -502,7 +561,77 @@ defmodule DpExchange.Schwab.Fake do
   def get_news(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_screener(name, _opts \\ []) do
+    if name in Rest.movers_universes() do
+      {:ok,
+       [
+         %Types.ScreenerResult{
+           symbol: "AAPL",
+           screener: name,
+           # The venue's returned order, not a metric this fake ranked on.
+           rank: 1,
+           metrics: %{"netPercentChange" => 0.031, "volume" => 1_000_000},
+           venue_time: nil,
+           provider: :schwab
+         }
+       ]}
+    else
+      {:error, {:unknown_movers_universe, name}}
+    end
+  end
+
+  @impl true
+  def get_transactions(_credentials, opts \\ []) do
+    # Every one of the venue's three required parameters, checked in the same order the
+    # package checks them.
+    cond do
+      not is_binary(Keyword.get(opts, :account_hash)) ->
+        {:error, {:account_hash_required, :schwab}}
+
+      is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) ->
+        {:error, {:from_and_to_required, :schwab}}
+
+      is_nil(Keyword.get(opts, :types)) ->
+        {:error, {:types_required, :schwab}}
+
+      true ->
+        {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
+    end
+  end
+
+  @impl true
+  def list_payment_methods(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts \\ []),
+    do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()

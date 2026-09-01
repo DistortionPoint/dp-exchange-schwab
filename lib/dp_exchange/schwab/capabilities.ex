@@ -87,6 +87,21 @@ defmodule DpExchange.Schwab.Capabilities do
   # — a declaration that disagreed with the code would be the worse of the two errors.
   # This one moves when someone with a credential can check the shape.
   @venue_does_not_serve [
+    # **A stock broker moves money through cheques, ACH and wires arranged with a person**,
+    # not through an API. The Accounts and Trading specification has no payment method, no
+    # transfer, no allowlist and no network list, and no FX, notional-valuation or custody
+    # endpoint either. `get_transactions/2` *reports* money that moved and is served.
+    {:list_payment_methods, 2},
+    {:get_payment_method, 3},
+    {:add_payment_method, 2},
+    {:transfer_internal, 4},
+    {:request_approved_address, 4},
+    {:remove_approved_address, 3},
+    {:list_networks, 2},
+    {:list_fee_promos, 1},
+    {:get_fx_rate, 3},
+    {:get_notional_balances, 3},
+    {:list_custody_fees, 2},
     # Core 0.1.16's wider facade. **Mixed provenance, and the distinction matters here more
     # than anywhere** — this is the package that spent a year asserting the venue had no
     # streaming API when it had fifteen services.
@@ -109,7 +124,6 @@ defmodule DpExchange.Schwab.Capabilities do
     # yourself, which sizes against the last read rather than against the position now.
     {:cancel_all_orders, 2},
     {:close_position, 3},
-    {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
     {:get_staking_rates, 1},
@@ -134,8 +148,6 @@ defmodule DpExchange.Schwab.Capabilities do
     {:list_approved_addresses, 1},
     {:estimate_withdrawal_fee, 4},
     {:withdraw, 5},
-    {:get_option_chain, 2},
-    {:get_option_expirations, 2},
     {:get_option_greeks, 2},
     {:list_watchlists, 1},
     {:get_watchlist, 2},
@@ -146,7 +158,6 @@ defmodule DpExchange.Schwab.Capabilities do
     {:get_corporate_events, 1},
     {:get_filings, 2},
     {:get_news, 1},
-    {:get_screener, 2},
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},

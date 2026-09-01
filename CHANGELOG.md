@@ -33,6 +33,59 @@ an acceptable changelog line.
 
 ### Added
 
+- **The eleven REST endpoints this package did not reach** — the single-symbol quote, option
+  chains and expirations, movers, one market's hours, an instrument by CUSIP, the account
+  summaries and positions, orders across every account, transactions and one transaction,
+  and `/userPreference`.
+
+  **Four of them were declared absent on a claim about the package, and the declaration said
+  so.** Option chains, expirations, movers-as-a-screener and positions-via-the-accounts-
+  endpoint were all published by the venue and unimplemented here; `venue_does_not_serve`
+  named them as this package's gap rather than the venue's, which is the distinction this
+  package had to learn the hard way about streaming.
+
+  **The chain is Schwab's shape and this is the type it was designed around.**
+  `callExpDateMap` and `putExpDateMap` are keyed by expiry-then-strike, and the expiry key
+  carries the venue's days-to-expiration after a colon — a countdown from *today*, dropped
+  because it would be stale as a key. A strike listed on one side keeps a `nil` on the other,
+  and an expiry or strike this package cannot read is **refused by name** rather than
+  dropped: a hole in a chain that looks complete is worse than an error.
+
+  **`underlying_price` is carried only when the venue sent it**, which needs
+  `include_underlying_quote`. `nil` means it was not in the response, not that the underlying
+  has no price — and a chain valued against a price fetched separately is two observations
+  at two times.
+
+  **Four of `/chains`'s seventeen parameters are model inputs, not filters.** `volatility`,
+  `underlyingPrice`, `interestRate` and `daysToExpiration` are what Schwab prices an
+  analytical chain with, and this package supplies none of them: sending one would price a
+  chain against a number the package invented.
+
+  **Positions come out of the account and Schwab reports long and short as separate
+  quantities.** Both are positive and `:side` says which; a row with both zero is a closed
+  position the venue still lists, and is skipped rather than reported as an open position of
+  size nothing. `liquidation_price` is `nil` — Schwab publishes none per position, and that
+  is not safety.
+
+  **Two endpoints have required parameters this package refuses to default.** `/orders`
+  needs both ends of a time window; `/transactions` needs a window **and a type list, and
+  its enum has no "all"** — `transaction_types/0` lists the fifteen, and passing all fifteen
+  is how a caller asks for everything. A window or a type set chosen here returns a real
+  answer over the wrong period or missing whichever kinds it left out, and an empty result
+  reads as "nothing happened".
+
+  A mover universe or a market outside the venue's enums is refused before the request: a
+  ticker sent to `/movers` is not a smaller mover list, it is a 404.
+
+### Changed
+
+- **Core dependency moves to `~> 0.1.34`**, and eleven money-movement callbacks are declared
+  **absent with the reason**: a stock broker moves money through cheques, ACH and wires
+  arranged with a person, not through an API, and the Accounts and Trading specification has
+  no payment method, transfer, allowlist or network list — nor an FX, notional-valuation or
+  custody endpoint. `get_transactions/2` *reports* money that moved and is served.
+
+
 - **`DpExchange.Schwab.Socket` — the Streamer connected.** `websockex` is now a dependency;
   `mix.exs` said to add it "when it is implemented, and not before", and it is.
 

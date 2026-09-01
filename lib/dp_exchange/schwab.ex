@@ -385,8 +385,167 @@ defmodule DpExchange.Schwab do
   # venue had no streaming API when it had fifteen services. Where the venue genuinely does
   # not offer something, the comment beside it says so.
 
+  @doc """
+  Open positions, read through the account.
+
+  See `DpExchange.Schwab.Rest.get_positions/2`. Schwab reports long and short as separate
+  quantities rather than one signed number, and a row with both zero is a closed position
+  the venue still lists.
+  """
   @impl true
-  def get_positions(_opts), do: Venue.not_supported()
+  def get_positions(opts),
+    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  The option chain for an underlying — expiry × strike, both sides.
+
+  See `DpExchange.Schwab.Rest.get_option_chain/3`. `underlying_price` is carried only when
+  the venue sent it, which needs `include_underlying_quote: true`.
+  """
+  @impl true
+  def get_option_chain(underlying, opts),
+    do: Rest.get_option_chain(underlying, Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  The expiries listed on an underlying.
+
+  See `DpExchange.Schwab.Rest.get_option_expirations/3` — its own endpoint, not a narrowing
+  of the chain.
+  """
+  @impl true
+  def get_option_expirations(underlying, opts),
+    do: Rest.get_option_expirations(underlying, Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  A mover list, by the venue's own universe — `movers_universes/0` lists them.
+
+  See `DpExchange.Schwab.Rest.get_screener/3`. The rank is the position the venue returned
+  the row in; nothing is re-ranked.
+  """
+  @impl true
+  def get_screener(name, opts),
+    do: Rest.get_screener(name, Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  Transactions on one account.
+
+  `opts[:account_hash]`, `opts[:from]`, `opts[:to]` and `opts[:types]` are all required —
+  the last three by the venue, and the first because every Schwab account endpoint addresses
+  by the encrypted hash `get_accounts/2` returns. See
+  `DpExchange.Schwab.Rest.get_transactions/3`, including why there is no "all types".
+  """
+  @impl true
+  def get_transactions(credentials, opts) do
+    case Keyword.get(opts, :account_hash) do
+      hash when is_binary(hash) -> Rest.get_transactions(credentials, hash, opts)
+      _missing -> {:error, {:account_hash_required, :schwab}}
+    end
+  end
+
+  @doc "One transaction by id. See `DpExchange.Schwab.Rest.get_transaction/4`."
+  @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_transaction(credentials, account_hash, transaction_id, opts \\ []),
+    do: Rest.get_transaction(credentials, account_hash, transaction_id, opts)
+
+  @doc """
+  Every account's balances, and its positions when asked.
+
+  **Not `get_accounts/2`** — that reads `/accounts/accountNumbers` for the hashes every
+  other endpoint addresses by. See `DpExchange.Schwab.Rest.get_account_summaries/2`.
+  """
+  @spec get_account_summaries(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_account_summaries(credentials, opts \\ []),
+    do: Rest.get_account_summaries(credentials, opts)
+
+  @doc """
+  Orders across every account. `opts[:from]` and `opts[:to]` are required by the venue.
+
+  See `DpExchange.Schwab.Rest.get_all_orders/2`. `get_orders/3` is the per-account read.
+  """
+  @spec get_all_orders(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_all_orders(credentials, opts \\ []), do: Rest.get_all_orders(credentials, opts)
+
+  @doc """
+  One symbol's quote, unnormalised. See `DpExchange.Schwab.Rest.get_symbol_quote/3`.
+  """
+  @spec get_symbol_quote(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_symbol_quote(symbol, credentials, opts \\ []),
+    do: Rest.get_symbol_quote(symbol, credentials, opts)
+
+  @doc "One market's hours, optionally on another day. See `DpExchange.Schwab.Rest.get_market/3`."
+  @spec get_market(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_market(market, credentials, opts \\ []), do: Rest.get_market(market, credentials, opts)
+
+  @doc "One instrument by CUSIP. See `DpExchange.Schwab.Rest.get_instrument/3`."
+  @spec get_instrument(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_instrument(cusip, credentials, opts \\ []),
+    do: Rest.get_instrument(cusip, credentials, opts)
+
+  @doc """
+  The signed-in user's preferences — the same endpoint the streamer bootstraps from.
+
+  See `DpExchange.Schwab.Rest.get_user_preference/2`.
+  """
+  @spec get_user_preference(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_user_preference(credentials, opts \\ []),
+    do: Rest.get_user_preference(credentials, opts)
+
+  @doc "The mover universes this venue publishes."
+  @spec movers_universes() :: [String.t()]
+  defdelegate movers_universes(), to: Rest
+
+  @doc "The markets this venue publishes hours for."
+  @spec markets() :: [String.t()]
+  defdelegate markets(), to: Rest
+
+  @doc "The transaction types this venue records — there is no 'all' among them."
+  @spec transaction_types() :: [String.t()]
+  defdelegate transaction_types(), to: Rest
+
+  # **A stock broker moves money through cheques, ACH and wires arranged with a person, not
+  # through an API.** The Accounts and Trading specification has no payment method, no
+  # transfer, no allowlist and no network list — nothing in the twelve below appears in it.
+  # `get_transactions/2` above *reports* money that moved and is the one that is served.
+
+  @impl true
+  def list_payment_methods(_credentials, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_payment_method(_credentials, _id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def add_payment_method(_details, _opts), do: Venue.not_supported()
+
+  @impl true
+  def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
 
   @impl true
   def get_funding(_symbol, _opts), do: Venue.not_supported()
@@ -443,12 +602,6 @@ defmodule DpExchange.Schwab do
   def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
 
   @impl true
-  def get_option_chain(_underlying, _opts), do: Venue.not_supported()
-
-  @impl true
-  def get_option_expirations(_underlying, _opts), do: Venue.not_supported()
-
-  @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
 
   @impl true
@@ -477,9 +630,6 @@ defmodule DpExchange.Schwab do
 
   @impl true
   def get_news(_opts), do: Venue.not_supported()
-
-  @impl true
-  def get_screener(_name, _opts), do: Venue.not_supported()
 
   @impl true
   def create_account(_opts), do: Venue.not_supported()
