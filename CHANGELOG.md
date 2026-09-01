@@ -31,6 +31,48 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **The Streamer's protocol, bootstrap and decoders — the API this package spent a year
+  saying the venue did not have.**
+
+  `StreamerInfo` reads `GET /trader/v1/userPreference`, which is the bootstrap. **The socket
+  URL is issued per account and is not a constant**, and the same response carries the four
+  identifiers `LOGIN` requires — none derivable from anything this package holds. The venue's
+  own error notes say a client that changes `SchwabClientCustomerId` or
+  `SchwabClientCorrelId` after logging in loses the connection, so they are fetched once and
+  carried. **A missing field is an error**, because a `LOGIN` sent without one is refused
+  with a message about the connection rather than about the field.
+
+  `StreamerProtocol` builds the six commands and classifies the three frame kinds.
+  **`subscribe/5` has no default command**: the venue's `SUBS` *replaces* every prior symbol
+  for a service and `ADD` accumulates, so a package defaulting to `SUBS` for an incremental
+  subscribe silently unsubscribes everything the caller already asked for — and the caller
+  just sees the feed go quiet. A frame carrying none of `response`, `notify` or `data` is
+  refused rather than read as data, because a heartbeat read as a quote is a price that
+  never traded. **`succeeded?/1` checks the code inside `content`**: a rejected `LOGIN` still
+  arrives as a response, and a package checking only that one arrived waits forever for data.
+
+  `StreamerFields` holds the field maps **per service, because the numbers are not shared**.
+  Field 1 is the bid in `LEVELONE_EQUITIES` and the open in `CHART_EQUITY`; one global table
+  would decode a candle's open as a bid on every chart frame. A service with no map is an
+  error rather than a fallback, and unnamed numbers are dropped — an unnamed field is
+  absent, where a guessed name is wrong. Field 12 is named `:previous_close` because the
+  vendor says it is the *previous day's* close.
+
+  `StreamerDecode` turns frames into `Quote`, `TopOfBook` and `Candle`. **A `LEVELONE` frame
+  carries bid, ask and last, and only `last` is a traded price** — a frame without it yields
+  `{:error, :no_traded_price}` rather than a quote priced from a resting order. The quote's
+  volume is the trade's own `last_size`, not the day's aggregate. A `CHART` bar without
+  `chart_time` is refused rather than stamped on arrival: it would land in the series at the
+  wrong minute with every value still real.
+
+  Transcribed from the vendor's prose documentation at
+  `docs/reference/schwab/documentation/market-data-production.txt`, 2026-09-01.
+
+  **Not yet connected.** This is the protocol, not the transport; the socket itself and the
+  remaining eleven services' field maps follow.
+
 ### Changed
 
 - **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported, for
