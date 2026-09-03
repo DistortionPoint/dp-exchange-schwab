@@ -1,19 +1,23 @@
 # Schwab Trader API — coverage matrix
 
 **Source**: the two OpenAPI documents in `openapi/`, committed here. Enumerated
-2026-08-31 against the paths `lib/` constructs.
+2026-08-31 against the paths `lib/` constructs. **REST counts re-verified 2026-09-03; the
+Streamer section below was written when this package asserted a false negative about
+streaming and is kept as the record of that, with what has since changed added below it.**
 
 ## Counts
 
 | | operations | implemented |
 |---|---|---|
-| Market Data Production | 10 | 4 |
-| Accounts and Trading Production | 13 | 8 |
-| **total** | **23** | **12** |
+| Market Data Production | 10 | 9 |
+| Accounts and Trading Production | 13 | 11 |
+| **total** | **23** | **20** |
 
-The best-covered venue in the family at **52%**, and the only one whose specification is
-committed — which is not a coincidence. It is the only venue that had no host adapter to
-port, so its documentation had to be read.
+**87%** of the two REST specifications, up from 52% at the original capture. What remains:
+`GET /orders` (cross-account), `GET /accounts` (cross-account list; this package uses
+`accountNumbers` + per-account fetch), `GET /instruments/{cusip_id}` (lookup by symbol
+covers the common case). Options chains and expirations, and movers, now have facade
+homes and are implemented — see `capabilities/0`.
 
 ## Matrix
 
@@ -68,7 +72,7 @@ questions rather than implementation ones.
 **The two that matter most are the transactions pair and `/userPreference`.** The first is
 why this package cannot report a fill. The second is why it has no streaming.
 
-## The Streamer — 15 services, none implemented
+## The Streamer — 15 services, and now the socket speaks them
 
 **This package asserts that Schwab has no streaming API. That is false**, and the evidence
 is in `documentation/market-data-production.txt`, captured 2026-08-28 and committed here.
@@ -104,3 +108,22 @@ detail.
 `[:quotes, :order_book, :orders, :fills]` — a claim no venue in this family currently makes.
 
 The error was reading the OpenAPI documents and stopping there.
+
+## What was wrong, and what it now reads
+
+The three paragraphs above are the original finding, kept verbatim as the record of the
+defect. As of this release, all three are corrected:
+
+- **`mix.exs` no longer says "no streaming API at all"** and does not name `websockex`
+  because it is not the transport — `WebSockex` is, and it is now a declared dependency.
+- **`get_order_book/2` is still `:unsupported`, and the reason is now narrow and true**:
+  the REST API publishes no depth. Depth arrives by subscription — `NYSE_BOOK`,
+  `NASDAQ_BOOK` and `OPTIONS_BOOK` are decoded and delivered.
+- **`streamable` is `[:quotes, :top_of_book, :order_book, :candles, :orders, :fills]`.**
+  `Feed` bootstraps the Streamer through `GET /userPreference` and falls back to the REST
+  poll — reporting `:internal_poll` rather than `:stream` — only when that bootstrap fails.
+
+The lesson this section exists to carry forward: **the error was reading the OpenAPI
+documents and stopping there.** Neither document claims to describe the whole venue: the
+Streamer is documented in the prose beside them. A capability audit that reads only the
+machine-readable specification will miss a transport that vendor chose not to put in one.
