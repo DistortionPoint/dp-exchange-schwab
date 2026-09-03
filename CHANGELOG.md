@@ -31,6 +31,58 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **The Streamer is connected to the facade.** `subscribe/2` now bootstraps it through
+  `GET /userPreference` and delivers over the socket; `coverage/1` reports `:stream`.
+
+  The socket, its protocol, its field tables and its decoders all shipped last release —
+  and **nothing called them.** `Feed` was still a REST poll, `subscribe/2` still routed to
+  it, and `capabilities/0` already declared `streamable: [:quotes, :top_of_book,
+  :order_book, :candles, :orders, :fills]`. **Four of those six reached no subscriber by any
+  route.** Every test passed the whole time: the socket's own tests exercise its callbacks
+  directly, and no test asked what a consumer receives.
+
+  That is an over-declaration, which fails in a caller's hands rather than in CI, and it is
+  the exact defect this package's own guide warns about in the other direction.
+
+- **`Feed` falls back to polling when the bootstrap fails, and says so.** No token, an
+  expired one, or a response without `streamerInfo` leaves the feed polling, emitting
+  `:degraded` with the reason, and reporting `:internal_poll` on every symbol. **The route
+  is always visible.** A poll that reported `:stream` would be this family's signature
+  defect; a fallback that reported nothing would leave a consumer wondering where depth went.
+
+- **`Feed.subscribe/3`, `unsubscribe/2` and `wanted/1`.** The feed now distinguishes what was
+  *asked for* from what has *arrived*, which `coverage/1` deliberately does not.
+
+### Fixed
+
+- **`subscribe/2` silently dropped symbols that had not delivered yet.** It read the current
+  set out of `coverage/1` and re-sent the union — and coverage reports only what has actually
+  arrived, so a symbol subscribed a moment earlier and not yet quoted was absent from it and
+  was unsubscribed by the next call.
+
+  Observed-versus-intended is the distinction this family insists on, and here it had been
+  applied to the wrong set: reporting only what arrived is right, and *subscribing* to only
+  what arrived is a loss.
+
+- **A consumer's `Core.Config` overrides now reach the feed.** `Config` resolves through the
+  calling process and its `$callers` chain; a `GenServer` is in neither. The feed snapshots
+  the starting caller's overrides and re-applies them in its own process and in the poller's
+  — without which a consumer that swapped the rate limiter for its own async test would find
+  the feed metering against the global one.
+
+### Documentation
+
+- **Three stale claims about the socket corrected**, in `README.md`, `DpExchange.Schwab`'s
+  moduledoc and `Rest.get_top_of_book/3`. `get_order_book/2`'s reason has now changed three
+  times behind one unchanged `:unsupported` — first "the venue has no order book", which was
+  false; then "the Streamer is not implemented here", which was true and no longer is; now
+  **"the REST API publishes no depth"**, which is the narrow thing that is actually true.
+
+  Two of the three reasons were wrong and the value never moved to show it. That is the
+  argument for writing the reason down rather than the value alone.
+
 ### Documentation
 
 - **`streamable` now names what the Streamer carries** — quotes, top of book, **depth** and

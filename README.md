@@ -44,13 +44,19 @@ price.
 delivering nothing at 3am is correct, and a consumer that alarms on silence would alarm
 every night — making a real outage indistinguishable from a Saturday.
 
-**This package has no order book and no socket. The venue has both.** Schwab publishes a
-WebSocket **Streamer** with 15 services, three of which carry depth (`NYSE_BOOK`,
-`NASDAQ_BOOK`, `OPTIONS_BOOK`) and one of which carries order and fill events
-(`ACCT_ACTIVITY`). It is documented in the prose beside the OpenAPI specifications, not in
-them, which is how this README came to claim the venue had neither. `get_order_book/2` is
-`:unsupported` and the feed is a REST poll behind `Core.PollingFeed` **until the Streamer
-is implemented here** — not because there is nothing to implement.
+**This package speaks the Streamer.** Schwab publishes a WebSocket **Streamer** with 15
+services — `LEVELONE_*` for quotes and top of book, `NYSE_BOOK`, `NASDAQ_BOOK` and
+`OPTIONS_BOOK` for depth, `CHART_*` for candles, and `ACCT_ACTIVITY` for order and fill
+events. It is documented in the prose beside the OpenAPI specifications, not in them, which
+is how this README once claimed the venue had no socket at all.
+
+`subscribe/2` bootstraps it through `GET /userPreference` and `coverage/1` reports
+`:stream`. **Where that bootstrap fails — no token, an expired one, a response without
+`streamerInfo` — the feed polls instead, emits `:degraded`, and reports `:internal_poll` for
+every symbol.** The route is always visible; nothing claims to be a stream that is not one.
+
+`get_order_book/2` remains `:unsupported`, and the reason is now narrow and true: **the REST
+API publishes no depth.** Depth on this venue arrives by subscription.
 
 **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection —
 every lookup is a search. `get_symbols/1` therefore requires a `:query` and returns

@@ -351,9 +351,6 @@ defmodule DpExchange.Schwab.Capabilities do
       # nearest of the three.
       supported_time_in_force: [:day, :gtc, :fok, :ioc],
 
-      # Quotes, and they arrive by poll. What a consumer receives is identical to a
-      # streaming venue's; `coverage/1` reports `:internal_poll`, so the difference is
-      # visible as what is arriving rather than as how it got here.
       # **What the Streamer actually carries, now that this package speaks it.**
       #
       # `LEVELONE_*` gives quotes and top of book, `CHART_*` gives candles, `NYSE_BOOK`,

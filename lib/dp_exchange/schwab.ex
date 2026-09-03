@@ -30,13 +30,20 @@ defmodule DpExchange.Schwab do
   minting a new refresh token each time with a fresh seven days. A host that keeps
   refreshing never needs a person again.
 
-  **`get_order_book/2` is `:unsupported`, and the reason matters more than the value.**
-  It used to read "there is no order book and no socket" — a claim about the venue, and
-  wrong. The venue has both. **This package** has neither yet: the REST API returns no
-  depth, and the WebSocket **Streamer** that does — `NYSE_BOOK`, `NASDAQ_BOOK`,
-  `OPTIONS_BOOK` — is not implemented here. The value stays `:unsupported` because that is
-  still true of this package today; the reason changes because the old one was false and
-  would have stopped anyone looking.
+  **`get_order_book/2` is `:unsupported`, and the reason has now changed twice.** It first
+  read "there is no order book and no socket" — a claim about the venue, and wrong. The
+  venue has both. It then read that the Streamer's depth services were not implemented here,
+  which was true until this release and is not now: `NYSE_BOOK`, `NASDAQ_BOOK` and
+  `OPTIONS_BOOK` are decoded and delivered, and `streamable` names `:order_book`.
+
+  What remains true is narrower and is the only thing this value now says: **the REST API
+  publishes no depth**, so there is nothing for a *pull* call to return. Depth on this venue
+  arrives by subscription. A caller wanting it calls `subscribe/2` and reads `coverage/1`,
+  not `get_order_book/2`.
+
+  That is three different reasons behind one unchanged `:unsupported`, which is the argument
+  for writing the reason down rather than the value alone — two of the three were wrong, and
+  the value never moved to show it.
 
   **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection
   — all six of its projections search against a term — so `get_symbols/1` requires a
@@ -312,15 +319,22 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_rate_limit_status(_credentials, _opts \\ []), do: Venue.not_supported()
 
-  # --- streaming, which here is a poll ------------------------------------
+  # --- streaming: the Streamer, or a poll when it cannot bootstrap --------
 
+  @doc """
+  Adds `symbols` to the feed's set. `opts[:to]` receives them; the caller by default.
+
+  **The set this adds to is what was asked for, not what has arrived.** An earlier version
+  read the current set out of `coverage/1` and re-sent the union, which silently dropped
+  every symbol that had been subscribed and not yet quoted — a real loss dressed as an
+  idempotent update.
+  """
   @impl true
   def subscribe(symbols, opts \\ []) do
     feed = feed(opts)
 
     if alive?(feed) do
-      current = feed |> Feed.coverage() |> Map.keys()
-      Feed.update_symbols(feed, Enum.uniq(current ++ symbols))
+      Feed.subscribe(feed, symbols, opts)
     else
       {:error, :feed_not_started}
     end
@@ -329,13 +343,7 @@ defmodule DpExchange.Schwab do
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     feed = feed(opts)
-
-    if alive?(feed) do
-      remaining = feed |> Feed.coverage() |> Map.keys() |> Enum.reject(&(&1 in symbols))
-      Feed.update_symbols(feed, remaining)
-    else
-      :ok
-    end
+    if alive?(feed), do: Feed.unsubscribe(feed, symbols), else: :ok
   end
 
   @impl true

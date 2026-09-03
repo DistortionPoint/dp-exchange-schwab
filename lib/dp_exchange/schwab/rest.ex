@@ -175,8 +175,8 @@ defmodule DpExchange.Schwab.Rest do
   `Core.Types.Quote` has no fields for them now.
 
   **This is not the venue's order book.** Schwab publishes depth over its WebSocket Streamer
-  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`), which this package does not speak yet — see
-  `get_order_book/2`. This is the top of it, from REST.
+  (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`), which this package now speaks — subscribe
+  for it. This is the top of it, from REST, and REST publishes no more than the top.
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
