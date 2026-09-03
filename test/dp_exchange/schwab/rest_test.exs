@@ -83,6 +83,16 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
     end
 
+    test "a non-numeric price refuses the quote rather than delivering price: nil" do
+      # Decimal.new/1 used to raise here. The fix must not trade a crash for a Quote whose
+      # required :price is silently nil, which is the same substitution wearing a
+      # quieter shape.
+      body = quote_body(%{"lastPrice" => "null"})
+
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+    end
+
     test "a quote the venue did not date fails closed" do
       body = %{"AAPL" => %{"quote" => %{"lastPrice" => 227.5}}}
 

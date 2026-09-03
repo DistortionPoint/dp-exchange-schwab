@@ -218,12 +218,13 @@ defmodule DpExchange.Schwab.Rest do
   defp quote_row(_other, _native), do: {:error, :unexpected_response_shape}
 
   defp build_quote(native, row) do
-    with {:ok, price} <- quoted_price(row),
+    with {:ok, raw_price} <- quoted_price(row),
+         {:ok, price} <- required_decimal(raw_price, :price),
          {:ok, timestamp} <- venue_time(row) do
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         price: decimal(price),
+         price: price,
          volume: decimal(row["totalVolume"]),
          timestamp: timestamp,
          provider: :schwab
@@ -384,19 +385,23 @@ defmodule DpExchange.Schwab.Rest do
     # report `:unexpected_response_shape` for a row whose real problem is that it cannot be
     # placed in time.
     with {:ok, timestamp} <- candle_time(row),
-         {:ok, open} <- required(row, "open"),
-         {:ok, high} <- required(row, "high"),
-         {:ok, low} <- required(row, "low"),
-         {:ok, close} <- required(row, "close") do
+         {:ok, raw_open} <- required(row, "open"),
+         {:ok, raw_high} <- required(row, "high"),
+         {:ok, raw_low} <- required(row, "low"),
+         {:ok, raw_close} <- required(row, "close"),
+         {:ok, open} <- required_decimal(raw_open, :open),
+         {:ok, high} <- required_decimal(raw_high, :high),
+         {:ok, low} <- required_decimal(raw_low, :low),
+         {:ok, close} <- required_decimal(raw_close, :close) do
       {:ok,
        %Candle{
          symbol: symbol,
          timeframe: timeframe,
          opened_at: timestamp,
-         open: decimal(open),
-         high: decimal(high),
-         low: decimal(low),
-         close: decimal(close),
+         open: open,
+         high: high,
+         low: low,
+         close: close,
          volume: decimal(row["volume"]),
          provider: :schwab
        }}
@@ -1508,7 +1513,30 @@ defmodule DpExchange.Schwab.Rest do
   defp decimal(nil), do: nil
   defp decimal(""), do: nil
   defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
+  # the whole string be consumed (`{d, ""}`), is what `streamer_decode.ex` and
+  # `chain_strike/1` in this same file already do; every copy of this helper now matches.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  # A garbage or missing value in a field this contract requires must not become a `nil`
+  # carried into `@enforce_keys` — a struct's field list does not check that a value is
+  # non-nil, only that the key was given. Refuse the record instead.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 end

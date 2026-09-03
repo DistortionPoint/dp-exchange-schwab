@@ -31,6 +31,21 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Decimal.new/1` raised on a non-numeric price string — the same defect class filed
+  against `dp_exchange_webull` as DpCryptoManagement's issue #3.** Auditing every copy of
+  the raising pattern in this package found it here too, in `rest.ex`'s `decimal/1`
+  (`streamer_decode.ex` already used the safe form). Fixed with `Decimal.parse/1`,
+  requiring the whole string be consumed — matching this package's own `chain_strike/1`,
+  which already carried a comment naming the exact hazard.
+
+  The lenient fix alone would have introduced a second, quieter defect: a malformed
+  required field silently becoming `nil` instead of raising, which `@enforce_keys` does
+  not catch. `build_quote/2` and `candle/3` now refuse the record instead
+  (`{:error, {:invalid_decimal, field, value}}`), rather than delivering a `Quote` or
+  `Candle` with a fabricated-looking `nil` in a field the type promises is real.
+
 ### Added
 
 - **The Streamer is connected to the facade.** `subscribe/2` now bootstraps it through
