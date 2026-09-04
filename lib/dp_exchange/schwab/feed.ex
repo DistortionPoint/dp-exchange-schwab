@@ -427,9 +427,29 @@ defmodule DpExchange.Schwab.Feed do
 
   # A dead subscriber stops delivery. The venue must not accumulate events for a process
   # that no longer exists.
+  #
+  # A subscriber may be a raw pid or a registered name — `subscribe/2`'s `to:` accepts
+  # either, matching ordinary OTP practice (a consumer registering itself by name and
+  # handing that name to a producer). `Process.alive?/1` only accepts a pid and raises on
+  # anything else, so a registered-name subscriber crashed this whole GenServer on every
+  # delivery (same defect, same fix, as `dp-exchange-coinbase`'s `Feed.fan_out/2` —
+  # DpCryptoManagement's issue #15). Resolving first, uniformly, fixes both: a dead pid
+  # resolves to itself and `Process.alive?/1` filters it; an unregistered name resolves
+  # to `nil` and is silently skipped, the same as a dead subscriber already was.
   defp fan_out(subscribers, message) do
-    Enum.each(subscribers, fn pid -> if Process.alive?(pid), do: send(pid, message) end)
+    Enum.each(subscribers, fn subscriber ->
+      case resolve_subscriber(subscriber) do
+        pid when is_pid(pid) -> send(pid, message)
+        nil -> :ok
+      end
+    end)
   end
+
+  defp resolve_subscriber(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: pid
+  end
+
+  defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
 
   defp notify(state, notice) do
     fan_out(

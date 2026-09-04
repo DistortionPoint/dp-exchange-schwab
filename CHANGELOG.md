@@ -33,6 +33,15 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
+  issue #15, same defect found on the sibling `dp_exchange_coinbase` package.**
+  `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called
+  `Process.alive?/1` on it directly — which only accepts a pid and raises on anything
+  else. A consumer registering itself under a name (ordinary OTP practice) and handing
+  that name to `to:` crash-looped the whole `Feed` GenServer on every delivery. Fixed by
+  resolving a subscriber (pid or name) to a pid first, treating an unregistered name the
+  same as a dead pid: silently skipped, never a crash.
+
 - **`Decimal.new/1` raised on a non-numeric price string — the same defect class filed
   against `dp_exchange_webull` as DpCryptoManagement's issue #3.** Auditing every copy of
   the raising pattern in this package found it here too, in `rest.ex`'s `decimal/1`
