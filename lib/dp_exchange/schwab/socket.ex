@@ -36,6 +36,22 @@ defmodule DpExchange.Schwab.Socket do
 
   require Logger
 
+  # Chosen against `Feed`'s own `@call_timeout` (15s), not inherited.
+  #
+  # `WebSockex.Conn` defaults to `socket_connect_timeout: 6_000` and
+  # `socket_recv_timeout: 5_000` (measured in `deps/websockex/lib/websockex/conn.ex:10-11`),
+  # and passing no options silently accepts them. That is 11s of a 15s budget spent on TCP
+  # and the HTTP upgrade alone — before this venue's LOGIN round trip, which `Feed` must
+  # also fit inside the same call, since the Streamer accepts no subscription until it has
+  # answered the login. `Feed` is a named, shared process, so that window is borne by every
+  # other consumer's queued call, not only the one that triggered the connect.
+  #
+  # 3s + 2s leaves real room for the login and first subscribe. Both stay overridable, and
+  # setting them changes no failure semantics: `start_link/1` still returns
+  # `{:error, reason}` synchronously exactly as before.
+  @socket_connect_timeout_ms 3_000
+  @socket_recv_timeout_ms 2_000
+
   @doc """
   Opens the Streamer for `info`, logging in with `access_token`.
 
@@ -57,7 +73,26 @@ defmodule DpExchange.Schwab.Socket do
       subscriptions: MapSet.new()
     }
 
-    WebSockex.start_link(Keyword.get(opts, :url, info.socket_url), __MODULE__, state)
+    WebSockex.start_link(
+      Keyword.get(opts, :url, info.socket_url),
+      __MODULE__,
+      state,
+      connection_opts(opts)
+    )
+  end
+
+  @doc """
+  The connection options handed to `WebSockex.start_link/4`.
+
+  Exposed so the deliberate timeouts can be asserted without opening a real socket — a
+  later refactor must not be able to drop them back to the dependency's defaults unnoticed.
+  """
+  @spec connection_opts(keyword()) :: keyword()
+  def connection_opts(opts) do
+    opts
+    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
+    |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
+    |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
   end
 
   @doc """

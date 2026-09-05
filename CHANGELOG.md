@@ -33,6 +33,22 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **The Streamer's connect budget was inherited by accident, not chosen — family-wide
+  defect sweep, S3.** `Socket.start_link/1` passed no options to `WebSockex.start_link/4`,
+  so it silently accepted the dependency's general-purpose defaults:
+  `socket_connect_timeout: 6_000` and `socket_recv_timeout: 5_000` (measured in
+  `deps/websockex/lib/websockex/conn.ex:10-11`). That is 11 seconds of `Feed`'s own
+  15-second `@call_timeout` spent on TCP and the HTTP upgrade *before* the Streamer's LOGIN
+  round trip — which has to fit inside the same call, since the venue accepts no
+  subscription until it has answered the login. `Feed` is a named, shared process, so an
+  unreachable venue made every other consumer's queued call wait out that window too.
+
+  Now set deliberately to 3s and 2s, chosen against that budget and documented with the
+  arithmetic, both overridable and forwarded from `Feed`. This changes no failure
+  semantics — `start_link/1` still returns `{:error, reason}` synchronously exactly as
+  before. Regression tests pin the values and the overrides so a later refactor cannot
+  quietly fall back to the dependency's defaults.
+
 - **Every `CHART_FUTURES` candle failed, silently and permanently — found in the
   family-wide defect sweep (S1,
   `docs/design/2026-09-05_family-wide-defect-sweep.md`).** `StreamerFields` mapped

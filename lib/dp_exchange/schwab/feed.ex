@@ -331,7 +331,11 @@ defmodule DpExchange.Schwab.Feed do
          {:ok, info} <- StreamerInfo.from_user_preference(body),
          {:ok, token} <- access_token(state.credentials) do
       Socket.start_link(
-        Keyword.merge(Keyword.take(state.opts, [:url]),
+        Keyword.merge(
+          # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
+          # chooses deliberate defaults rather than inheriting websockex's, which do not
+          # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
+          Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
           streamer_info: info,
           access_token: token,
           subscriber: self()

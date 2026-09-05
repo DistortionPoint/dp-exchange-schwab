@@ -334,4 +334,53 @@ defmodule DpExchange.Schwab.SocketTest do
       refute_received {:dp_exchange, :schwab, _anything}
     end
   end
+
+  describe "the connect budget is chosen, not inherited" do
+    # `start_link/1` passed no options to `WebSockex.start_link/4`, so it silently accepted
+    # the dependency's general-purpose defaults — `socket_connect_timeout: 6_000` and
+    # `socket_recv_timeout: 5_000` (`deps/websockex/lib/websockex/conn.ex:10-11`). That is
+    # 11s of `Feed`'s 15s `@call_timeout` spent before the Streamer's LOGIN round trip,
+    # which must also fit inside the same call, since no subscription is accepted until the
+    # venue answers it. `Feed` is a named, shared process, so every other consumer's queued
+    # call waits out that window too.
+    #
+    # Asserted against `connection_opts/1` rather than by opening a socket, so this stays
+    # tier-1 — and so a later refactor cannot quietly drop back to the dependency's
+    # defaults without failing here.
+    test "deliberate timeouts are applied, not websockex's defaults" do
+      opts = Socket.connection_opts([])
+
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 3_000
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 2_000
+    end
+
+    test "the whole connect budget fits inside Feed's own call timeout, with room to spare" do
+      opts = Socket.connection_opts([])
+
+      total =
+        Keyword.fetch!(opts, :socket_connect_timeout) + Keyword.fetch!(opts, :socket_recv_timeout)
+
+      # Room for the LOGIN round trip and the first subscribe, both of which must also fit
+      # inside the same 15s call. Websockex's own defaults total 11_000 and would not.
+      assert total <= 5_000
+    end
+
+    test "a caller override wins, on either timeout independently" do
+      connect_override = Socket.connection_opts(socket_connect_timeout: 250)
+
+      assert Keyword.fetch!(connect_override, :socket_connect_timeout) == 250
+      assert Keyword.fetch!(connect_override, :socket_recv_timeout) == 2_000
+
+      recv_override = Socket.connection_opts(socket_recv_timeout: 100)
+
+      assert Keyword.fetch!(recv_override, :socket_recv_timeout) == 100
+      assert Keyword.fetch!(recv_override, :socket_connect_timeout) == 3_000
+    end
+
+    test "unrelated opts never leak into the connection options" do
+      opts = Socket.connection_opts(url: "wss://x", subscriber: self(), access_token: "t")
+
+      assert Enum.sort(Keyword.keys(opts)) == [:socket_connect_timeout, :socket_recv_timeout]
+    end
+  end
 end
