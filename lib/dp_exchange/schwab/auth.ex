@@ -274,7 +274,18 @@ defmodule DpExchange.Schwab.Auth do
 
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      # Forwarded for the same family-wide reason as `Rest.request_opts/1` — see its
+      # comment. Not defaulted here either, and for a stronger reason than a one-off
+      # call: forcing a wait on an already-spent, at-most-once refresh token buys
+      # nothing and only delays the caller from finding out it needs to re-authenticate.
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :schwab, raw_status: true, retry_attempts: 0)
 
     # `:retry_attempts` is dropped from the caller's options above and forced to 0 here,

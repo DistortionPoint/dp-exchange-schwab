@@ -54,6 +54,24 @@ defmodule DpExchange.Schwab.Feed do
   30-minute life, so `Core.PollingFeed` spreads symbols across the interval rather than
   sweeping them in a burst. The socket has no such cost: one connection carries every
   symbol.
+
+  ## `acquire`, not `check`, on the fallback poll
+
+  A moduledoc worth carrying from `dp_exchange_robinhood`'s `Feed`, which named this shape
+  first (DpCryptoManagement's issue #16), and confirmed live at worse scale on
+  `dp_exchange_webull`'s own periodic replay (that package's issue #23). The reasoning
+  applies here unchanged: `check/3` answers "is there capacity right now," and a poll that
+  finds none simply skips the symbol for that cycle — the exact failure mode Robinhood
+  measured as 87 of 87 symbols delivering collapsing to 8 of 87 in a single tick, purely
+  from our own limiter, not the venue.
+
+  This module's `request_opts` — shared by the fallback poll's `Rest.get_price/3` calls
+  and this module's own Streamer-bootstrap call to `Rest.get_user_preference/2` — defaults
+  `:rate_limit_blocking` to `true` for exactly that reason: neither call site has a
+  one-off caller waiting synchronously on a tight deadline, so blocking for capacity is
+  free and a slower cycle beats a missing price. `Rest.request_opts/1` itself does **not**
+  default this — a direct, one-off call through `Rest` may legitimately want fail-fast,
+  and this module must not decide that for it.
   """
 
   use GenServer
@@ -173,14 +191,17 @@ defmodule DpExchange.Schwab.Feed do
       credentials: Keyword.get(opts, :credentials, %{}),
       opts: opts,
       request_opts:
-        Keyword.take(opts, [
+        opts
+        |> Keyword.take([
           :limiter,
           :plug,
           :req_adapter,
           :market_data_url,
           :trader_url,
-          :retry_attempts
-        ]),
+          :retry_attempts,
+          :rate_limit_blocking
+        ])
+        |> Keyword.put_new(:rate_limit_blocking, true),
       subscriber: subscriber,
       subscribers: MapSet.new([subscriber]),
       notice_subscribers: MapSet.new(),

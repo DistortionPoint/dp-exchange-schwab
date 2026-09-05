@@ -24,7 +24,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.{Config, Notice, Types}
+  alias DpExchange.Core.{Config, DefaultRateLimiter, Notice, Types}
   alias DpExchange.Schwab.Feed
 
   @moduletag :capture_log
@@ -275,6 +275,84 @@ defmodule DpExchange.Schwab.FeedTest do
       assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
       assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
       assert %{route: :internal_poll} = Feed.status(feed)
+    end
+  end
+
+  describe "rate_limit_blocking — DpCryptoManagement issue #23 (fallback poll)" do
+    # A limiter with a single, already-spent allowance: `record/3` commits usage the way
+    # `acquire/3` does, without `acquire/3`'s own wait — so the bucket starts genuinely
+    # empty and the next request against it has to wait out one whole emission interval
+    # (~300ms) regardless of which mode reaches it. That wait is the one observable
+    # difference between blocking (`acquire/3`, which waits it out and then succeeds) and
+    # fail-fast (`check/3`, which refuses immediately and never retries before the next
+    # poll tick) — proving `rate_limit_blocking` actually reaches `Core.HttpClient` on the
+    # fallback poll route, across the process boundary `apply_config/1` exists to cross.
+    #
+    # `Config.put_override(:rate_limit_module, DefaultRateLimiter)` overrides this file's
+    # own `setup` block (which points every other test at `PermissiveLimiter`) so these
+    # two tests exercise the real limiter — `state.config_snapshot` captures whichever
+    # module is active in the test process at the moment `start_feed/1` calls
+    # `Feed.start_link/1`, so the override has to happen first.
+    defp exhausted_limiter do
+      name = :"limiter_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        DefaultRateLimiter.start_link(
+          name: name,
+          limits: %{default: %{limit: 1, per_ms: 300, burst: 0}}
+        )
+
+      :ok = DefaultRateLimiter.record(:schwab, 1, limiter: name)
+      name
+    end
+
+    defp poll_plug do
+      fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          Req.Test.json(conn, quote_body())
+        end
+      end
+    end
+
+    test "the fallback poll defaults to blocking, matching this feed's own documented design: a slow cycle, not a missing price" do
+      Config.put_override(:rate_limit_module, DefaultRateLimiter)
+
+      feed =
+        start_feed(
+          plug: poll_plug(),
+          retry_attempts: 0,
+          interval_ms: 60_000,
+          start_delay_ms: 0,
+          symbols: ["AAPL"],
+          limiter: exhausted_limiter()
+        )
+
+      # check/3 would refuse immediately and never retry inside this window (the next
+      # tick is 60s away) — only acquire/3 (the default) delivers here at all. The
+      # bootstrap's own `/userPreference` call shares this same limiter and opts, so it
+      # waits out the bucket too before falling back — hence the generous timeout.
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert %{route: :internal_poll} = Feed.status(feed)
+    end
+
+    test "a caller can still opt into fail-fast explicitly, and it costs the poll cycle" do
+      Config.put_override(:rate_limit_module, DefaultRateLimiter)
+
+      feed =
+        start_feed(
+          plug: poll_plug(),
+          retry_attempts: 0,
+          interval_ms: 60_000,
+          start_delay_ms: 0,
+          symbols: ["AAPL"],
+          limiter: exhausted_limiter(),
+          rate_limit_blocking: false
+        )
+
+      refute_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 1_500
+      assert Process.alive?(feed)
     end
   end
 

@@ -304,4 +304,48 @@ defmodule DpExchange.Schwab.AuthTest do
       assert Auth.token_url(token_url: "http://localhost/token") == "http://localhost/token"
     end
   end
+
+  describe "rate_limit_blocking — family-wide gap, DpCryptoManagement issue #23" do
+    # A real limiter module, recording which entry point it was actually called through —
+    # the only way to prove `:rate_limit_blocking` reached `Core.HttpClient` rather than
+    # merely appearing in `request_opts/1`'s own allowlist.
+    defmodule RecordingLimiter do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, _weight, _opts) do
+        Process.put(:rate_limiter_call, :acquire)
+        :ok
+      end
+
+      @impl true
+      def check(_provider, _weight, _opts) do
+        Process.put(:rate_limiter_call, :check)
+        :ok
+      end
+
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+    end
+
+    test "rate_limit_blocking: true reaches Core.HttpClient as acquire/3, not check/3" do
+      Config.put_override(:rate_limit_module, RecordingLimiter)
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
+
+      assert {:ok, _renewed} =
+               Auth.refresh(@creds, plug: responding(body), rate_limit_blocking: true)
+
+      assert Process.get(:rate_limiter_call) == :acquire
+    end
+
+    test "rate_limit_blocking: false (or omitted) reaches Core.HttpClient as check/3" do
+      Config.put_override(:rate_limit_module, RecordingLimiter)
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
+
+      assert {:ok, _renewed} = Auth.refresh(@creds, plug: responding(body))
+
+      assert Process.get(:rate_limiter_call) == :check
+    end
+  end
 end

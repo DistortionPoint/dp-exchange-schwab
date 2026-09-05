@@ -1536,9 +1536,25 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # `:rate_limit_blocking` is forwarded from here too — a family-wide gap
+  # (DpCryptoManagement's issue #23's investigation, alongside `dp_exchange_webull`'s own
+  # issue #23 and `dp_exchange_robinhood`'s issue #16): `Core.HttpClient.check_rate_limits/1`
+  # reads it to choose `acquire/3` over fail-fast `check/3`, and no caller of this module
+  # could ever set it. Not defaulted — a direct call through this module (trading,
+  # account reads) is a one-off, and fail-fast may be exactly what that caller wants. See
+  # `Feed`'s moduledoc for the one place in this package where a default *is* correct:
+  # its own fallback poll route, which is a background replay this module has no part in.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :schwab, raw_status: true)
   end
 

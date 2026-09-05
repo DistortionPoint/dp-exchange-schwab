@@ -63,6 +63,42 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`:rate_limit_blocking` was unreachable everywhere in this package, including on the
+  fallback poll route that most needs it — family-wide gap, DpCryptoManagement's issue
+  #23.** `Core.HttpClient.check_rate_limits/1` reads this option to choose `acquire/3`
+  (wait for capacity) over fail-fast `check/3`, and its own error message on a
+  self-inflicted throttle tells a caller to set it — but no caller could, anywhere in this
+  package: `Rest.request_opts/1`, `Auth.request_opts/1` and `Feed`'s own `request_opts`
+  allowlist all stripped it before it ever reached `Core.HttpClient`. The same defect
+  (`dp_exchange_webull`'s issue #23, `dp_exchange_robinhood`'s issue #16) audited across
+  the rest of the family; this venue was one of four still carrying it.
+
+  **Checked for an HTTP-based periodic replay comparable to Webull's blind resubscribe,
+  as the investigation asked**, and this venue has one: `Feed`'s fallback poll route —
+  when the Streamer cannot be bootstrapped (`GET /userPreference` fails), `Feed` falls
+  back to polling `Rest.get_price/3` on `Core.PollingFeed`'s own timer, exactly the shape
+  `dp_exchange_robinhood`'s `Feed` names first (its issue #16: `check/3` answers "is there
+  capacity right now," and a poll that finds none simply skips the symbol for that
+  cycle — 87 of 87 symbols delivering collapsing to 8 of 87 in a single tick, purely from
+  the package's own limiter). `Feed`'s own `request_opts` — shared by that poll and by its
+  Streamer-bootstrap call — now defaults `:rate_limit_blocking` to `true` for the same
+  reason Robinhood's and Webull's do: neither call site has a one-off caller waiting
+  synchronously on a tight deadline, so blocking for capacity is free and a slower cycle
+  beats a missing price. `Rest.request_opts/1` and `Auth.request_opts/1` forward the
+  option without defaulting it — a direct one-off call (trading, account reads, a token
+  refresh) may legitimately want fail-fast, and neither module may decide that for it;
+  `Auth`'s refresh is additionally at-most-once, so forcing it to wait would only delay
+  discovering a credential needs a person, not help it.
+
+  Proven end to end on the poll route with a real, pre-exhausted `Core.DefaultRateLimiter`
+  (named, passed via `:limiter`, with `Config.put_override(:rate_limit_module, …)` set
+  *before* `Feed.start_link/1` is called — `Feed` snapshots `Core.Config` at that moment
+  and re-applies it inside its own process and inside the poller's fetch closure,
+  specifically so a consumer's async-test seam crosses that process boundary; the snapshot
+  has to be captured with the right module already active): the poll's HTTP call reaches
+  the stubbed venue in blocking mode by default, and an explicit
+  `rate_limit_blocking: false` keeps it fail-fast and costs that cycle's quote.
+
 - **The Streamer's connect budget was inherited by accident, not chosen — family-wide
   defect sweep, S3.** `Socket.start_link/1` passed no options to `WebSockex.start_link/4`,
   so it silently accepted the dependency's general-purpose defaults:
