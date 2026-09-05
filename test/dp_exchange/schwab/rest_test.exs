@@ -13,7 +13,7 @@ defmodule DpExchange.Schwab.RestTest do
   @moduletag :capture_log
 
   alias DpExchange.Core.Config
-  alias DpExchange.Core.Types.{Candle, Quote}
+  alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.Rest
 
   defmodule PermissiveLimiter do
@@ -131,6 +131,125 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_price("AAPL", @creds, plug: responding(%{}, 500), retry_attempts: 0)
 
       assert message =~ "500"
+    end
+  end
+
+  describe "a mutual fund's QuoteMutualFund — no lastPrice, no mark, no bid, no ask" do
+    # Built from the vendor's own schema
+    # (docs/reference/schwab/openapi/market-data-production.openapi.json), NOT from what
+    # the pre-fix code happened to accept: `QuoteMutualFund` has exactly nine properties —
+    # 52WeekHigh, 52WeekLow, closePrice, nAV, netChange, netPercentChange, securityStatus,
+    # totalVolume, tradeTime — and none of `lastPrice`, `mark`, `bidPrice` or `askPrice`.
+    # Before the fix, `quoted_price/1` read `row["lastPrice"] || row["mark"]`, found
+    # neither, and reported `{:error, :unexpected_response_shape}` for a payload the venue
+    # sent correctly — attributing the failure to the venue for a response that was fine.
+    defp mutual_fund_body(fields \\ %{}) do
+      %{
+        "SWPPX" => %{
+          "quote" =>
+            Map.merge(
+              %{
+                "nAV" => 62.34,
+                "closePrice" => 62.1,
+                "totalVolume" => 184_223,
+                "tradeTime" => 1_787_936_147_000,
+                "securityStatus" => "Normal"
+              },
+              fields
+            )
+        }
+      }
+    end
+
+    test "get_price/3 reads nAV as the price, exactly as it reads lastPrice for an equity" do
+      assert {:ok, %Quote{} = quote_struct} =
+               Rest.get_price("SWPPX", @creds,
+                 plug: responding(mutual_fund_body()),
+                 retry_attempts: 0
+               )
+
+      assert quote_struct.symbol == "SWPPX"
+      assert Decimal.equal?(quote_struct.price, Decimal.from_float(62.34))
+      assert Decimal.equal?(quote_struct.volume, Decimal.new(184_223))
+      assert quote_struct.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert quote_struct.provider == :schwab
+    end
+
+    test "closePrice is never read as a substitute price — nAV absent fails closed" do
+      # closePrice is yesterday's NAV. Falling back to it would be the previous-day
+      # price wearing today's timestamp, the same mistake this package already refuses
+      # for LEVELONE_EQUITIES's previous_close.
+      body = mutual_fund_body(%{"nAV" => nil})
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_price("SWPPX", @creds, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "get_top_of_book/3 refuses cleanly rather than returning an all-nil book" do
+      # QuoteMutualFund carries no bidPrice/askPrice/bidSize/askSize keys at all — a fund
+      # prices once a day at NAV, it does not quote a spread. Before this fix there was no
+      # such refusal: the fields would all read as nil and the caller would get back a
+      # TopOfBook indistinguishable from a real book that just happened to be empty.
+      assert {:error, :no_top_of_book} =
+               Rest.get_top_of_book("SWPPX", @creds,
+                 plug: responding(mutual_fund_body()),
+                 retry_attempts: 0
+               )
+    end
+
+    test "an equity's top of book is unaffected by the mutual-fund refusal" do
+      body = %{
+        "AAPL" => %{
+          "quote" => %{
+            "bidPrice" => 227.4,
+            "askPrice" => 227.6,
+            "quoteTime" => 1_787_936_147_000
+          }
+        }
+      }
+
+      assert {:ok, %TopOfBook{} = top} =
+               Rest.get_top_of_book("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(top.bid, Decimal.from_float(227.4))
+    end
+  end
+
+  describe "get_symbol_quote/3 — the one REST read that skips SymbolFormat.validate/1" do
+    test "a symbol with a `/` is percent-encoded as one path segment, not split into two" do
+      # `get_symbol_quote/3` deliberately takes `to_exchange_symbol/1`'s total translation
+      # rather than `validate/1`, so a future's native spelling (`/ESZ25`) reaches this far.
+      # `URI.encode/1`'s default predicate leaves `/` unescaped — it is meant for a whole
+      # URI, where `/` is a real separator — so encoding the symbol that way used to build
+      # `.../marketdata/v1//ESZ25/quotes`: an extra empty segment ahead of the real one,
+      # not the single-segment path the venue expects.
+      capture_path = fn conn ->
+        send(self(), {:request_path, conn.request_path})
+        Req.Test.json(conn, %{})
+      end
+
+      assert {:ok, _body} =
+               Rest.get_symbol_quote("/ESZ25", @creds,
+                 plug: capture_path,
+                 retry_attempts: 0
+               )
+
+      assert_received {:request_path, path}
+      assert path == "/marketdata/v1/%2FESZ25/quotes"
+      refute path =~ "//ESZ25"
+    end
+
+    test "a plain equity symbol is unaffected by the segment-escaping fix" do
+      capture_path = fn conn ->
+        send(self(), {:request_path, conn.request_path})
+        Req.Test.json(conn, %{})
+      end
+
+      assert {:ok, _body} =
+               Rest.get_symbol_quote("AAPL", @creds, plug: capture_path, retry_attempts: 0)
+
+      assert_received {:request_path, path}
+      assert path == "/marketdata/v1/AAPL/quotes"
     end
   end
 

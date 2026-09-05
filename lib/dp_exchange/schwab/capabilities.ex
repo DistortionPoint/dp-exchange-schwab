@@ -235,27 +235,58 @@ defmodule DpExchange.Schwab.Capabilities do
       # does not address; that is a scope decision, and `asset_classes/0` says so.
       supported_quotes: ["USD"],
 
-      # `:spot` is the closest atom the contract has, and it understates the venue.
-      # `assetType` admits EQUITY, OPTION, FUTURE, FOREX, INDEX, MUTUAL_FUND,
-      # FIXED_INCOME and more; Core's vocabulary is `[:spot, :perp]`, which was written
-      # for crypto. Recorded as a Core gap (7.5) rather than papered over — declaring
-      # `:spot` and saying nothing would imply the venue trades only spot equities.
-      # Now expressible. `assetType` admits eleven values; these are the ones this venue
-      # trades and quotes. Until Core learned them, this read `[:spot]` with a comment
-      # saying the declaration understated the venue — and a declaration that needs a
-      # comment to be true is exactly what the struct exists to prevent.
+      # `assetType` admits EQUITY, OPTION, FUTURE, FOREX, INDEX, MUTUAL_FUND, FIXED_INCOME
+      # and more, and this used to declare nine of them: `:spot, :option, :future,
+      # :future_option, :index, :mutual_fund, :bond, :forex, :cash_equivalent`. That was a
+      # defect (S2, `docs/design/2026-09-05_family-wide-defect-sweep.md`): a capability
+      # declaration is a claim about what the *package* can route, not about what the
+      # venue's schema admits. What follows is the accounting per type, and each line
+      # names what was actually checked, not what looked plausible.
       #
-      # `EQUITY` maps to `:spot`: a share bought outright is a spot instrument. The rest
-      # are their own thing and were being flattened into it.
+      # **`:future`, `:future_option`, `:index`, `:forex` — measured refused.**
+      # `SymbolFormat.validate/1`, which every `Rest` and `Orders` function gates on
+      # before a request is built, refuses `/ESZ25`, `EUR/USD` and `$SPX` outright as
+      # `{:error, {:not_an_equity_symbol, symbol}}`. Those are the venue's own documented
+      # spellings for a future, a forex pair and an index (`market-data-production.txt`'s
+      # CHART_FUTURES parameters and the Level One services). It also contradicted this
+      # package's own `Schwab.asset_classes/0`, which has always said `[:equity]`.
+      #
+      # **`:bond` — measured refused.** A Treasury CUSIP (`912828YY0`) contains digits,
+      # which `SymbolFormat`'s `equity?/1` regex does not admit, so `validate/1` refuses
+      # it the same way. Stays dropped.
+      #
+      # **`:mutual_fund` and `:cash_equivalent` — measured routable, added back.** Both
+      # were dropped as "never measured" until they were: `SymbolFormat.validate/1`
+      # accepts `SWPPX` (a Schwab index fund) and `SNSXX` (a Schwab money-market fund) —
+      # both are plain letter tickers, and nothing in `SymbolFormat` distinguishes a
+      # mutual fund symbol from an equity one, because the venue does not spell them
+      # differently. And per the venue's own committed OpenAPI
+      # (`docs/reference/schwab/openapi/market-data-production.openapi.json`),
+      # `MutualFundResponse.quote` is `QuoteMutualFund` for BOTH `assetSubType: OEF/CEF`
+      # (ordinary and closed-end funds) and `MMF` (money-market funds, i.e. cash
+      # equivalents) — one schema, so one decode covers both, and `Rest.quoted_price/1`
+      # now reads `nAV` for it (see that function's comment for why `nAV` and not
+      # `closePrice`). `:cash_equivalent` is therefore not a separate claim from
+      # `:mutual_fund` here — it is the same routable shape under a different `assetSubType`.
+      #
+      # **`:spot` and `:option`** — routable as before: `SymbolFormat.validate/1` accepts
+      # a plain equity ticker and, separately, a 21-character fixed-width option symbol
+      # (`option?/1`), and `Rest.get_price/2`'s decode reads an EQUITY and an OPTION
+      # `quote` block correctly. `EQUITY` maps to `:spot`: a share bought outright is a
+      # spot instrument.
+      #
+      # Genuinely supporting the still-dropped types is a feature, not a defect fix
+      # (deferred, sweep §3): it needs `SymbolFormat` taught the venue's non-equity
+      # grammars — `/` + root + month code + year code for futures, `BASE/QUOTE` for
+      # forex, `$` + ticker for an index — as their own validated, non-equity shape, plus
+      # a live check that the `quote` decode this package already has actually matches
+      # what those `assetType`s return. Loosening `validate/1` without both is exactly how
+      # a `BTC`-shaped crypto pair would resolve to a real listed equity — the failure
+      # `SymbolFormat`'s own moduledoc is built against.
       supported_instrument_types: [
         :spot,
         :option,
-        :future,
-        :future_option,
-        :index,
         :mutual_fund,
-        :bond,
-        :forex,
         :cash_equivalent
       ],
 

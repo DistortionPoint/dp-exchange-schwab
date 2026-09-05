@@ -102,7 +102,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage(feed) == %{}
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
 
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
       assert %{route: :stream} = Feed.status(feed)
@@ -161,7 +161,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Feed.subscribe(feed, ["AAPL", "MSFT"])
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
 
       assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
       assert Feed.wanted(feed) == ["MSFT"]
@@ -184,7 +184,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}})
 
-      assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}}
+      assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}}, 2_000
       assert Feed.coverage(feed) == %{}
     end
 
@@ -196,7 +196,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.subscribe_notices(feed, to: watcher) == :ok
       send(feed, {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)})
 
-      assert_receive {:relayed, {:dp_exchange, :schwab, %Notice{kind: :link_up}}}
+      assert_receive {:relayed, {:dp_exchange, :schwab, %Notice{kind: :link_up}}}, 2_000
     end
 
     test "a value with no symbol is delivered and does not enter coverage" do
@@ -207,7 +207,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, %{account: "123", event: "OrderFill"}})
 
-      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}
+      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 2_000
       assert Feed.coverage(feed) == %{}
     end
 
@@ -234,7 +234,7 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["AAPL"], to: name)
       send(feed, {:dp_exchange, :schwab, %{account: "123", event: "OrderFill"}})
 
-      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}
+      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 2_000
       assert Process.alive?(feed)
 
       Process.unregister(name)

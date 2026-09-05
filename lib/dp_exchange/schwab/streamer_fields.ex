@@ -144,6 +144,35 @@ defmodule DpExchange.Schwab.StreamerFields do
     "8" => :chart_day
   }
 
+  # CHART_FUTURES. **Numbered differently from CHART_EQUITY starting at field 1, and this
+  # was a live defect**: the two services were sharing `@chart_equity` here, so field 1
+  # (the futures bar's Chart Time, ms since epoch) decoded as `:open`, field 2 (the real
+  # open) decoded as `:high`, and so on down the line — and `to_candle/3`, which looks for
+  # `:chart_time`, never found it, so every futures candle died as
+  # `{:error, :missing_venue_timestamp}` before a caller ever saw one. Every value stayed a
+  # plausible-looking price; only the meaning was wrong, which is why a green test suite
+  # never caught it — nothing had ever decoded a real CHART_FUTURES frame.
+  #
+  # Transcribed field-by-field from the vendor's own "2. CHART_FUTURES" table (distinct
+  # from the "1. CHART_EQUITY" table above it), `market-data-production.txt`, after line
+  # 2439:
+  #
+  #   0 key, 1 Chart Time (long, ms since epoch), 2 Open Price, 3 High Price, 4 Low Price,
+  #   5 Close Price, 6 Volume
+  #
+  # The vendor publishes no `sequence` or `chart_day` field for this service — CHART_EQUITY
+  # has both at 6 and 8; CHART_FUTURES stops at 6. Nothing is guessed into the gap: an
+  # unnamed field is absent, not carried over from the sibling table.
+  @chart_futures %{
+    "0" => :symbol,
+    "1" => :chart_time,
+    "2" => :open,
+    "3" => :high,
+    "4" => :low,
+    "5" => :close,
+    "6" => :volume
+  }
+
   # SCREENER_EQUITY and SCREENER_OPTION share a table, as the two book-style pairs do.
   #
   # **Field 4 is an array of items, not a scalar**, and each item carries its own
@@ -195,7 +224,7 @@ defmodule DpExchange.Schwab.StreamerFields do
     "SCREENER_OPTION" => @screener,
     "ACCT_ACTIVITY" => @acct_activity,
     "CHART_EQUITY" => @chart_equity,
-    "CHART_FUTURES" => @chart_equity
+    "CHART_FUTURES" => @chart_futures
   }
 
   @doc """

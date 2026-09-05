@@ -33,6 +33,108 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **Every `CHART_FUTURES` candle failed, silently and permanently — found in the
+  family-wide defect sweep (S1,
+  `docs/design/2026-09-05_family-wide-defect-sweep.md`).** `StreamerFields` mapped
+  `"CHART_FUTURES" => @chart_equity`, reusing `CHART_EQUITY`'s numbering for a service
+  the vendor numbers differently starting at field 1. Verified against the vendor's own
+  field tables in this repo's committed `market-data-production.txt`:
+  `CHART_EQUITY` is 0 key, 1 Open, 2 High, 3 Low, 4 Close, 5 Volume, 6 Sequence, 7 Chart
+  Time; `CHART_FUTURES` is 0 key, 1 Chart Time, 2 Open, 3 High, 4 Low, 5 Close, 6 Volume —
+  no sequence, no chart day, and the timestamp one field earlier. Under the shared map, a
+  futures frame's Chart Time decoded as `:open`, its real open as `:high`, and so on, and
+  `to_candle/3` — which reads `:chart_time` — never found it, so `{:error,
+  :missing_venue_timestamp}` fired on every frame. `socket.ex`'s `decode/4` swallows that
+  error into `[]`: no candle, no crash, nothing in the logs. `StreamerFields.decodable/0`
+  and `StreamerProtocol.services/0` both advertised the service as working the entire
+  time. Fixed with a separate `@chart_futures` map transcribed from the vendor's own
+  table. `grep -rn CHART_FUTURES test/` found exactly one prior hit — an assertion that
+  the name appears in a services list — and no test had ever decoded a real
+  `CHART_FUTURES` frame; added one built from the vendor's field numbering
+  (`test/dp_exchange/schwab/socket_test.exs`) plus a unit test on the field map itself
+  (`test/dp_exchange/schwab/streamer_test.exs`).
+
+- **`capabilities/0` declared instrument types the code cannot route — S2 of the same
+  sweep.** `supported_instrument_types` named `:future, :future_option, :index,
+  :mutual_fund, :bond, :forex, :cash_equivalent` alongside `:spot` and `:option`, but
+  `SymbolFormat.validate/1` — which every `Rest` and `Orders` function gates on before
+  building a request — refuses any symbol containing `-`, `/`, `_` or `:`. Traced against
+  the venue's own documented spellings: `/ESZ25` (a future), `EUR/USD` (forex) and `$SPX`
+  (an index) are all refused as `{:error, {:not_an_equity_symbol, symbol}}` before a
+  request is ever built, and the declaration contradicted this package's own
+  `Schwab.asset_classes/0`, which has always said `[:equity]`. Narrowed the declaration to
+  `[:spot, :option]` — the two shapes `SymbolFormat.validate/1` demonstrably accepted at
+  the time (a plain equity ticker, and a 21-character fixed-width option symbol) and that
+  `Rest.get_price/2`'s decode read correctly for both. `:mutual_fund`, `:bond` and
+  `:cash_equivalent` were dropped too, not because they were disproven but because nothing
+  in this repository had ever checked them — declaring an unmeasured claim is the same
+  violation in the other direction.
+  `test/dp_exchange/schwab/capabilities_test.exs:211` used to assert `:future in types`,
+  encoding the false claim; corrected to assert the routable set and to check the claim
+  against the actual gate (`SymbolFormat.validate/1`) rather than against the declaration
+  alone.
+
+  **Re-examined once measured, rather than left as "unmeasured, so dropped."**
+  `SymbolFormat.validate/1` accepts `SWPPX` (a Schwab index fund) and `SNSXX` (a Schwab
+  money-market fund) — plain letter tickers, since the venue does not spell a mutual fund
+  symbol any differently from an equity one — while a Treasury CUSIP (`912828YY0`) is
+  correctly refused, digits being outside `equity?/1`'s regex. So `:bond` stays dropped as
+  a *measured* refusal, and `:mutual_fund`/`:cash_equivalent` moved from "unmeasured" to
+  "measured routable" once the decode gap below was closed — the venue's own OpenAPI
+  schema gives money-market funds (`assetSubType: MMF`) the identical `QuoteMutualFund`
+  shape as ordinary funds (`OEF`/`CEF`), so one decode fix covers both declared types.
+  `supported_instrument_types` is now `[:spot, :option, :mutual_fund, :cash_equivalent]`.
+  Genuinely supporting the futures/forex/index types that remain dropped is still a
+  feature (deferred, sweep §3), not this fix — it needs `SymbolFormat` taught those
+  grammars as their own validated, non-equity shape, which `SymbolFormat.validate/1` is
+  deliberately NOT loosened to do here.
+
+- **A mutual fund's quote decoded as a venue error, for a payload the venue sent
+  correctly.** `SymbolFormat.validate/1` has always accepted mutual fund symbols (they are
+  spelled like equity tickers), but `Rest.quoted_price/1` read only `row["lastPrice"] ||
+  row["mark"]`, and the vendor's own `QuoteMutualFund` schema
+  (`docs/reference/schwab/openapi/market-data-production.openapi.json`) has neither field
+  — a fund does not print continuous trades. Every real mutual fund quote therefore failed
+  as `{:error, :unexpected_response_shape}`: the wrong-error twin of this family's usual
+  defect, blaming the venue for a response that was completely valid. Fixed by reading
+  `nAV` (Net Asset Value) as the price when `lastPrice`/`mark` are absent — the value the
+  fund actually transacts at, not a derived stand-in, so this is not the ask-for-a-price
+  substitution the family forbids. `closePrice` (yesterday's NAV) is deliberately never
+  read as a further fallback: absent `nAV` still fails closed exactly as the equity path
+  does. `get_top_of_book/3` also used to build an all-`nil` `TopOfBook` for a mutual fund,
+  indistinguishable from a real book that happened to be empty — `QuoteMutualFund` has no
+  `bidPrice`/`askPrice`/`bidSize`/`askSize` keys at all, so it now refuses cleanly with
+  `{:error, :no_top_of_book}` when none of those keys are present, rather than nil-filling
+  a book that does not exist. Regression tests build a `QuoteMutualFund` body from the
+  vendor's own field list (`test/dp_exchange/schwab/rest_test.exs`), asserting the decoded
+  price/volume/timestamp, the fail-closed behaviour when `nAV` is absent, and the
+  `get_top_of_book/3` refusal — plus that an equity's top of book is unaffected.
+
+- **A flaky `mix test --cover` failure, root-caused rather than dismissed.** One run
+  showed a transient failure that did not reproduce on the next; treated as a real bug
+  per this family's standard, not written off as noise. Root cause: six call sites in
+  `test/dp_exchange/schwab/feed_test.exs` did `send(feed, msg)` to a live `Feed`
+  GenServer and then `assert_receive` with ExUnit's default 100ms timeout — a genuine
+  two-hop, cross-process wait (the `Feed` has to run `handle_info` and re-`send/2` to the
+  test process), unlike this package's many same-process `assert_received` uses, which
+  follow a call that has already returned synchronously and are not at risk. Under
+  `--cover`'s instrumentation combined with `async: true`'s concurrency, 100ms is
+  occasionally not enough. Fixed by giving all six the explicit 2,000ms budget this same
+  file's bootstrap-path tests already used. Verified with 30+ clean `mix test --cover`
+  runs across varied seeds (including one under deliberate heavy CPU load) before the
+  fix, none reproducing the failure, and a further 100-run clean batch after it.
+
+- **`get_symbol_quote/3` could build a malformed path for a non-equity symbol.** It is the
+  one `Rest` function that deliberately skips `SymbolFormat.validate/1` (it reads back
+  whatever a search or a chain handed it), so a symbol like `/ESZ25` could reach
+  `URI.encode(native)` — whose default predicate leaves `/` unescaped, since it is meant
+  for a whole URI rather than one path segment — producing `.../marketdata/v1//ESZ25/quotes`,
+  an extra empty segment ahead of the real one. Fixed by restricting the predicate to
+  `URI.char_unreserved?/1`, which percent-encodes everything unsafe inside a single
+  segment (`/ESZ25` becomes `%2FESZ25`); a plain equity symbol is unaffected. Low impact
+  given the S2 fix above narrows what reaches here in practice, but it was the one place
+  the equity gate did not apply.
+
 - **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
   issue #15, same defect found on the sibling `dp_exchange_coinbase` package.**
   `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called

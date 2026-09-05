@@ -285,6 +285,39 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert futures == futures_options
     end
 
+    test "CHART_FUTURES is numbered differently from CHART_EQUITY starting at field 1" do
+      # Transcribed from the vendor's own "2. CHART_FUTURES" table
+      # (market-data-production.txt, after line 2439): 0 key, 1 Chart Time (ms since
+      # epoch), 2 Open, 3 High, 4 Low, 5 Close, 6 Volume — one field shifted from
+      # CHART_EQUITY's 0 key, 1 Open, 2 High, 3 Low, 4 Close, 5 Volume, 6 Sequence,
+      # 7 Chart Time.
+      #
+      # This is the regression for the live defect: CHART_FUTURES used to decode under
+      # `@chart_equity`'s numbering, so field 1 (the futures bar's own Chart Time) was read
+      # as `:open` and the real `:chart_time` was never found — every futures candle
+      # failed as `{:error, :missing_venue_timestamp}`, silently, because nothing had ever
+      # decoded a real CHART_FUTURES frame.
+      assert {:ok, equity} = StreamerFields.for_service("CHART_EQUITY")
+      assert {:ok, futures} = StreamerFields.for_service("CHART_FUTURES")
+
+      assert equity["1"] == :open
+      assert futures["1"] == :chart_time
+
+      assert futures == %{
+               "0" => :symbol,
+               "1" => :chart_time,
+               "2" => :open,
+               "3" => :high,
+               "4" => :low,
+               "5" => :close,
+               "6" => :volume
+             }
+
+      # The vendor's CHART_FUTURES table stops at field 6 — no sequence, no chart_day.
+      refute Map.has_key?(futures, "7")
+      refute Map.has_key?(futures, "8")
+    end
+
     test "every decodable service is one the venue actually carries" do
       # A map for a service the venue does not publish would be dead code that looks live.
       for service <- StreamerFields.decodable() do

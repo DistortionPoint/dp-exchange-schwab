@@ -237,6 +237,50 @@ defmodule DpExchange.Schwab.SocketTest do
       assert candle.opened_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
+    test "a CHART_FUTURES frame decodes under its OWN numbering, not CHART_EQUITY's" do
+      # Built from the vendor's "2. CHART_FUTURES" field table
+      # (market-data-production.txt, after line 2439): 0 key, 1 Chart Time (ms since
+      # epoch), 2 Open, 3 High, 4 Low, 5 Close, 6 Volume — shifted one field from
+      # CHART_EQUITY, which puts Open at 1 and Chart Time at 7.
+      #
+      # Before the fix, `"CHART_FUTURES" => @chart_equity` in `StreamerFields` decoded
+      # field 1 (this frame's Chart Time, 1_787_936_200_000) as `:open`, field 2 (the real
+      # open, 4500.25) as `:high`, and so on down the line — and looked for `:chart_time`
+      # at field 7, which this frame does not carry, since the vendor's CHART_FUTURES
+      # table stops at 6. `to_candle/3` returned `{:error, :missing_venue_timestamp}` for
+      # every futures candle, and `decode/4` swallows that error into `[]`: no candle, no
+      # crash, no signal.
+      data = %{
+        "data" => [
+          %{
+            "service" => "CHART_FUTURES",
+            "content" => [
+              %{
+                "key" => "/ESZ25",
+                "0" => "/ESZ25",
+                "1" => 1_787_936_200_000,
+                "2" => 4500.25,
+                "3" => 4510.5,
+                "4" => 4495.0,
+                "5" => 4505.75,
+                "6" => 12_000
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+
+      assert_received {:dp_exchange, :schwab, %Types.Candle{} = candle}
+      assert candle.opened_at == DateTime.from_unix!(1_787_936_200_000, :millisecond)
+      assert Decimal.equal?(candle.open, Decimal.new("4500.25"))
+      assert Decimal.equal?(candle.high, Decimal.new("4510.5"))
+      assert Decimal.equal?(candle.low, Decimal.new("4495.0"))
+      assert Decimal.equal?(candle.close, Decimal.new("4505.75"))
+      assert Decimal.equal?(candle.volume, Decimal.new("12000"))
+    end
+
     test "a BOOK frame emits an order book" do
       data = %{
         "data" => [

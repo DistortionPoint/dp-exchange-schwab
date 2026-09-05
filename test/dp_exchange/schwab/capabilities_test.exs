@@ -12,7 +12,9 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Capabilities, Timeframe, Venue}
+  alias DpExchange.Schwab
   alias DpExchange.Schwab.Capabilities, as: Subject
+  alias DpExchange.Schwab.SymbolFormat
 
   describe "the declaration is well-formed" do
     test "Core's own validation accepts it" do
@@ -208,15 +210,74 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       assert caps.endpoints[{:get_symbols, 1}] == :experimental
     end
 
-    test "instrument types name what the venue trades, not the nearest crypto word" do
-      # This read `[:spot]` with a comment saying it understated the venue. A declaration
-      # that needs a comment to be true is what the struct exists to prevent.
+    test "instrument types name what SymbolFormat.validate/1 can actually route, not the venue's whole schema" do
+      # S2 (docs/design/2026-09-05_family-wide-defect-sweep.md): this used to declare
+      # `:future, :future_option, :index, :forex, :mutual_fund, :bond, :cash_equivalent`
+      # too, on the theory that `assetType` admits them. It doesn't matter what the venue
+      # admits — every `Rest` and `Orders` function gates on `SymbolFormat.validate/1`
+      # before a request is built, so a type whose native spelling `validate/1` refuses is
+      # not something this package can route, no matter what Schwab's schema says.
       types = Subject.declaration().supported_instrument_types
 
+      assert :spot in types
       assert :option in types
-      assert :future in types
+      refute :future in types
+      refute :future_option in types
+      refute :index in types
+      refute :forex in types
+
+      # Verified against the actual gate, not just the declaration: these are the venue's
+      # own documented spellings (`/ESZ25` for a future, `EUR/USD` for forex, `$SPX` for
+      # an index) and every one is refused before a request is ever built.
+      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("/ESZ25")
+      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("EUR/USD")
+      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("$SPX")
+
+      # And an option — a real 21-character Schwab option symbol — IS routed, which is
+      # why `:option` stays declared.
+      assert {:ok, _native} = SymbolFormat.validate("XYZ   210115C00050000")
+    end
+
+    test "bond stays dropped — a Treasury CUSIP is measured refused, not merely unchecked" do
+      types = Subject.declaration().supported_instrument_types
+      refute :bond in types
+
+      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("912828YY0")
+    end
+
+    test "mutual_fund and cash_equivalent are declared, now that both are measured routable" do
+      # Re-examined once `Rest.quoted_price/1` learned to decode `QuoteMutualFund` (nAV):
+      # a real Schwab index fund and a real Schwab money-market fund both pass the gate
+      # `SymbolFormat.validate/1` — nothing in this venue's symbol spelling distinguishes a
+      # mutual fund ticker from an equity one, so there was never a routing barrier here,
+      # only an undecodable response on the other end. With that decoded, both are
+      # genuinely reachable end to end and belong in the declaration.
+      types = Subject.declaration().supported_instrument_types
+
       assert :mutual_fund in types
-      assert length(types) > 1
+      assert :cash_equivalent in types
+
+      # SWPPX: a Schwab index fund (OEF). SNSXX: a Schwab money-market fund (MMF) — the
+      # venue's own `MutualFundAssetSubType` enum names both, and per
+      # `market-data-production.openapi.json` both share the one `QuoteMutualFund` shape,
+      # which is why one declared type covers both `:mutual_fund` and `:cash_equivalent`.
+      assert {:ok, "SWPPX"} = SymbolFormat.validate("SWPPX")
+      assert {:ok, "SNSXX"} = SymbolFormat.validate("SNSXX")
+    end
+
+    test "the declaration does not contradict Schwab.asset_classes/0" do
+      # Was contradictory: `asset_classes/0` has always said `[:equity]` while this
+      # declared instrument types the package could not route. `:spot` is the equity
+      # mapping and the rest are Schwab-specific detail `asset_classes/0`'s coarser
+      # vocabulary does not carry — narrower, not contradictory.
+      assert Schwab.asset_classes() == [:equity]
+
+      assert Subject.declaration().supported_instrument_types == [
+               :spot,
+               :option,
+               :mutual_fund,
+               :cash_equivalent
+             ]
     end
   end
 

@@ -149,8 +149,13 @@ defmodule DpExchange.Schwab.Rest do
   @doc """
   A quote for one symbol.
 
-  Timestamped from the venue's own `quoteTime`. A quote the venue did not date returns
-  `{:error, :missing_venue_timestamp}` — the local clock is never substituted.
+  Timestamped from the venue's own `quoteTime`, or `tradeTime` when the response has no
+  `quoteTime` — `QuoteMutualFund` carries only the latter. A quote the venue did not date
+  returns `{:error, :missing_venue_timestamp}` — the local clock is never substituted.
+
+  The price is `lastPrice`, `mark` when there is no last, or `nAV` for a mutual fund
+  (which has neither of the first two). See `quoted_price/1` for why the chain stops
+  there rather than falling further back to `closePrice`.
   """
   @spec get_price(String.t(), map(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
@@ -177,6 +182,15 @@ defmodule DpExchange.Schwab.Rest do
   **This is not the venue's order book.** Schwab publishes depth over its WebSocket Streamer
   (`NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK`), which this package now speaks — subscribe
   for it. This is the top of it, from REST, and REST publishes no more than the top.
+
+  **Refused, not nil-filled, for an instrument whose quote schema carries no book at all.**
+  `QuoteMutualFund` (verified against
+  `docs/reference/schwab/openapi/market-data-production.openapi.json`) has no `bidPrice`,
+  `askPrice`, `bidSize` or `askSize` properties — a fund does not quote a spread, it prices
+  once a day at NAV. Building a `TopOfBook` from four keys that are simply not in the
+  response would hand back a struct that *looks* like a quiet market rather than one that
+  says "this instrument has none": every field would be `nil`, indistinguishable from an
+  equity's book momentarily empty. `{:error, :no_top_of_book}` names the difference.
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
@@ -185,6 +199,12 @@ defmodule DpExchange.Schwab.Rest do
          path = "/quotes?symbols=" <> URI.encode(native) <> "&indicative=false",
          {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
          {:ok, row} <- quote_row(body, native) do
+      top_of_book(native, row)
+    end
+  end
+
+  defp top_of_book(native, row) do
+    if book_fields?(row) do
       {:ok,
        %TopOfBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
@@ -196,8 +216,17 @@ defmodule DpExchange.Schwab.Rest do
          observed_at: DateTime.utc_now(),
          provider: :schwab
        }}
+    else
+      {:error, :no_top_of_book}
     end
   end
+
+  # `QuoteMutualFund` never carries `bidPrice` or `askPrice` — not null, absent from the
+  # schema entirely, unlike `QuoteEquity`/`QuoteOption`/`QuoteFuture`/`QuoteForex`, which
+  # always define both (empty or not, the keys are there). Checking key presence rather
+  # than value is deliberate: it is the structural fact the vendor's own schema draws, not
+  # a guess about what an empty market looks like.
+  defp book_fields?(row), do: Map.has_key?(row, "bidPrice") or Map.has_key?(row, "askPrice")
 
   defp top_of_book_time(row) do
     case venue_time(row) do
@@ -235,8 +264,18 @@ defmodule DpExchange.Schwab.Rest do
   # `lastPrice` is the trade price and is what a quote means here. `mark` is Schwab's own
   # derived value and is used only when there is no last — never a mid computed by us,
   # because what a price *means* is the caller's decision.
+  #
+  # `nAV` is the third and last, and it is not a fallback of the same kind. `QuoteMutualFund`
+  # (`docs/reference/schwab/openapi/market-data-production.openapi.json`) carries neither
+  # `lastPrice` nor `mark` at all — a fund does not print continuous trades, so there is no
+  # last-price field on that schema — and Net Asset Value is the price the fund actually
+  # transacts at once a day, not a derived stand-in the way `mark` is. Stopping here matters
+  # as much as reaching this far: `closePrice` is *yesterday's* NAV and is deliberately never
+  # read as a fallback, the same previous-day-wearing-today's-timestamp mistake
+  # `LEVELONE_EQUITIES`'s `previous_close` is refused for elsewhere in this package. Absent
+  # here, this still fails closed exactly as the equity path does.
   defp quoted_price(row) do
-    case row["lastPrice"] || row["mark"] do
+    case row["lastPrice"] || row["mark"] || row["nAV"] do
       nil -> {:error, :unexpected_response_shape}
       "" -> {:error, :unexpected_response_shape}
       price -> {:ok, price}
@@ -526,16 +565,33 @@ defmodule DpExchange.Schwab.Rest do
   Returns the venue's own map keyed by symbol, unnormalised: `Types.Quote` carries one price
   and this endpoint's `fundamental` and `reference` blocks are neither prices nor quotes.
   `get_price/2` is the normalised read.
+
+  **Deliberately not gated on `SymbolFormat.validate/1`**, unlike every other function
+  here — this takes `to_exchange_symbol/1`'s total translation instead, so a caller can
+  read back whatever a search or a chain handed it without a second validity check. That
+  means a pair-shaped or venue-non-equity string (`/ESZ25`, `EUR/USD`) can reach this far;
+  the venue's own `404` is what tells the caller it named nothing real, the same way it
+  would for a plain equity ticker Schwab does not list.
+
+  The one thing that must still hold is that the URL built from it is well-formed. The
+  symbol is percent-encoded as **one path segment**, not as a whole URI: `URI.encode/1`'s
+  default predicate leaves `/` unescaped (it is meant for encoding a complete URI, where
+  `/` is a real separator), so encoding `/ESZ25` that way produced `//ESZ25/quotes` — an
+  extra empty segment, not the one-segment path the venue expects. Restricting the
+  predicate to `URI.char_unreserved?/1` escapes every character that is not safe inside a
+  single segment, `/` included, so `/ESZ25` becomes `%2FESZ25` and the request lands on
+  the path a caller actually meant.
   """
   @spec get_symbol_quote(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_symbol_quote(symbol, credentials, opts) when is_binary(symbol) do
     native = SymbolFormat.to_exchange_symbol(symbol)
+    encoded = URI.encode(native, &URI.char_unreserved?/1)
     query = query_string(%{"fields" => Keyword.get(opts, :fields)})
 
     with {:ok, body} <-
            get(
-             market_data_url(opts) <> "/#{URI.encode(native)}/quotes" <> query,
+             market_data_url(opts) <> "/#{encoded}/quotes" <> query,
              credentials,
              opts
            ) do
