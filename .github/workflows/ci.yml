@@ -92,9 +92,38 @@ jobs:
       - run: mix deps.get
 
       - name: Auto-increment patch version
+        # Increments from whichever is HIGHER: the version in mix.exs, or the newest
+        # version actually published to Hex.
+        #
+        # Taking mix.exs alone can wedge this pipeline permanently, and did exactly that
+        # to dp_exchange_core. Publishing happens BEFORE the version-bump commit below, so
+        # a run that publishes and then fails on any later step leaves Hex ahead of git —
+        # mix.exs never advances, every subsequent run recomputes the same already-published
+        # version, and Hex refuses it ("can only modify a release up to one hour after
+        # publication"). That is not self-correcting: it blocks every future release until
+        # someone edits mix.exs by hand.
+        #
+        # Asking Hex what actually exists makes the step idempotent and self-healing: a
+        # partial failure costs one version number, not the pipeline. If Hex is unreachable
+        # the check degrades to mix.exs alone rather than blocking the release.
         run: |
+          set -euo pipefail
           current=$(grep '@version "' mix.exs | sed 's/.*@version "\(.*\)"/\1/')
-          IFS='.' read -r major minor patch <<< "$current"
+
+          published=$(curl -fsS --max-time 20 https://hex.pm/api/packages/dp_exchange_schwab \
+            | grep -o '"version":"[0-9]\+\.[0-9]\+\.[0-9]\+"' \
+            | sed 's/.*:"//; s/"//' \
+            | sort -V | tail -1) || published=""
+
+          if [ -n "$published" ]; then
+            base=$(printf '%s\n%s\n' "$current" "$published" | sort -V | tail -1)
+            echo "mix.exs=$current hex=$published -> incrementing from $base"
+          else
+            base="$current"
+            echo "Hex unreachable; incrementing from mix.exs=$current"
+          fi
+
+          IFS='.' read -r major minor patch <<< "$base"
           new_version="$major.$minor.$((patch + 1))"
           sed -i "s/@version \"$current\"/@version \"$new_version\"/" mix.exs
           echo "VERSION=$new_version" >> "$GITHUB_ENV"
