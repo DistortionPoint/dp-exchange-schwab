@@ -77,15 +77,15 @@ DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
 
 ## 7. Orders: only what Core can name
 
-Order types: `:market`, `:limit`, `:stop`, `:stop_limit`. Time in force: `:day`, `:gtc`,
-`:fok`, `:ioc`.
+Order types: `:market`, `:limit`, `:stop`, `:stop_limit`, `:trailing_stop`,
+`:trailing_stop_limit`, `:market_on_close`, `:limit_on_close` — eight, not four; see §7b
+for the four Schwab-specific ones and what a trailing stop needs. Time in force: `:day`,
+`:gtc`, `:fok`, `:ioc`.
 
 - **`:ioc` and `:fok` are time-in-force here, not order types.** Schwab spells them as
   `duration`.
 - **`:post_only` and `:gtd` do not exist on this venue** and are refused rather than mapped
   to something near. Schwab's dated expiries are three fixed horizons, not an arbitrary date.
-- The venue supports `TRAILING_STOP`, `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, which `Core`
-  has no vocabulary for. They are not reachable through this facade.
 - Multi-leg spreads and `OCO`/`TRIGGER` orders are not reachable either — `place_order/3`
   takes a flat request.
 
@@ -206,7 +206,7 @@ see `docs/reference/schwab/negative-claims.md`, which ships in the tarball.
 
 `get_order_book/2`, `get_market_overview/1`, `list_instruments/1`, `get_fees/2`,
 `get_transfers/2`, `get_rate_limit_status/2`, `quantization/1` and `get_trade_history/2`
-return `{:error, :not_supported}`. So do the twelve money-movement callbacks: **a stock
+return `{:error, :not_supported}`. So do the eleven money-movement callbacks: **a stock
 broker moves money through cheques, ACH and wires arranged with a person, not through an
 API**, and the Accounts and Trading specification has no payment method, transfer, allowlist
 or network list. `get_transactions/2` *reports* money that moved and is served.

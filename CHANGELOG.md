@@ -31,6 +31,36 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` audited against the S1/S2/S2a fixes below, since it ships inside the
+  Hex tarball and is what a consuming agent reads — a wrong claim there is acted on by a
+  machine.** Verified with real execution, not by reading source: `mix run` against
+  `Capabilities.declaration()` for `supported_instrument_types` and every endpoint's
+  maturity, and `mix test` for the `CHART_FUTURES` decode and the `get_top_of_book/3`
+  refusal (`test/dp_exchange/schwab/rest_test.exs:187`, which builds a `QuoteMutualFund`
+  body with no `bidPrice`/`askPrice` keys and asserts `{:error, :no_top_of_book}`). Neither
+  `usage-rules.md` nor `README.md` made a claim about instrument types, `CHART_FUTURES`, or
+  the old all-`nil` top-of-book behaviour in the first place, so none of the three needed
+  correcting — this records that the check was made, not that it was a no-op.
+
+  Reading both documents in full end to end found two claims that *were* wrong, neither
+  connected to that sweep:
+
+  - **§7's order-type list contradicted §7b, forty lines later, in the same file.** §7 said
+    "Order types: `:market`, `:limit`, `:stop`, `:stop_limit`" and "The venue supports
+    `TRAILING_STOP`, `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, which `Core` has no vocabulary
+    for. They are not reachable through this facade." §7b, added when Core learned those
+    types, already said "Eight order types, not four" and named all eight as reachable.
+    `Capabilities.declaration().supported_order_types` (checked live) is the eight named in
+    §7b; §7's four-and-three-unreachable claim was never updated when §7b was written and
+    has read as false since. §7 now states the eight order types up front and points to §7b
+    for the trailing-stop detail, and the stale bullet is removed.
+  - **§11 said "twelve money-movement callbacks"; the list in `capabilities.ex` has
+    eleven** (`list_payment_methods` through `list_custody_fees`) — this changelog's own
+    entry for Core 0.1.34 already says "eleven" (line 320), so the doc disagreed with both
+    the source and its own project's history. Corrected to eleven.
+
 ### Fixed
 
 - **The Streamer's connect budget was inherited by accident, not chosen — family-wide
