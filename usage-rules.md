@@ -57,6 +57,30 @@ that never tracks expiry at all still gets refreshed correctly, just reactively:
 Any other `4xx` is about the request, not the credential, and retrying with a fresh token
 will not fix it.
 
+**On the streaming side the same reactive signal arrives as a notice, and you must handle
+it.** `credential_failure?/1` covers a REST response you are holding; a live Streamer login
+is refused asynchronously, with no call of yours to return it to. When that happens this
+package emits:
+
+```elixir
+%DpExchange.Core.Notice{kind: :credentials_rejected, provider: :schwab, details: %{reason: _}}
+```
+
+Subscribe with `DpExchange.Schwab.subscribe_notices/1` and treat that kind as "refresh now" —
+the same `refresh_credentials/2` → persist → `update_credentials/2` sequence above. **The
+socket cannot fix its own token.** It backs off (one second, doubling, capped at thirty) and
+retries the same rejected credential until you replace it, so a host that ignores this notice
+has a feed that reconnects forever and never logs in. This also covers what
+`needs_refresh?/2` structurally cannot: a token the venue stops accepting *early* — revoked,
+or rotated by something else — which no clock check can predict.
+
+**A login refused for a non-credential reason stays `:degraded`, deliberately.** The vendor's
+response-code table answers `3 LOGIN_DENIED` with *"reconnect and re-login with new token"*,
+which is why that code — and only that code — is reported as a credential rejection. `9
+UNKNOWN_FAILURE` is the vendor's error of last resort and `11 SERVICE_NOT_AVAILABLE` is the
+venue being down; a fresh token is the remedy for neither, and reporting them as a rejected
+credential would be this package claiming something the venue never said.
+
 **The refresh token is one-time use.** Every refresh spends the old one and returns a new one
 carrying a fresh seven days. So:
 

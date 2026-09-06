@@ -171,6 +171,25 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   def failure_message(_response), do: nil
 
   @doc """
+  Whether a failed `response` was specifically the venue rejecting the credential.
+
+  **This is the one login failure a host can act on automatically, so it must not be
+  collapsed with the others.** The vendor's own response-code table
+  (`docs/reference/schwab/documentation/market-data-production.txt`) gives code `3
+  LOGIN_DENIED` the remedy *"Client should reconnect and re-login with new token"* — a
+  refresh instruction. The other failures a LOGIN can carry are not credential problems
+  and that remedy would be wrong for them: `9 UNKNOWN_FAILURE` is the vendor's
+  error-of-last-resort, which its own table says to report to Trader API support, and `11
+  SERVICE_NOT_AVAILABLE` is the venue being down, where a new token changes nothing.
+
+  Kept here rather than exposing a raw code accessor so that the meaning of `3` lives with
+  the protocol that defines it, instead of being re-derived by every caller that cares.
+  """
+  @spec login_denied?(map()) :: boolean()
+  def login_denied?(%{"content" => %{"code" => 3}}), do: true
+  def login_denied?(_response), do: false
+
+  @doc """
   Renames a data frame's numbered fields using `field_map`, dropping numbers it has no name
   for.
 

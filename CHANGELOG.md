@@ -31,6 +31,34 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **A rejected Streamer LOGIN now emits `:credentials_rejected` rather than a generic
+  `:degraded`, so a host can act on it automatically.** This package refreshes only when the
+  host calls `refresh_credentials/2` — that division is deliberate, since `Auth` holds no
+  state and starts no timer — but it means the host needs a signal it can pattern-match to
+  know a refresh is the remedy. A `LOGIN_DENIED` reported as `:degraded` with the reason in a
+  free-text string gave it nothing to match on: the socket would back off and retry the same
+  dead token indefinitely while the only real notification sat in a log line. `Core.Notice`'s
+  own moduledoc calls `:credentials_rejected` close to load-bearing for exactly this, because
+  a consumer whose keys stopped working otherwise learns it from the absence of data — the
+  slowest possible signal.
+
+  **Only the vendor's code `3 LOGIN_DENIED` maps to it.** Its response-code table
+  (`docs/reference/schwab/documentation/market-data-production.txt`) answers that code with
+  *"Client should reconnect and re-login with new token"* — a refresh instruction. `9
+  UNKNOWN_FAILURE` (the vendor's error of last resort, which it asks be reported to Trader API
+  support) and `11 SERVICE_NOT_AVAILABLE` (the venue being down) stay `:degraded`: a fresh
+  token is the remedy for neither, and reporting them as a rejected credential would be this
+  package asserting something the venue never said. The meaning of code `3` lives in
+  `StreamerProtocol.login_denied?/1` rather than being re-derived by each caller.
+
+  This closes the gap left by wiring `needs_refresh?/2` to the facade in the same release:
+  that is a clock check against the credential you hold, and it structurally cannot catch a
+  token the venue stops accepting *early* — revoked, or rotated elsewhere. `usage-rules.md`
+  documents both triggers and says plainly that a host ignoring the notice has a feed that
+  reconnects forever and never logs in.
+
 ### Added
 
 - **Core's assertion 16 ("internal wiring") swept this package clean — thirteen violations,

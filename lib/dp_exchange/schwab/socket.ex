@@ -306,9 +306,32 @@ defmodule DpExchange.Schwab.Socket do
     else
       # A rejected LOGIN still arrives as a response. Treating its arrival as success is how
       # a socket waits forever for data.
+      #
+      # **The kind is chosen from the venue's own code, not flattened to one.** A
+      # `LOGIN_DENIED` is the venue rejecting this credential, and the vendor's response-code
+      # table answers it with "reconnect and re-login with new token" — an instruction a host
+      # can act on automatically, which is exactly what `:credentials_rejected` exists to
+      # carry. `Core.Notice`'s own moduledoc calls that kind close to load-bearing, because a
+      # consumer whose keys stopped working otherwise learns it from the absence of data,
+      # the slowest possible signal. Reporting it as `:degraded` with the reason in a free
+      # text string left nothing to pattern-match on: this package refreshes only when the
+      # host calls `DpExchange.Schwab.refresh_credentials/2`, so a host that cannot recognise
+      # "your credential was refused" has no trigger to call it, and the socket backs off and
+      # retries the same dead token until someone reads a log by hand. The same collapsing
+      # mistake `{:error, :oversubscribed}` was named separately to avoid in the Webull
+      # package.
+      #
+      # Every OTHER login failure stays `:degraded`, deliberately: the vendor's `9
+      # UNKNOWN_FAILURE` is its error-of-last-resort and `11 SERVICE_NOT_AVAILABLE` is the
+      # venue being down. A new token is not the remedy for either, and claiming a credential
+      # was rejected when the venue never said so is the substitution this family fails
+      # closed against.
+      kind =
+        if StreamerProtocol.login_denied?(response), do: :credentials_rejected, else: :degraded
+
       notify(
         state,
-        Notice.new(:degraded, :schwab,
+        Notice.new(kind, :schwab,
           details: %{reason: StreamerProtocol.failure_message(response) || "login rejected"}
         )
       )

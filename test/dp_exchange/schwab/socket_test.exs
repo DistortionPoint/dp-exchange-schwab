@@ -148,8 +148,41 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, new_state} = Socket.handle_frame(frame(response), state())
 
       refute new_state.logged_in?
-      assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}
+
+      # `:credentials_rejected`, NOT `:degraded`. This package refreshes only when the host
+      # calls `DpExchange.Schwab.refresh_credentials/2`, so the host needs a kind it can
+      # pattern-match to know a refresh is the remedy. The vendor's own table answers code 3
+      # with "reconnect and re-login with new token"; a free-text reason on a generic
+      # `:degraded` gave a host nothing to match, and the socket would back off and retry the
+      # same dead token indefinitely.
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :credentials_rejected, details: details}}
+
       assert details.reason == "credential rejected"
+    end
+
+    test "a login that fails for a NON-credential reason stays :degraded" do
+      # The distinction is the point: `9 UNKNOWN_FAILURE` is the vendor's error-of-last-resort
+      # and `11 SERVICE_NOT_AVAILABLE` is the venue being down. A new token is not the remedy
+      # for either, so claiming the credential was rejected would be a substitution the venue
+      # never made — the exact failure mode this family fails closed against.
+      for code <- [9, 11] do
+        response = %{
+          "response" => [
+            %{
+              "service" => "ADMIN",
+              "command" => "LOGIN",
+              "content" => %{"code" => code, "msg" => "not a credential problem"}
+            }
+          ]
+        }
+
+        assert {:ok, new_state} = Socket.handle_frame(frame(response), state())
+
+        refute new_state.logged_in?
+        assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}
+        assert details.reason == "not a credential problem"
+      end
     end
 
     test "a REJECTED login counts against the login-failure streak" do
