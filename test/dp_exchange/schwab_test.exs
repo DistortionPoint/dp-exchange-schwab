@@ -12,7 +12,7 @@ defmodule DpExchange.SchwabTest do
 
   @moduletag :capture_log
 
-  alias DpExchange.Core.Capabilities
+  alias DpExchange.Core.{Capabilities, Notice}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Fake, Feed, Supervisor}
 
@@ -194,8 +194,8 @@ defmodule DpExchange.SchwabTest do
       assert Feed.interval_ms() > 0
     end
 
-    test "subscribe_notices always answers" do
-      assert Schwab.subscribe_notices() == :ok
+    test "subscribe_notices registers with the named feed, not the default one", %{name: name} do
+      assert Schwab.subscribe_notices(feed: name) == :ok
     end
   end
 
@@ -205,10 +205,52 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.update_symbols(["AAPL"], feed: :no_such_feed) == {:error, :feed_not_started}
     end
 
+    test "subscribe_notices says so too, rather than answering :ok for a registration nothing will ever fire" do
+      assert Schwab.subscribe_notices(feed: :no_such_feed) == {:error, :feed_not_started}
+    end
+
     test "unsubscribing from nothing is :ok, and coverage is empty" do
       assert Schwab.unsubscribe(["AAPL"], feed: :no_such_feed) == :ok
       assert Schwab.coverage(feed: :no_such_feed) == %{}
       assert Schwab.coverage_by_kind(feed: :no_such_feed) == %{}
+    end
+  end
+
+  describe "subscribe_notices/1 actually wires to the feed's notice registry" do
+    # This was a no-op that discarded `opts[:to]` and answered `:ok` unconditionally,
+    # while `Feed`'s notice registry — `subscribe_notices/2`, the `notice_subscribers`
+    # set, and `fan_out/2` — sat right beside it, complete and reachable only by calling
+    # `Feed` directly. Proven broken empirically before the fix: registering here with
+    # `to: self()`, driving a real notice, and receiving nothing.
+    #
+    # So this registers through the FACADE, never through `Feed` directly, and drives a
+    # notice the same way `FeedTest`'s own "fallback poll's own silent-delivery notice"
+    # tests do — no credentials means `Auth.headers/2` refuses before any HTTP call is
+    # even attempted, so no plug or fake venue is needed to fail the bootstrap and then
+    # every poll attempt.
+    test "a subscriber registered through the facade receives the fallback poll's coverage_change notice" do
+      unique = System.unique_integer([:positive])
+      name = :"notice_regression_feed_#{unique}"
+
+      {:ok, feed} =
+        Feed.start_link(
+          name: name,
+          symbols: ["AAPL"],
+          interval_ms: 50,
+          # Headroom before the poller's first tick, so the facade call below is
+          # guaranteed to land before the fallback poll's own first attempt — the
+          # poller runs on its own timer, not on a message this test controls.
+          start_delay_ms: 150,
+          retry_attempts: 0
+        )
+
+      on_exit(fn -> if Process.alive?(feed), do: GenServer.stop(feed, :normal) end)
+
+      assert Schwab.subscribe_notices(feed: name, to: self()) == :ok
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
+      assert notice.severity == :warning
+      assert notice.provider == "schwab-fallback-poll"
     end
   end
 

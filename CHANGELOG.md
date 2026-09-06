@@ -144,6 +144,27 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`subscribe_notices/1` was a no-op that lied about what it did — third instance of
+  "mechanism built, never wired" in this family this week, after issue #23's
+  `rate_limit_blocking` and issue #22's `FrameSender` retry.** The facade discarded
+  `opts[:to]` and answered `:ok` unconditionally, while `DpExchange.Schwab.Feed`'s notice
+  registry sat right beside it, complete and working: `Feed.subscribe_notices/2` registers
+  a subscriber and `Feed`'s own `handle_info` clause for `%Core.Notice{}` fans it out to
+  every one of them, including the `:degraded` notice `ensure_route/1` emits on a bootstrap
+  failure and the `:coverage_change` notice the fallback poll emits on its own
+  delivered-nothing transitions (added above, DpCryptoManagement's issue #21). Nothing in
+  the facade ever called it. Proven empirically before the fix: registering via
+  `DpExchange.Schwab.subscribe_notices(to: self())`, driving a `:degraded` notice, and
+  receiving nothing.
+
+  Now resolves the feed the same way `coverage/1` and `update_symbols/2` already do and
+  delegates to `Feed.subscribe_notices/2`. A feed that is not started answers
+  `{:error, :feed_not_started}` — the `update_symbols/2` convention, not `coverage/1`'s
+  `%{}` — because reporting `:ok` for a registration nothing will ever fire is the same
+  lie this entry fixes, just moved one branch over. Regression test registers through the
+  facade (not `Feed` directly), drives the fallback poll's `:coverage_change` notice, and
+  asserts it lands in the subscriber's mailbox.
+
 - **`:rate_limit_blocking` was unreachable everywhere in this package, including on the
   fallback poll route that most needs it — family-wide gap, DpCryptoManagement's issue
   #23.** `Core.HttpClient.check_rate_limits/1` reads this option to choose `acquire/3`

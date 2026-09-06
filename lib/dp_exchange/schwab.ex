@@ -395,11 +395,32 @@ defmodule DpExchange.Schwab do
   end
 
   @doc """
-  Refusals reach the subscriber through the same mailbox as quotes, so a caller
-  registering here receives them.
+  Registers `opts[:to]` (the caller, by default) for this package's own notices — the
+  `:degraded` notice `DpExchange.Schwab.Feed` emits when the Streamer cannot bootstrap and
+  falls back to polling, and the `:coverage_change` notice the fallback poll emits itself
+  when it stops, or resumes, delivering.
+
+  **This was a no-op.** It ignored `opts` entirely and returned `:ok` without registering
+  anything, while `DpExchange.Schwab.Feed.subscribe_notices/2` — the registry that actually
+  holds subscribers and fans notices out to them — sat right beside it, complete and
+  unreachable through this facade. A caller that registered through here and later saw a
+  `:degraded` notice reach nobody had no way to know the call it trusted had done nothing;
+  it looked identical to a quiet, healthy feed. This is the third time this family has
+  shipped a mechanism nothing calls: issue #23's `rate_limit_blocking` and issue #22's
+  `FrameSender` retry were the other two.
+
+  Resolves the feed exactly as `coverage/1` and `update_symbols/2` do, and — because
+  registering with a feed that does not exist can never be honoured, the same reasoning
+  `update_symbols/2` already applies — answers `{:error, :feed_not_started}` on the same
+  terms rather than reporting `:ok` for a registration nothing will ever fire.
+
+  See `DpExchange.Schwab.Feed.subscribe_notices/2`, which this delegates to.
   """
   @impl true
-  def subscribe_notices(_opts \\ []), do: :ok
+  def subscribe_notices(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.subscribe_notices(feed, opts), else: {:error, :feed_not_started}
+  end
 
   # --- plumbing -----------------------------------------------------------
 
