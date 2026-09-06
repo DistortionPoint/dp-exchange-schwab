@@ -129,7 +129,44 @@ jobs:
           echo "VERSION=$new_version" >> "$GITHUB_ENV"
 
       - name: Publish to Hex.pm
-        run: mix hex.publish --yes
+        # A failed `mix hex.publish` does NOT mean the release is absent from Hex.
+        #
+        # Observed 2026-09-06 on this repository: the upload reached 100%, then the command
+        # exited non-zero with `Publishing failed / :timeout` — and `0.2.2` was on Hex all
+        # along. The tarball had landed; only the response did not come back in time. The
+        # job died there, so the version-bump commit below never ran, leaving Hex ahead of
+        # git with no release commit and no tag, and the run red for a release that had
+        # actually succeeded.
+        #
+        # Treating that as fatal is wrong twice over. It reports a failure that did not
+        # happen, and a red run for a non-failure is precisely the alarm that trains
+        # everyone to stop reading the alarms.
+        #
+        # So: ask Hex what exists rather than trusting the exit code. If this exact version
+        # is published, the publish succeeded whatever the client said, and the run
+        # continues to the version-bump commit that keeps git and Hex agreeing. If it is
+        # genuinely absent, the step fails as before — an unreachable Hex still stops the
+        # release rather than tagging one that never shipped.
+        run: |
+          set -uo pipefail
+          if mix hex.publish --yes; then
+            echo "Published $VERSION."
+            exit 0
+          fi
+
+          echo "mix hex.publish exited non-zero; asking Hex whether $VERSION actually landed."
+
+          published=$(curl -fsS --max-time 20 \
+            "https://hex.pm/api/packages/dp_exchange_schwab" \
+            | grep -oF "\"version\":\"$VERSION\"" | head -1) || published=""
+
+          if [ -n "$published" ]; then
+            echo "$VERSION IS on Hex — the upload landed and only the response was lost."
+            exit 0
+          fi
+
+          echo "$VERSION is NOT on Hex. The publish genuinely failed."
+          exit 1
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
