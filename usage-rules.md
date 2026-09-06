@@ -33,6 +33,30 @@ The access token lives **30 minutes**. `DpExchange.Schwab.refresh_credentials/2`
 call this, not `DpExchange.Schwab.Auth.refresh/2` directly, which is internal and reached
 only by going past the facade.
 
+**`DpExchange.Schwab.needs_refresh?(credentials, now \\ DateTime.utc_now())` answers when.**
+This package holds no state and starts no timer — it cannot decide on your behalf when a
+credential you hold is about to expire, only whether it is, when asked. Call it before a
+call you are about to make, or on your own schedule:
+
+```elixir
+if DpExchange.Schwab.needs_refresh?(credentials) do
+  {:ok, renewed} = DpExchange.Schwab.refresh_credentials(credentials)
+  :my_app.persist_schwab_credential(renewed)
+  DpExchange.Schwab.update_credentials(renewed)
+  renewed
+else
+  credentials
+end
+```
+
+`true` once the access token is close to expiring, or has already expired. **`false` when
+`credentials` carries no `:expires_at`** — an unknown expiry is not an expired one. A host
+that never tracks expiry at all still gets refreshed correctly, just reactively: check
+`DpExchange.Schwab.credential_failure?(status)` against the `status` inside a `{:refused,
+{:venue_error, status, detail}}` result, and refresh-then-retry once when it is `true`.
+Any other `4xx` is about the request, not the credential, and retrying with a fresh token
+will not fix it.
+
 **The refresh token is one-time use.** Every refresh spends the old one and returns a new one
 carrying a fresh seven days. So:
 
@@ -109,7 +133,10 @@ for the four Schwab-specific ones and what a trailing stop needs. Time in force:
 Schwab publishes which instructions each asset type accepts, and this package enforces it
 **before sending**: `BUY`/`SELL`/`SELL_SHORT`/`BUY_TO_COVER` are equity-only, and the
 `_TO_OPEN`/`_TO_CLOSE` forms are option-only. Order writes are throttled and reads are not,
-so a locally-catchable rejection is worth catching.
+so a locally-catchable rejection is worth catching. `DpExchange.Schwab.equity_instructions/0`
+and `DpExchange.Schwab.option_instructions/0` list the matrix directly, the same way
+`transaction_types/0` lists the venue's transaction-type enum — check before building a
+request rather than discover the mismatch by refusal.
 
 ## 7a. Preview before you place, and replace rather than cancel
 
@@ -158,7 +185,11 @@ Call `market_status/1` before concluding a quiet feed is broken. This is the onl
 the family where delivering nothing is the normal overnight state.
 
 `coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
-not a fault.
+not a fault. `DpExchange.Schwab.wanted/1` is the other half — what was asked for — so
+comparing the two tells "not yet arrived" apart from "never subscribed," which `coverage/1`
+alone cannot. `DpExchange.Schwab.status/1` is the feed-wide summary (route, delivering
+count, wanted count, last error) a health check reaches for instead of assembling one from
+`coverage/1` and `coverage_by_kind/1`.
 
 ## 9. The Streamer, and what arrives only there
 

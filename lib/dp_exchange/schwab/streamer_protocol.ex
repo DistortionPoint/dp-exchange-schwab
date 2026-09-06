@@ -1,6 +1,7 @@
 defmodule DpExchange.Schwab.StreamerProtocol do
   @moduledoc """
-  The Streamer's wire format: six commands, fifteen services, three kinds of frame.
+  The Streamer's wire format: five of the venue's six commands, fifteen services, three
+  kinds of frame. See "LOGOUT is not built here" below for the sixth.
 
   Pure functions over maps. **Nothing here opens a socket** — the protocol is separable from
   the transport, and keeping it so is what lets every rule below be tested without one.
@@ -33,11 +34,24 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   1 is the open. There is no global table, so each service carries its own, and a field this
   package has no name for is **dropped rather than guessed**: an unknown number decoded as
   the wrong name is a real value in the wrong field.
+
+  ## LOGOUT is not built here
+
+  The venue documents `LOGOUT` as a sixth `ADMIN` command — *"Logs out of the streamer
+  connection. Streamer will close the connection."* — beside a documented ceiling of one
+  Streamer connection per user at a time (`Response Code 12`,
+  `market-data-production.txt`). Nothing in this package ever intentionally ends a live
+  Streamer session: `Socket` only ever reconnects (`handle_disconnect/2`), and there is no
+  `Feed`- or facade-level "stop this feed" call for a `LOGOUT` frame to precede. Building
+  one — suppressing the automatic reconnect for a self-initiated close, sending the frame,
+  then actually closing — is real work this module cannot do alone, and the vendor
+  documentation does not say what, if anything, an *unclean* disconnect costs a session
+  that never sent it. Rather than build a frame nothing calls and guess at why it might
+  matter, this module builds the five commands this package actually issues:
+  `LOGIN`, `SUBS`, `UNSUBS`, `ADD`, `VIEW`.
   """
 
   alias DpExchange.Schwab.StreamerInfo
-
-  @commands ~w(LOGIN LOGOUT SUBS UNSUBS ADD VIEW)
 
   @services ~w(
     ADMIN
@@ -48,18 +62,6 @@ defmodule DpExchange.Schwab.StreamerProtocol do
     SCREENER_EQUITY SCREENER_OPTION
     ACCT_ACTIVITY
   )
-
-  @doc "Every command the Streamer accepts, as the venue names them."
-  @spec commands() :: [String.t()]
-  def commands, do: @commands
-
-  @doc """
-  Every service the Streamer carries — fifteen, and the count is the point.
-
-  This package asserted the venue had no streaming API at all. It has these.
-  """
-  @spec services() :: [String.t()]
-  def services, do: @services
 
   @doc """
   The `ADMIN`/`LOGIN` request, which must succeed before any other command is sent.
@@ -77,11 +79,6 @@ defmodule DpExchange.Schwab.StreamerProtocol do
       "SchwabClientFunctionId" => info.function_id
     })
   end
-
-  @doc "The `ADMIN`/`LOGOUT` request. The venue closes the connection on receipt."
-  @spec logout(StreamerInfo.t(), pos_integer()) :: map()
-  def logout(%StreamerInfo{} = info, request_id),
-    do: request(info, "ADMIN", "LOGOUT", request_id, %{})
 
   @doc """
   A subscription command for `service` over `keys`.

@@ -136,9 +136,11 @@ defmodule DpExchange.SchwabTest do
 
     test "the ORDER ceiling has no default, because the venue has none" do
       # 0..120 per minute per account, set per application at registration. A number
-      # baked into the package would be a claim about somebody else's registration.
+      # baked into the package would be a claim about somebody else's registration. The
+      # read ceiling is this package's own courtesy self-protection, not a venue fact —
+      # asserted by value, since a host has no reason to ask this package what it is.
       limits = Supervisor.limits([])
-      assert limits.default.limit == Supervisor.default_read_limit()
+      assert limits.default.limit == 120
 
       configured = Supervisor.limits(order_limit_per_minute: 20)
       assert configured.schwab_orders.limit == 20
@@ -191,7 +193,22 @@ defmodule DpExchange.SchwabTest do
 
     test "the poller exposes its own status", %{feed: feed} do
       assert %{delivering: _delivering} = Feed.status(feed)
-      assert Feed.interval_ms() > 0
+    end
+
+    test "status/1 delegates to the named feed, and is empty when no feed is running",
+         %{name: name} do
+      assert %{delivering: _delivering, route: _route} = Schwab.status(feed: name)
+      assert Schwab.status(feed: :no_such_feed) == %{}
+    end
+
+    test "wanted/1 is what was asked for, not what coverage/1 reports", %{name: name} do
+      :ok = Schwab.subscribe(["AAPL", "MSFT"], feed: name)
+
+      # Nothing has delivered yet — coverage/1 is empty while wanted/1 already carries
+      # both symbols, which is the entire reason the two are separate functions.
+      assert Enum.sort(Schwab.wanted(feed: name)) == ["AAPL", "MSFT"]
+      assert Schwab.coverage(feed: name) == %{}
+      assert Schwab.wanted(feed: :no_such_feed) == []
     end
 
     test "subscribe_notices registers with the named feed, not the default one", %{name: name} do
@@ -357,6 +374,48 @@ defmodule DpExchange.SchwabTest do
                  plug: responding(body, 400),
                  retry_attempts: 0
                )
+    end
+  end
+
+  describe "needs_refresh?/2 — the other half of refresh_credentials/2, reachable through the facade" do
+    # `Auth.needs_refresh?/2` was previously reachable only by calling the internal
+    # `Auth` module directly. This proves the facade delegates, exactly as it does for
+    # `refresh_credentials/2` above.
+    test "true once the access token is close to expiry, and when nobody said" do
+      now = ~U[2026-08-31 12:00:00Z]
+
+      assert Schwab.needs_refresh?(%{expires_at: DateTime.add(now, 60, :second)}, now)
+      refute Schwab.needs_refresh?(%{expires_at: DateTime.add(now, 1_700, :second)}, now)
+      refute Schwab.needs_refresh?(%{access_token: "at-1"}, now)
+    end
+
+    test "defaults `now` to the current time" do
+      refute Schwab.needs_refresh?(%{access_token: "at-1"})
+    end
+  end
+
+  describe "credential_failure?/1 — reachable through the facade" do
+    # `Auth.credential_failure?/1` was previously reachable only by calling the internal
+    # `Auth` module directly.
+    test "401 and 403 are credential failures; other statuses are not" do
+      assert Schwab.credential_failure?(401)
+      assert Schwab.credential_failure?(403)
+      refute Schwab.credential_failure?(400)
+      refute Schwab.credential_failure?(429)
+      refute Schwab.credential_failure?(500)
+    end
+  end
+
+  describe "equity_instructions/0 and option_instructions/0 — reachable through the facade" do
+    # Both previously reachable only by calling the internal `Orders` module directly.
+    test "the two lists are exactly what the venue publishes, and do not overlap" do
+      assert Schwab.equity_instructions() == ~w(BUY SELL BUY_TO_COVER SELL_SHORT)
+
+      assert Schwab.option_instructions() ==
+               ~w(BUY_TO_OPEN BUY_TO_CLOSE SELL_TO_OPEN SELL_TO_CLOSE)
+
+      assert Schwab.equity_instructions() -- Schwab.option_instructions() ==
+               Schwab.equity_instructions()
     end
   end
 

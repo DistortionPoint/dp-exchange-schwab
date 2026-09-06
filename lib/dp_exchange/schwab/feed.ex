@@ -161,10 +161,6 @@ defmodule DpExchange.Schwab.Feed do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "Default poll interval in milliseconds, used on the fallback route."
-  @spec interval_ms() :: pos_integer()
-  def interval_ms, do: @interval_ms
-
   @doc """
   Add `symbols` to the delivered set.
 
@@ -185,7 +181,11 @@ defmodule DpExchange.Schwab.Feed do
   def unsubscribe(feed, symbols),
     do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
 
-  @doc "What has been asked for, which is not what `coverage/1` reports."
+  @doc """
+  What has been asked for, which is not what `coverage/1` reports.
+
+  Reachable through the facade as `DpExchange.Schwab.wanted/1`.
+  """
   @spec wanted(GenServer.server()) :: [String.t()]
   def wanted(feed), do: GenServer.call(feed, :wanted)
 
@@ -261,7 +261,11 @@ defmodule DpExchange.Schwab.Feed do
         }
   def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
 
-  @doc "Whether the feed is delivering, on which route, and what it last failed on."
+  @doc """
+  Whether the feed is delivering, on which route, and what it last failed on.
+
+  Reachable through the facade as `DpExchange.Schwab.status/1`.
+  """
   @spec status(GenServer.server()) :: map()
   def status(feed), do: GenServer.call(feed, :status)
 

@@ -96,8 +96,12 @@ defmodule DpExchange.Schwab.AuthTest do
 
     test "the margin refreshes ahead of expiry rather than at it" do
       # A token that dies mid-flight produces a 401 the caller cannot tell from a revoked
-      # grant, and the request has already gone out by then.
-      assert Auth.refresh_margin_seconds() > 0
+      # grant, and the request has already gone out by then. 120 seconds is the
+      # documented margin (see the moduledoc); the boundary itself is `<=`, not `<`.
+      now = ~U[2026-08-31 12:00:00Z]
+
+      assert Auth.needs_refresh?(%{expires_at: DateTime.add(now, 120, :second)}, now)
+      refute Auth.needs_refresh?(%{expires_at: DateTime.add(now, 121, :second)}, now)
     end
   end
 

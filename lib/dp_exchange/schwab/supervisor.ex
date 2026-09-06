@@ -84,8 +84,4 @@ defmodule DpExchange.Schwab.Supervisor do
       }
     }
   end
-
-  @doc "Default read ceiling, which is a courtesy rather than a measurement."
-  @spec default_read_limit() :: pos_integer()
-  def default_read_limit, do: @default_read_limit
 end

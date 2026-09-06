@@ -351,6 +351,46 @@ defmodule DpExchange.Schwab do
   def refresh_credentials(credentials, opts \\ []),
     do: Auth.refresh(credentials, with_limiter(opts))
 
+  @doc """
+  Whether `credentials` should be refreshed before the next call.
+
+  **The other half of `refresh_credentials/2`.** That function renews a credential; this
+  one answers *when* to call it — `true` once the access token is close enough to
+  expiring (a margin ahead of the venue's own 30-minute lifetime, so a request in flight
+  does not expire mid-air), or has already expired, and deliberately `false` when
+  `credentials` carries no `:expires_at` at all, because an unknown expiry is not an
+  expired one.
+
+  **This decision stays with the host on purpose.** `Auth` holds no state and starts no
+  timer (§6.0, and see its moduledoc) — nothing inside this package could answer "is it
+  time yet" without either polling on a schedule nobody asked for or caching a credential
+  this package is built never to hold. A host that already has `credentials` in hand —
+  because it is about to make a call, or because it runs its own schedule — calls this
+  first. A host that does not track expiry at all still gets refreshed correctly; see
+  `usage-rules.md` §3.
+
+  Delegates to `DpExchange.Schwab.Auth.needs_refresh?/2`, previously reachable only by
+  going past the facade to that internal module.
+  """
+  @spec needs_refresh?(Auth.credentials(), DateTime.t()) :: boolean()
+  defdelegate needs_refresh?(credentials, now \\ DateTime.utc_now()), to: Auth
+
+  @doc """
+  Whether an HTTP status from this venue means the credential is finished, not just the
+  request.
+
+  Every `get_*`/`place_*`/`cancel_*` call above that reaches the venue returns
+  `{:refused, {:venue_error, status, detail}}` on a `4xx`. `status in [401, 403]` means
+  the access token itself is the problem — the caller's move is `refresh_credentials/2`
+  and one retry; any other `4xx` is about the request and retrying it with a fresh token
+  would not help.
+
+  Delegates to `DpExchange.Schwab.Auth.credential_failure?/1`, previously reachable only
+  by going past the facade to that internal module.
+  """
+  @spec credential_failure?(pos_integer()) :: boolean()
+  defdelegate credential_failure?(status), to: Auth
+
   # --- streaming: the Streamer, or a poll when it cannot bootstrap --------
 
   @doc """
@@ -391,6 +431,26 @@ defmodule DpExchange.Schwab do
   end
 
   @doc """
+  What has been asked for, which is not what `coverage/1` reports.
+
+  **The other half of the observed-versus-intended split `coverage/1` is built around.**
+  `coverage/1` answers "what has actually arrived"; this answers "what was asked for" —
+  and the two are not the same set the moment a symbol is subscribed and has not yet
+  delivered. A caller comparing this against `coverage/1` can tell "not yet arrived" from
+  "never asked for," which `coverage/1` alone cannot: an absent symbol reads identically
+  either way from that function on its own.
+
+  Delegates to `Feed.wanted/1`, previously reachable only by going past the facade to
+  that internal process. Returns `[]` when no feed is started, matching `coverage/1`'s
+  own empty-map answer for the same case.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  def wanted(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.wanted(feed), else: []
+  end
+
+  @doc """
   What is arriving, per symbol, split by which kind of data it is — never what `coverage/1`
   alone can tell apart.
 
@@ -424,6 +484,26 @@ defmodule DpExchange.Schwab do
   def coverage_by_kind(opts \\ []) do
     feed = feed(opts)
     if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+  end
+
+  @doc """
+  Whether the feed is delivering, on which route, and what it last failed on.
+
+  On the Streamer route this carries `route: :stream`, how many symbols are currently
+  `delivering`, how many are `wanted`, and `last_error` from the most recent bootstrap
+  failure, if any. On the fallback route it is `Core.PollingFeed.status/1`'s own map with
+  `route: :internal_poll` merged in. Neither shape promises anything `coverage/1` and
+  `coverage_by_kind/1` do not already say more precisely per symbol; this is the
+  feed-wide summary a health check or a log line reaches for instead of assembling one
+  from those two.
+
+  Delegates to `Feed.status/1`, previously reachable only by going past the facade to
+  that internal process. Returns `%{}` when no feed is started, matching `coverage/1`.
+  """
+  @spec status(keyword()) :: map()
+  def status(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.status(feed), else: %{}
   end
 
   @doc """
@@ -642,6 +722,29 @@ defmodule DpExchange.Schwab do
   @doc "The transaction types this venue records — there is no 'all' among them."
   @spec transaction_types() :: [String.t()]
   defdelegate transaction_types(), to: Rest
+
+  @doc """
+  Instructions the venue accepts on an order leg for an equity — `BUY`, `SELL`,
+  `SELL_SHORT`, `BUY_TO_COVER`. `place_order/3`, `preview_order/3` and `replace_order/4`
+  all refuse an instruction outside this list before it is sent, since order writes are
+  throttled here and reads are not; a caller building a request can check the same list
+  first rather than discover the mismatch by refusal.
+
+  Delegates to `DpExchange.Schwab.Orders.equity_instructions/0`, previously reachable
+  only by going past the facade to that internal module.
+  """
+  @spec equity_instructions() :: [String.t()]
+  defdelegate equity_instructions(), to: Orders
+
+  @doc """
+  Instructions the venue accepts on an order leg for an option — `BUY_TO_OPEN`,
+  `BUY_TO_CLOSE`, `SELL_TO_OPEN`, `SELL_TO_CLOSE`. See `equity_instructions/0`.
+
+  Delegates to `DpExchange.Schwab.Orders.option_instructions/0`, previously reachable
+  only by going past the facade to that internal module.
+  """
+  @spec option_instructions() :: [String.t()]
+  defdelegate option_instructions(), to: Orders
 
   # **A stock broker moves money through cheques, ACH and wires arranged with a person, not
   # through an API.** The Accounts and Trading specification has no payment method, no

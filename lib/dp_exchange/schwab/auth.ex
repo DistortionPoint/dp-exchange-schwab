@@ -137,6 +137,15 @@ defmodule DpExchange.Schwab.Auth do
 
   A host that does not track expiry still gets refreshed correctly; it just happens
   reactively, when a `401` arrives, rather than ahead of it.
+
+  **Reachable through the facade as `DpExchange.Schwab.needs_refresh?/2`.** This is the
+  half of the refresh cycle `refresh/2` does not answer: `refresh/2` renews a credential,
+  and this decides *when* to call it. That decision stays with the host deliberately —
+  this module holds no state and no timer (see the moduledoc), so nothing in this package
+  could check the clock on the host's behalf without either polling on a schedule the
+  host never asked for or caching a credential this module is built not to cache. A host
+  calls this before a call it is about to make, or on its own schedule; either way it now
+  has a real answer to "when do I refresh" rather than only a function that can.
   """
   @spec needs_refresh?(credentials(), DateTime.t()) :: boolean()
   def needs_refresh?(credentials, now \\ DateTime.utc_now())
@@ -146,10 +155,6 @@ defmodule DpExchange.Schwab.Auth do
   end
 
   def needs_refresh?(_no_expiry, _now), do: false
-
-  @doc "Seconds of margin `needs_refresh?/2` refreshes ahead of expiry."
-  @spec refresh_margin_seconds() :: pos_integer()
-  def refresh_margin_seconds, do: @refresh_margin_seconds
 
   @doc """
   Exchange a refresh token for a new access token.
@@ -264,6 +269,13 @@ defmodule DpExchange.Schwab.Auth do
 
   `401` and `403` are not retryable with the same token. The caller's move is to
   `refresh/2` and try once more; if the refresh itself is refused, a person must log in.
+
+  **Reachable through the facade as `DpExchange.Schwab.credential_failure?/1`.** Every
+  `Rest` function that reaches the venue returns `{:refused, {:venue_error, status,
+  detail}}` on a `4xx`, carrying `status` for exactly this check — a host that just
+  received that tuple passes `status` here to decide whether the fix is
+  `refresh_credentials/2` or something else, rather than re-deriving which codes mean
+  "credential" itself.
   """
   @spec credential_failure?(pos_integer()) :: boolean()
   def credential_failure?(status), do: status in [401, 403]

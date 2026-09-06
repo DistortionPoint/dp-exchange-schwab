@@ -71,11 +71,24 @@ defmodule DpExchange.Schwab.Orders do
     ioc: "IMMEDIATE_OR_CANCEL"
   }
 
-  @doc "Instructions the venue accepts for equities."
+  @doc """
+  Instructions the venue accepts for equities.
+
+  Reachable through the facade as `DpExchange.Schwab.equity_instructions/0` — a caller
+  building a request can check against this before sending, the same way
+  `transaction_types/0` lets a caller check the venue's type enum before sending. Order
+  writes are throttled here and reads are not, so this is worth checking rather than
+  discovering by refusal.
+  """
   @spec equity_instructions() :: [String.t()]
   def equity_instructions, do: @equity_instructions
 
-  @doc "Instructions the venue accepts for options."
+  @doc """
+  Instructions the venue accepts for options.
+
+  Reachable through the facade as `DpExchange.Schwab.option_instructions/0` — see
+  `equity_instructions/0`.
+  """
   @spec option_instructions() :: [String.t()]
   def option_instructions, do: @option_instructions
 

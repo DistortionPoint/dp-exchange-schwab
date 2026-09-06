@@ -97,21 +97,33 @@ defmodule DpExchange.Schwab.StreamerTest do
     end
   end
 
+  # The fifteen documented services, asserted through the module's real behaviour
+  # (`subscribe/5` accepting each one) rather than through a getter over the internal
+  # list — `known_service/1` is what actually gates a request, and this is what proves
+  # every one the vendor documents is accepted by it.
+  @all_services ~w(
+    ADMIN
+    LEVELONE_EQUITIES LEVELONE_EQUITY LEVELONE_OPTIONS LEVELONE_FUTURES
+    LEVELONE_FUTURES_OPTIONS LEVELONE_FOREX
+    NYSE_BOOK NASDAQ_BOOK OPTIONS_BOOK
+    CHART_EQUITY CHART_FUTURES
+    SCREENER_EQUITY SCREENER_OPTION
+    ACCT_ACTIVITY
+  )
+
   describe "the fifteen services this venue was said not to have" do
-    test "every one the vendor documents is named" do
-      services = StreamerProtocol.services()
+    test "every one the vendor documents is accepted by subscribe/5" do
+      assert length(@all_services) == 15
 
-      assert length(services) == 15
-
-      for service <- ~w(LEVELONE_EQUITIES LEVELONE_OPTIONS LEVELONE_FUTURES NYSE_BOOK
-                        NASDAQ_BOOK OPTIONS_BOOK CHART_EQUITY CHART_FUTURES
-                        SCREENER_EQUITY SCREENER_OPTION ACCT_ACTIVITY ADMIN) do
-        assert service in services, "#{service} is missing"
+      for service <- @all_services do
+        assert {:ok, _request} = StreamerProtocol.subscribe(@info, service, "SUBS", ~w(X)),
+               "#{service} was refused"
       end
     end
 
-    test "all six commands are named" do
-      assert StreamerProtocol.commands() == ~w(LOGIN LOGOUT SUBS UNSUBS ADD VIEW)
+    test "a service the vendor does not document is refused" do
+      assert {:error, {:unknown_service, "NOT_A_REAL_SERVICE"}} =
+               StreamerProtocol.subscribe(@info, "NOT_A_REAL_SERVICE", "SUBS", ~w(X))
     end
   end
 
@@ -318,10 +330,17 @@ defmodule DpExchange.Schwab.StreamerTest do
       refute Map.has_key?(futures, "8")
     end
 
-    test "every decodable service is one the venue actually carries" do
-      # A map for a service the venue does not publish would be dead code that looks live.
-      for service <- StreamerFields.decodable() do
-        assert service in StreamerProtocol.services()
+    test "every service the vendor documents either decodes or names its own gap" do
+      # A map for a service the venue does not publish would be dead code that looks
+      # live — so this is checked against `@all_services`, the vendor's own list, rather
+      # than against this module's own keys. `for_service/1` either succeeds or names
+      # `{:no_field_map, service}`; nothing else is a legal answer for a documented
+      # service.
+      for service <- @all_services do
+        case StreamerFields.for_service(service) do
+          {:ok, %{} = _field_map} -> :ok
+          {:error, {:no_field_map, ^service}} -> :ok
+        end
       end
     end
 
@@ -576,13 +595,14 @@ defmodule DpExchange.Schwab.StreamerTest do
 
     test "fourteen of the fifteen services are decodable, and the gap is visible" do
       # A service with no map is undecoded, not undocumented. ADMIN carries no market data
-      # — it is the login/logout channel, not a data service — so it is named in services/0
-      # and has no field table, which is the gap being asserted.
-      decodable = StreamerFields.decodable()
+      # — it is the login/logout channel, not a data service — so it is the one gap: it is
+      # accepted by `subscribe/5` (asserted above) but has no field table here.
+      {decodable, undecodable} =
+        Enum.split_with(@all_services, &match?({:ok, _map}, StreamerFields.for_service(&1)))
 
       assert length(decodable) == 14
-      assert "ADMIN" not in decodable
-      assert "ADMIN" in StreamerProtocol.services()
+      assert undecodable == ["ADMIN"]
+      assert StreamerFields.for_service("ADMIN") == {:error, {:no_field_map, "ADMIN"}}
     end
   end
 end

@@ -240,14 +240,4 @@ defmodule DpExchange.Schwab.StreamerFields do
       :error -> {:error, {:no_field_map, service}}
     end
   end
-
-  @doc """
-  Every service this module can decode.
-
-  Deliberately fewer than `StreamerProtocol.services/0`: the venue carries fifteen and this
-  names the fields for the ones the package reads. The gap is visible on purpose — a service
-  with no map is undecoded, not undocumented.
-  """
-  @spec decodable() :: [String.t()]
-  def decodable, do: @maps |> Map.keys() |> Enum.sort()
 end

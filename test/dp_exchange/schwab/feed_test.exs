@@ -624,10 +624,6 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
-  test "interval_ms is the documented default" do
-    assert Feed.interval_ms() == 30_000
-  end
-
   test "child_spec carries the configured name as its id" do
     assert %{id: :my_feed, type: :worker} = Feed.child_spec(name: :my_feed)
   end

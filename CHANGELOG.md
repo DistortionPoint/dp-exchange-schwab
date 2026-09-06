@@ -33,6 +33,89 @@ an acceptable changelog line.
 
 ### Added
 
+- **Core's assertion 16 ("internal wiring") swept this package clean — thirteen violations,
+  four wired to the facade, six deleted as dead code, one deleted after checking the vendor
+  docs, and two new facade functions to complete a pairing this release already started.**
+  `Core.AdapterContract`'s new assertion reads `:xref`'s real call graph, restricted to
+  `lib/`, to find an internal export nothing calls from anywhere but `test/` — the same
+  shape of defect `subscribe_notices/1` and `Auth.refresh/2` above were. Design doc:
+  `docs/design/closed/2026-09-06_assertion-16-internal-wiring.md`.
+
+  **`DpExchange.Schwab.needs_refresh?/2` and `DpExchange.Schwab.credential_failure?/1` —
+  the two functions a host needs to complete the refresh cycle `refresh_credentials/2`
+  started, now on the facade instead of on the internal `Auth` module.**
+  `refresh_credentials/2` (this file, above) answers "how do I refresh"; nothing answered
+  "when." `Auth.needs_refresh?/2` already existed and already had zero callers in `lib/` —
+  the same defect `Auth.refresh/2` was, caught by the same audit that found this one.
+  This package holds no state and starts no timer by design (`Auth`'s own moduledoc), so
+  the "when" question stays with the host on purpose rather than being answered by a poll
+  loop nobody asked for; the fix is making the existing predicate reachable, not inventing
+  a scheduler. `credential_failure?/1` is its usual pairing: every `Rest` call that
+  reaches the venue returns `{:refused, {:venue_error, status, detail}}` on a `4xx`, and a
+  host holding that tuple can now ask this package whether `status` means the credential
+  rather than re-deriving `status in [401, 403]` itself. `usage-rules.md` §3 now says how
+  a host is meant to use both.
+
+- **`DpExchange.Schwab.status/1` and `DpExchange.Schwab.wanted/1`** — `Feed.status/2` and
+  `Feed.wanted/1` were real, tested, working accessors on the internal `Feed` process with
+  no path to them through the facade, the same defect class `subscribe_notices/1` was
+  before this release. `wanted/1` is `coverage/1`'s missing other half — what was asked
+  for, as distinct from what has arrived — and without it a caller had no way to tell "not
+  yet delivered" from "never subscribed" from outside the package. `status/1` is the
+  feed-wide health summary a monitoring loop reaches for. Both resolve the feed the same
+  way `coverage/1` already does and answer the same empty value when no feed is started.
+
+- **`DpExchange.Schwab.equity_instructions/0` and `DpExchange.Schwab.option_instructions/0`**
+  — the published instruction matrix `Orders.build/2` already enforces before sending, now
+  reachable the same way `transaction_types/0` already exposes the venue's transaction-type
+  enum. Order writes are throttled here and reads are not, so a caller building a request
+  can check the matrix first instead of discovering a mismatch by refusal.
+
+### Removed
+
+Seven internal-module public functions, found unwired by the same assertion-16 audit and
+judged genuinely dead rather than a mechanism nothing calls. **Breaking for anyone who
+called them directly** — that requires having reached past the facade, which this
+package's own `CLAUDE.md` already names as the caller's defect, not this package's — so
+none of these had a facade entry point to remove:
+
+- **`Auth.refresh_margin_seconds` (deleted)** — a getter over the private margin
+  `needs_refresh?/2` already uses internally. Now that `needs_refresh?/2` answers the
+  "when" question directly on the facade, a host has no remaining reason to want the raw
+  number.
+- **`Feed.interval_ms` (deleted)** — a getter over the fallback poll's default
+  interval. A host that wants a different one already passes `:interval_ms`; nothing
+  needs the default to use the package correctly.
+- **`Supervisor.default_read_limit` (deleted)** — a getter over the read-limiter
+  courtesy ceiling. Unlike the venue's order ceiling, this number is this package's own
+  self-protection, not a venue fact, and a host controls it directly via
+  `:read_limit_per_minute`.
+- **`StreamerFields.decodable` (deleted), `StreamerProtocol.commands` (deleted)
+  and `StreamerProtocol.services` (deleted)** — pure reflections of the internal
+  service/command vocabulary, each already used directly (not through these functions) by
+  the guards that actually validate a request. Exposing any of the three on the facade was
+  never the right fix either: `Feed`'s own moduledoc is explicit that a venue service name
+  (`LEVELONE_EQUITIES`, `NYSE_BOOK`, …) "must never cross this facade" — that vocabulary is
+  wire-protocol detail, not part of the contract this package publishes.
+- **`StreamerProtocol.logout` (deleted)** — the one of the thirteen that took real
+  checking, because deleting a mechanism outright is the wrong default when the check exists
+  precisely to catch real mechanisms nothing calls. The vendor documents `LOGOUT` as a sixth
+  `ADMIN` command beside a one-Streamer-connection-per-user ceiling
+  (`docs/reference/schwab/documentation/market-data-production.txt`, Response Code 12), which
+  is exactly the shape of fact that made `Auth.refresh/2`'s absence a real bug rather than
+  dead code. But the vendor documentation says nothing about what an *unclean* disconnect
+  costs a session that never sent `LOGOUT` — only that the command itself closes the
+  connection — and this package has no code path that ever intentionally ends a live
+  Streamer session to begin with: `Socket` only ever reconnects. Wiring `logout/2` for real
+  would mean building a graceful-stop capability (suppressing the automatic reconnect for a
+  self-initiated close, sending the frame, then actually closing) that does not exist today,
+  on a claim the vendor does not make. That is inventing venue behavior, not fixing a gap, so
+  this function is removed rather than kept as a claim resting on a guess. If the family
+  later needs a graceful Streamer shutdown, `docs/design/ideas/schwab-streamer-graceful-shutdown.md`
+  records what it would need to check and build.
+
+### Added
+
 - **`refresh_credentials/2` and `update_credentials/2` — `Auth.refresh/2` was a mechanism
   built and never wired, the same defect class as `subscribe_notices/1` above and issue
   #16/#23/#26's `rate_limit_blocking` before it.** Nothing in this package ever called
@@ -283,8 +366,8 @@ an acceptable changelog line.
   futures frame's Chart Time decoded as `:open`, its real open as `:high`, and so on, and
   `to_candle/3` — which reads `:chart_time` — never found it, so `{:error,
   :missing_venue_timestamp}` fired on every frame. `socket.ex`'s `decode/4` swallows that
-  error into `[]`: no candle, no crash, nothing in the logs. `StreamerFields.decodable/0`
-  and `StreamerProtocol.services/0` both advertised the service as working the entire
+  error into `[]`: no candle, no crash, nothing in the logs. `StreamerFields.decodable` (since deleted)
+  and `StreamerProtocol.services` (since deleted) both advertised the service as working the entire
   time. Fixed with a separate `@chart_futures` map transcribed from the vendor's own
   table. `grep -rn CHART_FUTURES test/` found exactly one prior hit — an assertion that
   the name appears in a services list — and no test had ever decoded a real
