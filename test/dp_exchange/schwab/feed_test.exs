@@ -307,6 +307,136 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
+  describe "the fallback poll's own silent-delivery notice — DpCryptoManagement issue #21" do
+    # `Core.PollingFeed` 0.1.50 added `:on_notice`, fired once on the transition into
+    # delivering nothing and once on the transition back out. This is `Feed`'s own wiring
+    # of it (`start_poller/1`) under test — not `Core.PollingFeed`'s latching logic itself,
+    # which belongs to that package's own suite.
+    #
+    # These notices must never read as the Streamer's own health. `PollingFeed` only ever
+    # runs on this venue's `:poll` route, so a `:coverage_change` notice can only ever
+    # describe the fallback poll — the Streamer's connection health is a different `kind`
+    # entirely (`:link_down` / `:link_reconnecting`, from `Socket`, provider `:schwab` as
+    # an atom). This poller's label is `"schwab-fallback-poll"`, a *string*, precisely so
+    # both the notice's `provider` and its message text are unambiguous even read alone.
+
+    defp always_failing_quotes_plug do
+      fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          Plug.Conn.resp(conn, 500, "boom")
+        end
+      end
+    end
+
+    # Fails `fail_times` polls against `/quotes`, then succeeds — the family idiom for
+    # driving a poll through failure and recovery deterministically (see
+    # `dp_exchange_coinbase`'s `feed_test.exs`, `flaky_socket_loop/2`, for the same shape
+    # applied to a socket send instead of an HTTP response).
+    defp recovering_quotes_plug(counter, fail_times) do
+      fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          attempt = :counters.get(counter, 1)
+          :counters.add(counter, 1, 1)
+
+          if attempt < fail_times do
+            Plug.Conn.resp(conn, 500, "boom")
+          else
+            Req.Test.json(conn, quote_body())
+          end
+        end
+      end
+    end
+
+    test "delivering nothing on the fallback poll emits a coverage_change warning naming the poll, not the Streamer" do
+      feed =
+        start_feed(
+          plug: always_failing_quotes_plug(),
+          retry_attempts: 0,
+          interval_ms: 50,
+          # Headroom before the first tick so `subscribe_notices/2` below is guaranteed to
+          # land before the poller's first attempt — the poller is a third process on its
+          # own timer, not driven by a message this test controls.
+          start_delay_ms: 150,
+          symbols: ["AAPL"]
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
+
+      assert notice.severity == :warning
+      assert notice.provider == "schwab-fallback-poll"
+
+      assert notice.message ==
+               "schwab-fallback-poll has delivered nothing in 1 consecutive attempts"
+
+      assert notice.details.label == "schwab-fallback-poll"
+
+      # Never the Streamer's own vocabulary. A reader with only this text has to be able
+      # to tell the two apart.
+      refute notice.message =~ "Streamer"
+      refute notice.message =~ "socket"
+    end
+
+    test "the notice fires once per outage, not once per failed tick" do
+      feed =
+        start_feed(
+          plug: always_failing_quotes_plug(),
+          retry_attempts: 0,
+          interval_ms: 50,
+          start_delay_ms: 150,
+          symbols: ["AAPL"]
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
+                     3_000
+
+      # Several more tick intervals pass with the poll still failing every attempt — no
+      # second notice, because `PollingFeed` latches to `:dead` on the first crossing and
+      # only fires again on recovery.
+      refute_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change}}, 400
+    end
+
+    test "recovery fires a distinct info notice once the fallback poll starts delivering again" do
+      counter = :counters.new(1, [])
+
+      feed =
+        start_feed(
+          plug: recovering_quotes_plug(counter, 3),
+          retry_attempts: 0,
+          interval_ms: 50,
+          start_delay_ms: 150,
+          symbols: ["AAPL"]
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
+                     3_000
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = recovery},
+                     3_000
+
+      assert recovery.severity == :info
+      assert recovery.provider == "schwab-fallback-poll"
+
+      assert recovery.message ==
+               "schwab-fallback-poll has resumed delivering after 3 consecutive failures"
+
+      assert recovery.details.label == "schwab-fallback-poll"
+
+      # The recovered quote itself still arrives normally on the same route.
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
+    end
+  end
+
   describe "coverage_by_kind on the stream route" do
     test "a symbol delivering only a Quote is :quotes, never :order_book" do
       feed = start_feed(socket: fake_socket())

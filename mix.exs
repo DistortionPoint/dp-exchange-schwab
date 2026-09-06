@@ -51,7 +51,11 @@ defmodule DpExchangeSchwab.MixProject do
       # Needs `Timeframe.nameable/0` — this venue serves 1w and 1M, which Core can name
       # but deliberately cannot bucket — and `max_leverage: :per_account`, because Reg-T
       # has no single ceiling. Both landed in Core for this package.
-      {:dp_exchange_core, "~> 0.1.48"},
+      #
+      # Bumped to 0.1.50 for `PollingFeed.start_link/1`'s new `:on_notice` option — see
+      # `start_poller/1` in `Feed` and its moduledoc for why the fallback poll needs it
+      # (DpCryptoManagement's issue #21).
+      {:dp_exchange_core, "~> 0.1.50"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.

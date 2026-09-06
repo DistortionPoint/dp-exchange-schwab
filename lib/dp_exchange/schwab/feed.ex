@@ -29,6 +29,32 @@ defmodule DpExchange.Schwab.Feed do
   What the fallback does buy is that a Streamer outage degrades to slower quotes rather than
   to silence — and `:degraded` says so.
 
+  ## The fallback poll going silent is a different failure from the bootstrap failing
+
+  `ensure_route/1` already emits `Notice{kind: :degraded}` once, the instant the Streamer
+  bootstrap itself fails — "the socket could not be reached, here is the fallback." That
+  says nothing about whether the fallback then keeps working. DpCryptoManagement's issue
+  #21 is the reason that gap matters: a poll-based feed on another venue delivered nothing
+  for a whole deployment with only a `Logger.warning` to show for it, and nobody was
+  grepping in time.
+
+  So the poller started in `start_poller/1` is wired with `Core.PollingFeed`'s `:on_notice`
+  (Core 0.1.50): the instant the fallback poll itself crosses into delivering nothing —
+  `/quotes` failing every attempt, not the Streamer being unreachable — a second, distinct
+  `Notice{kind: :coverage_change, severity: :warning}` fires, and its mirror
+  (`severity: :info`, "has resumed delivering") fires once on recovery. Latched the same
+  way `PollingFeed` latches its own log line: once per transition, never once per tick.
+
+  **This must never be mistaken for the Streamer's own health, and nothing here is
+  structurally ambiguous about it:** `PollingFeed` only ever runs on this venue's `:poll`
+  route, so a `:coverage_change` notice can only ever describe the fallback poll — the
+  Streamer's own connection health surfaces as `:link_down` / `:link_reconnecting` from
+  `Socket`, a different `kind` entirely, on a code path this poller never touches. The
+  label passed to `PollingFeed.start_link/1` is `"schwab-fallback-poll"`, not `"schwab"`,
+  precisely so the notice is unambiguous on its text alone too — a consumer reading only
+  the message pasted into an issue, with no other context, can tell at a glance this is
+  about the fallback poll and not the socket.
+
   ## Only quotes survive the fallback
 
   The poll fetches `/quotes`. **Depth, candles, orders and fills exist only on the socket**,
@@ -457,7 +483,13 @@ defmodule DpExchange.Schwab.Feed do
 
     result =
       PollingFeed.start_link(
-        label: "schwab",
+        # Not "schwab" — this label reaches a consumer inside `Core.Notice.message` and
+        # `details.label`, and `PollingFeed` only ever runs on this venue's `:poll` route
+        # (the Streamer's own health surfaces separately, as `:link_down`/`:link_reconnecting`
+        # from `Socket`). A plain "schwab" label on a `:coverage_change` notice would read,
+        # pasted into an issue with no other context, as if the Streamer itself had gone
+        # dark. "schwab-fallback-poll" makes the source unambiguous in the text alone.
+        label: "schwab-fallback-poll",
         symbols: MapSet.to_list(state.wanted),
         interval_ms: Keyword.get(state.opts, :interval_ms, @interval_ms),
         start_delay_ms: Keyword.get(state.opts, :start_delay_ms),
@@ -465,6 +497,14 @@ defmodule DpExchange.Schwab.Feed do
         on_refusal: fn symbol, reason ->
           send(subscriber, {:dp_exchange, :schwab, {:refused, symbol, reason}})
         end,
+        # DpCryptoManagement's issue #21: this is the fallback poll's own silent-delivery
+        # detector reaching a consumer as data, not just a `Logger.warning` — see this
+        # module's moduledoc and `Core.PollingFeed`'s. The `Core.Notice{kind: :coverage_change}`
+        # it carries reaches `handle_info({:dp_exchange, :schwab, %Notice{} = notice}, state)`
+        # below the same way any other notice from this process does, and fans out to
+        # `state.notice_subscribers` — no new clause needed, because that handler is already
+        # generic over `kind`.
+        on_notice: fn notice -> send(subscriber, {:dp_exchange, :schwab, notice}) end,
         fetch: fn symbol ->
           # The poller is a third process, and neither this one's dictionary nor the
           # starting caller's reaches it. Re-applying here is what keeps a consumer's

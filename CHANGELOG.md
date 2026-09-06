@@ -33,6 +33,39 @@ an acceptable changelog line.
 
 ### Added
 
+- **The fallback poll's own silent-delivery failure now surfaces as a `Core.Notice`, not
+  only a log line — Core 0.1.50's `PollingFeed.start_link/1` `:on_notice` option
+  (`{:dp_exchange_core, "~> 0.1.50"}`, bumped from `~> 0.1.48`), DpCryptoManagement's
+  issue #21.** That issue is a poll-based feed on another venue that delivered nothing for
+  a whole deployment with only a `Logger.warning` to show for it — a log nobody was
+  grepping in time. `Core.PollingFeed` already detected "delivered NOTHING in N
+  consecutive attempts" and warned; it now also calls an injected `on_notice` with a
+  `Core.Notice{kind: :coverage_change}`, fired once on the transition into
+  delivering-nothing (`severity: :warning`) and once on the transition back out
+  (`severity: :info`, "has resumed delivering after N consecutive failures"). Latched
+  internally, never once per tick and never once per sweep while an outage continues.
+
+  This venue's `Feed` wires it in `start_poller/1`: the fallback poller's `on_notice` sends
+  the notice to the feed's own mailbox exactly the way its existing `sink` and `on_refusal`
+  already do, and it reaches a subscriber through the *already-generic*
+  `handle_info({:dp_exchange, :schwab, %Notice{} = notice}, state)` clause — no new match
+  clause needed, because that handler was never specific to any one `kind`.
+
+  **Kept distinguishable from the Streamer's own health, deliberately.** This package
+  already emits a *different* one-time notice — `Notice{kind: :degraded}` from
+  `ensure_route/1` — the instant the Streamer bootstrap itself fails, and untouched here.
+  The new `:coverage_change` notice describes a different failure (the fallback poll
+  running and then delivering nothing), and structurally cannot be confused with the
+  Streamer's own connection health: `Core.PollingFeed` runs only on this venue's `:poll`
+  route, so a `:coverage_change` notice can only ever originate there, never from `Socket`
+  (whose own health surfaces as `:link_down` / `:link_reconnecting`, a different `kind`,
+  provider `:schwab` as an atom). The poller's label was changed from `"schwab"` to
+  `"schwab-fallback-poll"` so the distinction holds in the notice's own text too, not only
+  in its `kind` and `provider` — a consumer reading only the message pasted into an issue
+  can tell at a glance this is the fallback poll and not the socket. Verified nothing else
+  reads the poller's internal label: `PollingFeed.status/1` does not expose it, and this
+  was the only call site in the package that set it.
+
 - **`coverage_by_kind/1` implemented — Core 0.1.48's optional `Venue` callback
   (`{:dp_exchange_core, "~> 0.1.48"}`, bumped from `~> 0.1.36`).** `coverage/1` reports one
   route per symbol regardless of what actually arrived, which Core's own moduledoc traces
