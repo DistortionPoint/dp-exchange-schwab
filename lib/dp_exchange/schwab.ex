@@ -71,7 +71,7 @@ defmodule DpExchange.Schwab do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.Venue
-  alias DpExchange.Schwab.{Capabilities, Feed, Orders, Rest, Supervisor}
+  alias DpExchange.Schwab.{Auth, Capabilities, Feed, Orders, Rest, Supervisor}
 
   # --- identity -----------------------------------------------------------
 
@@ -319,6 +319,38 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_rate_limit_status(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Exchanges the refresh token in `credentials` for a new access token. **Credential use,
+  not consent** — see the moduledoc's `## Credentials` section.
+
+  Venue-specific, like Gemini's `refresh_access_token/3` — not part of `Core.Venue`,
+  because refresh is a mechanism this contract has no callback for.
+
+  Delegates to `DpExchange.Schwab.Auth.refresh/2` — see there for the full accounting of
+  every returned shape, and why `Auth`'s own moduledoc calls this "the single most
+  important operational fact" about this venue. In short:
+
+  - **The caller must persist the result before using it.** The refresh token `credentials`
+    carried is already spent by this call; the response's is its only replacement.
+  - **`{:refused, {:reauthorization_required, status, detail}}` is terminal.** Only a person
+    at a browser can fix it — do not retry.
+  - Never retried by this call itself, and cannot be made to retry through `opts`.
+
+  This was previously reachable only by calling `Auth.refresh/2` directly, which meant
+  reaching past the facade — the exact thing this package's own `CLAUDE.md` says is a gap
+  in the facade to fix, not a workaround to document. `usage-rules.md` pointed a consumer
+  at the internal module by name; it now points here.
+
+  A refreshed credential reaches a *running* feed through `update_credentials/2`, not
+  through this function — refreshing and reconnecting are separate concerns, and a caller
+  that only wants a fresh token for account or trading calls should not have to touch a
+  feed to get one.
+  """
+  @spec refresh_credentials(Auth.credentials(), keyword()) ::
+          {:ok, Auth.credentials()} | {:error, term()} | {:refused, term()}
+  def refresh_credentials(credentials, opts \\ []),
+    do: Auth.refresh(credentials, with_limiter(opts))
+
   # --- streaming: the Streamer, or a poll when it cannot bootstrap --------
 
   @doc """
@@ -420,6 +452,32 @@ defmodule DpExchange.Schwab do
   def subscribe_notices(opts \\ []) do
     feed = feed(opts)
     if alive?(feed), do: Feed.subscribe_notices(feed, opts), else: {:error, :feed_not_started}
+  end
+
+  @doc """
+  Pushes refreshed `credentials` into the running feed.
+
+  **The other half of the round trip `refresh_credentials/2` starts.** Every future
+  bootstrap or poll fetch signs with `credentials`; on the Streamer route with a live
+  socket, the new `:access_token` also reaches `DpExchange.Schwab.Socket.update_access_token/2`
+  immediately, so the socket's next `LOGIN` — an ordinary reconnect, or one already backing
+  off after a `LOGIN_DENIED` — can succeed. **Does not force a reconnect**; a session
+  already logged in keeps running on the token it logged in with.
+
+  Before this existed, a feed's access token was fixed at the moment it started: a 30-minute
+  token with nothing to renew it, on a socket meant to stay up far longer than that. See
+  `DpExchange.Schwab.Feed`'s moduledoc, "Credentials rotate", for the full accounting.
+
+  Resolves the feed exactly as `coverage/1` and `subscribe_notices/1` do; answers
+  `{:error, :feed_not_started}` on the same terms, since there is nothing to update.
+  """
+  @spec update_credentials(map(), keyword()) :: :ok | {:error, term()}
+  def update_credentials(credentials, opts \\ []) do
+    feed = feed(opts)
+
+    if alive?(feed),
+      do: Feed.update_credentials(feed, credentials),
+      else: {:error, :feed_not_started}
   end
 
   # --- plumbing -----------------------------------------------------------

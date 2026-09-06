@@ -98,6 +98,28 @@ defmodule DpExchange.Schwab.Feed do
   free and a slower cycle beats a missing price. `Rest.request_opts/1` itself does **not**
   default this — a direct, one-off call through `Rest` may legitimately want fail-fast,
   and this module must not decide that for it.
+
+  ## Credentials rotate, and this process outlives one access token
+
+  The access token this feed was started with is good for 30 minutes; a Streamer socket
+  is meant to stay up far longer than that. Before `update_credentials/2` existed, there
+  was no way to get a refreshed token to a running feed at all — `Auth.refresh/2` was
+  reachable only by a caller reaching past the facade to an internal module, and even
+  then had nowhere to hand the result. A rejected reconnect months into a deployment,
+  with no path back except tearing the whole supervision subtree down, was the honest
+  consequence.
+
+  `update_credentials/2` replaces `state.credentials` — every future bootstrap or poll
+  fetch signs with the new value — and, on the `:stream` route, pushes the new
+  `:access_token` straight into the live `Socket` via `Socket.update_access_token/2`, so
+  the *next* `LOGIN` (an ordinary reconnect, or one `Socket`'s own `LOGIN_DENIED` backoff
+  is retrying) presents a token that can actually succeed. It does not force a reconnect;
+  a session already logged in keeps running on the token it logged in with.
+
+  The host calls `DpExchange.Schwab.Auth.refresh/2` — through the facade as
+  `DpExchange.Schwab.refresh_credentials/2` — persists the result per §6.0, and passes it
+  here as `DpExchange.Schwab.update_credentials/2`. Both halves of the round trip now
+  cross the facade; neither required reaching past it.
   """
 
   use GenServer
@@ -248,6 +270,18 @@ defmodule DpExchange.Schwab.Feed do
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())})
 
+  @doc """
+  Replaces the credentials this feed signs and connects with — see the moduledoc's
+  "Credentials rotate" section.
+
+  Every future bootstrap or poll fetch signs with `credentials`. On the `:stream` route
+  with a live socket, its `:access_token` also reaches `Socket.update_access_token/2`
+  immediately, so the socket's next `LOGIN` can use it. Does not force a reconnect.
+  """
+  @spec update_credentials(GenServer.server(), map()) :: :ok
+  def update_credentials(feed, credentials),
+    do: GenServer.call(feed, {:update_credentials, credentials}, @call_timeout)
+
   @doc "Child spec, so a consumer supervises this the same way it supervises any venue."
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -396,6 +430,11 @@ defmodule DpExchange.Schwab.Feed do
     {:reply, :ok, %{state | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber)}}
   end
 
+  def handle_call({:update_credentials, credentials}, _from, state) do
+    push_access_token(state, Map.get(credentials, :access_token))
+    {:reply, :ok, %{state | credentials: credentials}}
+  end
+
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
 
   @impl true
@@ -540,6 +579,18 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   defp apply_symbols(_state), do: {:error, :no_route}
+
+  # Only meaningful on the stream route with a live socket — the poll route re-reads
+  # `state.credentials` on its own next tick via the `fetch` closure in `start_poller/1`,
+  # which already needs nothing pushed to it. A `nil` or non-binary token is not pushed:
+  # `Socket.update_access_token/2` guards on `is_binary/1` itself, so this mirrors that
+  # rather than sending something it would reject anyway.
+  defp push_access_token(%{route: :stream, socket: socket}, token)
+       when is_pid(socket) and is_binary(token) do
+    Socket.update_access_token(socket, token)
+  end
+
+  defp push_access_token(_state, _token), do: :ok
 
   # An option symbol reaches `LEVELONE_OPTIONS`; everything else is an equity. The two
   # services **do not share field numbering**, so routing a symbol to the wrong one decodes

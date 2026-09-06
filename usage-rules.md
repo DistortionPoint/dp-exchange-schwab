@@ -29,7 +29,9 @@ locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent.
 
 ## 3. Refresh, and persist what you get back
 
-The access token lives **30 minutes**. `DpExchange.Schwab.Auth.refresh/2` renews it.
+The access token lives **30 minutes**. `DpExchange.Schwab.refresh_credentials/2` renews it —
+call this, not `DpExchange.Schwab.Auth.refresh/2` directly, which is internal and reached
+only by going past the facade.
 
 **The refresh token is one-time use.** Every refresh spends the old one and returns a new one
 carrying a fresh seven days. So:
@@ -44,6 +46,21 @@ carrying a fresh seven days. So:
   page; do not retry.
 
 Refreshing at least once a week means never needing a person again.
+
+**If you hold a running feed (you called `subscribe/2` or started this package supervised),
+also call `DpExchange.Schwab.update_credentials/2` with the refreshed credential.** The
+Streamer is meant to stay up far longer than one 30-minute access token, and a feed's
+credentials are otherwise fixed at whatever they were when it started — a socket that
+reconnects on an access token nobody ever refreshed presents a token the venue's own
+`LOGIN_DENIED` will keep rejecting, forever, since nothing about that fixes itself with
+time. `update_credentials/2` does not force a reconnect; it only changes what the *next*
+one presents.
+
+```elixir
+{:ok, renewed} = DpExchange.Schwab.refresh_credentials(credentials)
+:my_app.persist_schwab_credential(renewed)
+DpExchange.Schwab.update_credentials(renewed)
+```
 
 ## 4. A symbol is one instrument, not a pair
 

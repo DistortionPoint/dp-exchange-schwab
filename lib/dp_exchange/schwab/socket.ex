@@ -27,6 +27,36 @@ defmodule DpExchange.Schwab.Socket do
   healthy feed that receives nothing. The `:link_down` notice is what tells a consumer to
   expect the gap, and `:link_up` follows only after login succeeds again — not merely when
   the TCP connection returns.
+
+  ## A rejected LOGIN is not a network blip, and the reconnect backs off
+
+  The vendor's own response-code table marks `3 LOGIN_DENIED` `Connection Severed: Yes` —
+  the venue closes the socket itself after refusing a login, which hands this module
+  straight back to `handle_disconnect/2` with nothing about the *reason* attached. Left
+  alone, that is a reconnect storm waiting to happen: `websockex` reconnects with no delay
+  of its own (`deps/websockex/lib/websockex.ex`, `on_disconnect/5` calls `open_connection/3`
+  synchronously and loops), so a socket presenting an access token the venue will never
+  accept — expired, or simply wrong — would hammer the Streamer at full connect speed,
+  forever, since nothing about a repeated `LOGIN_DENIED` fixes itself with time.
+
+  So `state.login_failures` counts consecutive rejected logins, reset to `0` the moment one
+  succeeds, and `handle_disconnect/2` sleeps `reconnect_delay_ms/1` of it before reconnecting.
+  An ordinary network blip after a healthy session reconnects at once — nothing about it
+  suggests the credential is the problem. A `LOGIN_DENIED` is different: this module cannot
+  fix its own access token. Only a host calling `DpExchange.Schwab.Auth.refresh/2` — reachable
+  through the facade as `DpExchange.Schwab.refresh_credentials/2` — and pushing the result in
+  through `update_access_token/2` can do that, and this backoff exists to stop hammering the
+  venue while nobody has done so yet — not to fix the credential itself.
+
+  ## The access token can be replaced without a reconnect
+
+  `update_access_token/2` is how a refreshed token reaches an already-running socket. It
+  does not force a fresh LOGIN — the current session, if any, is untouched — it only
+  replaces what the *next* LOGIN presents, whether that is the next ordinary reconnect or
+  the one a backed-off `LOGIN_DENIED` retry eventually attempts. Before this existed, the
+  token passed to `start_link/1` was the only one this process would ever hold: a 30-minute
+  access token on a socket meant to stay up far longer than that had no path to renewal
+  short of tearing the whole feed down and starting over.
   """
 
   use WebSockex
@@ -52,6 +82,13 @@ defmodule DpExchange.Schwab.Socket do
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 
+  # Capped exponential backoff on consecutive LOGIN_DENIED reconnects — see the moduledoc.
+  # The first rejection waits a second; each further one doubles, capped well under a
+  # minute so a fixed credential recovers quickly rather than being stuck on a long wait
+  # from an earlier outage.
+  @base_reconnect_delay_ms 1_000
+  @max_reconnect_delay_ms 30_000
+
   @doc """
   Opens the Streamer for `info`, logging in with `access_token`.
 
@@ -70,7 +107,11 @@ defmodule DpExchange.Schwab.Socket do
       request_id: 1,
       # What the caller asked for, so a reconnect can report what was lost rather than
       # pretending it is still live.
-      subscriptions: MapSet.new()
+      subscriptions: MapSet.new(),
+      # Consecutive rejected LOGINs, reset to 0 on the next success. Drives
+      # `reconnect_delay_ms/1` — see the moduledoc's "A rejected LOGIN is not a network
+      # blip" section.
+      login_failures: 0
     }
 
     WebSockex.start_link(
@@ -111,6 +152,47 @@ defmodule DpExchange.Schwab.Socket do
     :exit, _reason -> {:error, :send_timeout}
   end
 
+  @doc """
+  Replaces the access token this socket presents at its next `LOGIN`.
+
+  **Does not force a reconnect.** A session already logged in stays logged in; this only
+  changes what the *next* `LOGIN` — an ordinary reconnect, or one this module's own
+  `LOGIN_DENIED` backoff is about to retry — carries. See the moduledoc: without this,
+  the token given to `start_link/1` was the only one the process would ever hold, and a
+  30-minute access token on a socket meant to outlive that had nothing to renew it with.
+
+  The caller gets a live token by calling `DpExchange.Schwab.Auth.refresh/2` — reachable
+  through the facade as `DpExchange.Schwab.refresh_credentials/2` — and passing the result
+  here, or through `DpExchange.Schwab.Feed.update_credentials/2`, which does both.
+  """
+  @spec update_access_token(pid(), String.t()) :: :ok | {:error, term()}
+  def update_access_token(socket, access_token) when is_binary(access_token) do
+    WebSockex.cast(socket, {:update_access_token, access_token})
+    :ok
+  catch
+    :exit, _reason -> {:error, :send_timeout}
+  end
+
+  @doc """
+  The delay, in milliseconds, before reconnecting after `failures` consecutive rejected
+  `LOGIN`s.
+
+  **Zero failures waits zero.** An ordinary disconnect after a healthy session — a network
+  blip, the venue's own idle timeout — reconnects at once, because nothing about it
+  suggests the credential is the problem. Every rejection after the first doubles the
+  wait, capped at #{@max_reconnect_delay_ms}ms, because a `LOGIN_DENIED` (`Response Code
+  3` in the vendor's own table, `Connection Severed: Yes`) means the venue will keep
+  severing the connection for exactly as long as this process keeps presenting the same
+  access token — and reconnecting at full speed against a credential that cannot work is
+  the reconnect storm this function exists to prevent.
+  """
+  @spec reconnect_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def reconnect_delay_ms(0), do: 0
+
+  def reconnect_delay_ms(failures) when is_integer(failures) and failures > 0 do
+    min(@base_reconnect_delay_ms * round(:math.pow(2, failures - 1)), @max_reconnect_delay_ms)
+  end
+
   # --- callbacks ----------------------------------------------------------
 
   @impl true
@@ -141,12 +223,25 @@ defmodule DpExchange.Schwab.Socket do
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :schwab, details: %{reason: inspect(reason)}))
 
+    # See the moduledoc's "A rejected LOGIN is not a network blip" section. `websockex`
+    # reconnects immediately with no delay of its own, and a socket presenting an access
+    # token the venue will never accept would otherwise hammer the Streamer at full connect
+    # speed, forever. Zero consecutive failures waits zero, so an ordinary network blip
+    # after a healthy session still reconnects at once.
+    case reconnect_delay_ms(state.login_failures) do
+      0 -> :ok
+      delay -> Process.sleep(delay)
+    end
+
     # The venue's session is gone. A socket that kept `logged_in?` would send subscriptions
     # the venue ignores and report a healthy feed that receives nothing.
     {:reconnect, %{state | logged_in?: false, subscriptions: MapSet.new()}}
   end
 
   @impl true
+  def handle_cast({:update_access_token, access_token}, state),
+    do: {:ok, %{state | access_token: access_token}}
+
   def handle_cast({:subscribe, _service, _command, _keys, _opts}, %{logged_in?: false} = state) do
     # Dropped deliberately rather than queued: a caller told the subscription succeeded
     # would wait for data the venue never agreed to send.
@@ -205,7 +300,9 @@ defmodule DpExchange.Schwab.Socket do
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
     if StreamerProtocol.succeeded?(response) do
       notify(state, Notice.new(:link_up, :schwab))
-      %{state | logged_in?: true}
+      # Reset the streak. A success proves the access token this process currently holds
+      # works, so the next disconnect — whatever causes it — is presumed innocent again.
+      %{state | logged_in?: true, login_failures: 0}
     else
       # A rejected LOGIN still arrives as a response. Treating its arrival as success is how
       # a socket waits forever for data.
@@ -216,7 +313,11 @@ defmodule DpExchange.Schwab.Socket do
         )
       )
 
-      state
+      # Counted here, not in `handle_disconnect/2`: the venue's own table marks
+      # `LOGIN_DENIED` `Connection Severed: Yes`, so this response is what causes the
+      # disconnect that follows, and `reconnect_delay_ms/1` reads the count from the state
+      # this response leaves behind.
+      %{state | login_failures: state.login_failures + 1}
     end
   end
 

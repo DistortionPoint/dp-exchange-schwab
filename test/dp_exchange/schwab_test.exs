@@ -12,7 +12,7 @@ defmodule DpExchange.SchwabTest do
 
   @moduletag :capture_log
 
-  alias DpExchange.Core.{Capabilities, Notice}
+  alias DpExchange.Core.{Capabilities, Config, Notice}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Fake, Feed, Supervisor}
 
@@ -209,6 +209,11 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.subscribe_notices(feed: :no_such_feed) == {:error, :feed_not_started}
     end
 
+    test "update_credentials says so too, rather than answering :ok with nothing to update" do
+      assert Schwab.update_credentials(@creds, feed: :no_such_feed) ==
+               {:error, :feed_not_started}
+    end
+
     test "unsubscribing from nothing is :ok, and coverage is empty" do
       assert Schwab.unsubscribe(["AAPL"], feed: :no_such_feed) == :ok
       assert Schwab.coverage(feed: :no_such_feed) == %{}
@@ -251,6 +256,107 @@ defmodule DpExchange.SchwabTest do
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
       assert notice.severity == :warning
       assert notice.provider == "schwab-fallback-poll"
+    end
+  end
+
+  describe "update_credentials/2 actually wires into a running feed's live socket" do
+    # `Feed.update_credentials/2` and `Socket.update_access_token/2` are the two halves
+    # `FeedTest`'s own "update_credentials/2" describe block already proves reach each
+    # other; this proves the third — that the FACADE reaches `Feed`, the same gap
+    # `subscribe_notices/1` had above before it was wired. `WebSockex.cast/2` wraps its
+    # payload as `{:"$websockex_cast", message}` — that shape is what a socket relaying
+    # its raw mailbox receives.
+    test "a refreshed access token reaches the live socket through the facade alone" do
+      unique = System.unique_integer([:positive])
+      name = :"update_credentials_regression_feed_#{unique}"
+      parent = self()
+
+      socket =
+        spawn(fn ->
+          Stream.repeatedly(fn ->
+            receive do
+              message -> send(parent, {:relayed_to_socket, message})
+            end
+          end)
+          |> Stream.run()
+        end)
+
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      {:ok, feed} =
+        Feed.start_link(
+          name: name,
+          socket: socket,
+          credentials: @creds,
+          symbols: ["AAPL"],
+          start_delay_ms: 60_000
+        )
+
+      on_exit(fn -> if Process.alive?(feed), do: GenServer.stop(feed, :normal) end)
+
+      new_credentials = Map.put(@creds, :access_token, "fresh-token")
+      assert Schwab.update_credentials(new_credentials, feed: name) == :ok
+
+      assert_receive {:relayed_to_socket,
+                      {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
+                     2_000
+    end
+  end
+
+  describe "refresh_credentials/2 — Auth.refresh/2 reachable through the facade" do
+    # `Auth.refresh/2` was previously reachable only by calling the internal `Auth`
+    # module directly — reaching past the facade, which this package's own CLAUDE.md
+    # names as a gap in the facade to fix, not a workaround to document. This proves the
+    # facade function actually delegates, both ways `Auth.refresh/2` can answer.
+    @refresh_creds %{
+      access_token: "at-1",
+      refresh_token: "rt-1",
+      client_id: "cid",
+      client_secret: "csec"
+    }
+
+    defmodule PermissiveLimiter do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, _weight, _opts), do: :ok
+      @impl true
+      def check(_provider, _weight, _opts), do: :ok
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+    end
+
+    setup do
+      Config.put_override(:rate_limit_module, PermissiveLimiter)
+      :ok
+    end
+
+    defp responding(body, status \\ 200) do
+      fn conn -> Req.Test.json(%{conn | status: status}, body) end
+    end
+
+    test "the happy path returns the rotated credential, exactly as Auth.refresh/2 does" do
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
+
+      assert {:ok, renewed} =
+               Schwab.refresh_credentials(@refresh_creds,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert renewed.access_token == "at-2"
+      assert renewed.refresh_token == "rt-2"
+    end
+
+    test "a terminal refusal passes through unchanged" do
+      body = %{"error" => "invalid_grant", "error_description" => "refresh token invalid"}
+
+      assert {:refused, {:reauthorization_required, 400, "refresh token invalid"}} =
+               Schwab.refresh_credentials(@refresh_creds,
+                 plug: responding(body, 400),
+                 retry_attempts: 0
+               )
     end
   end
 

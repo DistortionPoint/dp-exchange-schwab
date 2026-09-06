@@ -28,7 +28,8 @@ defmodule DpExchange.Schwab.SocketTest do
         subscriber: self(),
         logged_in?: false,
         request_id: 1,
-        subscriptions: MapSet.new()
+        subscriptions: MapSet.new(),
+        login_failures: 0
       },
       overrides
     )
@@ -119,6 +120,19 @@ defmodule DpExchange.Schwab.SocketTest do
       assert_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
     end
 
+    test "a successful LOGIN resets the login-failure streak" do
+      response = %{
+        "response" => [
+          %{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => 0}}
+        ]
+      }
+
+      assert {:ok, new_state} =
+               Socket.handle_frame(frame(response), state(%{login_failures: 3}))
+
+      assert new_state.login_failures == 0
+    end
+
     test "a REJECTED login leaves the session closed and says why" do
       # Treating a response's arrival as success is how a socket waits forever for data.
       response = %{
@@ -136,6 +150,27 @@ defmodule DpExchange.Schwab.SocketTest do
       refute new_state.logged_in?
       assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}
       assert details.reason == "credential rejected"
+    end
+
+    test "a REJECTED login counts against the login-failure streak" do
+      # `LOGIN_DENIED` (code 3) is `Connection Severed: Yes` in the vendor's own table — the
+      # venue closes the socket after this, and the count this response leaves behind is
+      # what `handle_disconnect/2` reads to back off before reconnecting.
+      response = %{
+        "response" => [
+          %{
+            "service" => "ADMIN",
+            "command" => "LOGIN",
+            "content" => %{"code" => 3, "msg" => "credential rejected"}
+          }
+        ]
+      }
+
+      assert {:ok, once} = Socket.handle_frame(frame(response), state(%{login_failures: 0}))
+      assert once.login_failures == 1
+
+      assert {:ok, twice} = Socket.handle_frame(frame(response), once)
+      assert twice.login_failures == 2
     end
 
     test "a rejected subscription is reported without closing the session" do
@@ -168,6 +203,66 @@ defmodule DpExchange.Schwab.SocketTest do
       refute cleared.logged_in?
       assert cleared.subscriptions == MapSet.new()
       assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
+    end
+
+    test "a disconnect after a healthy session (0 login failures) reconnects without delay" do
+      before = state(%{logged_in?: true, login_failures: 0})
+
+      # `reconnect_delay_ms(0)` is 0 and `handle_disconnect/2` skips `Process.sleep/1`
+      # entirely in that branch, so this returns effectively instantly — no
+      # `Process.sleep` in the test itself, which would be the forbidden way to prove it.
+      {elapsed_us, {:reconnect, _cleared}} =
+        :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, before) end)
+
+      assert elapsed_us < 100_000
+    end
+
+    test "login_failures survives a disconnect, so a subsequent LOGIN_DENIED keeps counting" do
+      before = state(%{login_failures: 2})
+
+      assert {:reconnect, cleared} = Socket.handle_disconnect(%{reason: :closed}, before)
+      assert cleared.login_failures == 2
+    end
+  end
+
+  describe "reconnect_delay_ms/1 — backoff on consecutive LOGIN_DENIED" do
+    test "zero failures waits zero" do
+      assert Socket.reconnect_delay_ms(0) == 0
+    end
+
+    test "each further failure doubles the wait" do
+      assert Socket.reconnect_delay_ms(1) == 1_000
+      assert Socket.reconnect_delay_ms(2) == 2_000
+      assert Socket.reconnect_delay_ms(3) == 4_000
+      assert Socket.reconnect_delay_ms(4) == 8_000
+    end
+
+    test "the wait is capped rather than growing without bound" do
+      assert Socket.reconnect_delay_ms(10) == 30_000
+      assert Socket.reconnect_delay_ms(100) == 30_000
+    end
+  end
+
+  describe "update_access_token/2 — a refreshed token reaches a live socket" do
+    test "the cast replaces the access token without touching the session" do
+      before = state(%{logged_in?: true, access_token: "stale-token"})
+
+      assert {:ok, new_state} =
+               Socket.handle_cast({:update_access_token, "fresh-token"}, before)
+
+      assert new_state.access_token == "fresh-token"
+      # Not forced to log out. A session already logged in keeps running on the token it
+      # logged in with — only the *next* LOGIN uses the new one.
+      assert new_state.logged_in?
+    end
+
+    test "the next LOGIN frame carries the updated token" do
+      before = state(%{access_token: "stale-token"})
+      {:ok, updated} = Socket.handle_cast({:update_access_token, "fresh-token"}, before)
+
+      assert {:reply, {:text, raw}, _state} = Socket.handle_info(:login, updated)
+      assert %{"requests" => [login]} = Jason.decode!(raw)
+      assert login["parameters"]["Authorization"] == "fresh-token"
     end
   end
 

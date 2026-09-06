@@ -33,6 +33,60 @@ an acceptable changelog line.
 
 ### Added
 
+- **`refresh_credentials/2` and `update_credentials/2` — `Auth.refresh/2` was a mechanism
+  built and never wired, the same defect class as `subscribe_notices/1` above and issue
+  #16/#23/#26's `rate_limit_blocking` before it.** Nothing in this package ever called
+  `Auth.refresh/2` or `Auth.needs_refresh?/2`; the only way a host could reach the refresh
+  the venue requires every 30 minutes was to call the internal `Auth` module directly —
+  which `usage-rules.md` §3 told it to do, in direct contradiction of this package's own
+  `CLAUDE.md`: "Everything except `schwab.ex` is internal... A consumer that reaches past
+  the facade has found a gap in it — fix the facade, do not document the workaround."
+
+  Worse than a missing convenience: a Streamer socket is meant to stay up far longer than
+  the 30-minute access token that logs it in, and a socket had no path to a fresh one at
+  all. The vendor's own response-code table marks `LOGIN_DENIED`
+  (`documentation/market-data-production.txt`, section 4) `Connection Severed: Yes` — the
+  venue closes the connection after refusing a stale token, `websockex` reconnects with no
+  delay of its own (`on_disconnect/5` in `deps/websockex/lib/websockex.ex` calls
+  `open_connection/3` synchronously and loops), and this module had no way to present a
+  different token on the next attempt. Once an access token expired, every future
+  reconnect was to a `LOGIN_DENIED` this module could not fix, forever, at full connect
+  speed.
+
+  Two facade functions now close both gaps:
+
+  - **`DpExchange.Schwab.refresh_credentials/2`** delegates to `Auth.refresh/2`, reachable
+    the same way Gemini's sibling `refresh_access_token/3` already is — a venue-specific
+    function beyond `Core.Venue`, not a Core change. `usage-rules.md` §3 now points here
+    instead of at the internal module.
+  - **`DpExchange.Schwab.update_credentials/2`** pushes the refreshed credential into a
+    running feed. `Feed.update_credentials/2` replaces `state.credentials` so every future
+    bootstrap or poll fetch signs with it, and on the `:stream` route with a live socket,
+    forwards the new `:access_token` to the new `Socket.update_access_token/2`, which
+    replaces what the socket's *next* `LOGIN` presents without forcing a reconnect — a
+    session already logged in keeps running on the token it logged in with.
+
+  Proven wired end to end, not merely present: `DpExchange.SchwabTest`'s
+  "update_credentials/2 actually wires into a running feed's live socket" starts a real
+  feed with a socket stand-in that relays its raw mailbox, calls
+  `Schwab.update_credentials/2` — the facade, not `Feed` directly — and asserts the
+  stand-in actually received `{:"$websockex_cast", {:update_access_token, "fresh-token"}}`.
+  That is the same shape of regression `subscribe_notices/1`'s own fix below was proven
+  against, and for the same reason: a facade function that merely compiles and returns
+  `:ok` proves nothing about whether it reaches the process underneath.
+
+- **`Socket` backs off before reconnecting after a rejected `LOGIN`, rather than hammering
+  the venue at full connect speed.** `state.login_failures` counts consecutive
+  `LOGIN_DENIED` responses, reset to `0` the instant one succeeds, and
+  `Socket.reconnect_delay_ms/1` — a base 1s delay doubling per further failure, capped at
+  30s — is what `handle_disconnect/2` sleeps before returning `{:reconnect, state}`. An
+  ordinary disconnect after a healthy session (`login_failures: 0`) still reconnects
+  instantly; nothing about a network blip suggests the credential is the problem. This
+  does not fix a stale credential by itself — only `update_credentials/2` above can — it
+  stops this package from hammering Schwab's server while nobody has fixed it yet, which
+  without `update_credentials/2` existing at all was an unrecoverable condition with no
+  bound on how hard this package would hit the venue while stuck in it.
+
 - **The fallback poll's own silent-delivery failure now surfaces as a `Core.Notice`, not
   only a log line — Core 0.1.50's `PollingFeed.start_link/1` `:on_notice` option
   (`{:dp_exchange_core, "~> 0.1.50"}`, bumped from `~> 0.1.48`), DpCryptoManagement's

@@ -253,6 +253,64 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
+  describe "update_credentials/2 — a refreshed token reaches a live socket" do
+    # A stand-in that relays every raw message it receives back to the test process,
+    # rather than `fake_socket/0`'s silent sleep — this is the one test that needs to see
+    # *what* `Feed` sent, not merely that the feed did not crash. `WebSockex.cast/2` wraps
+    # its payload as `{:"$websockex_cast", message}` (`deps/websockex/lib/websockex.ex`),
+    # which is the exact shape asserted below.
+    defp relaying_fake_socket(parent) do
+      pid =
+        spawn(fn ->
+          Stream.repeatedly(fn ->
+            receive do
+              message -> send(parent, {:relayed_to_socket, message})
+            end
+          end)
+          |> Stream.run()
+        end)
+
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    test "the new access token is cast to the live socket on the stream route" do
+      socket = relaying_fake_socket(self())
+      feed = start_feed(socket: socket)
+      Feed.subscribe(feed, ["AAPL"])
+
+      new_credentials = Map.put(@credentials, :access_token, "fresh-token")
+      assert Feed.update_credentials(feed, new_credentials) == :ok
+
+      assert_receive {:relayed_to_socket,
+                      {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
+                     2_000
+    end
+
+    test "a route with no live socket (the poll route) is not sent anything, and does not crash" do
+      feed =
+        start_feed(
+          plug: fn conn ->
+            if String.contains?(conn.request_path, "userPreference") do
+              Plug.Conn.resp(conn, 401, "no")
+            else
+              Req.Test.json(conn, quote_body())
+            end
+          end,
+          retry_attempts: 0,
+          interval_ms: 60_000,
+          start_delay_ms: 60_000,
+          symbols: ["AAPL"]
+        )
+
+      assert %{route: :internal_poll} = Feed.status(feed)
+
+      new_credentials = Map.put(@credentials, :access_token, "fresh-token")
+      assert Feed.update_credentials(feed, new_credentials) == :ok
+      assert Process.alive?(feed)
+    end
+  end
+
   describe "the poll route" do
     test "coverage on the poll route reports :internal_poll, never :stream" do
       # The whole point of the two routes being visible. A poll reporting `:stream` is the
