@@ -48,8 +48,9 @@ defmodule DpExchange.Schwab.Feed do
   **This must never be mistaken for the Streamer's own health, and nothing here is
   structurally ambiguous about it:** `PollingFeed` only ever runs on this venue's `:poll`
   route, so a `:coverage_change` notice can only ever describe the fallback poll — the
-  Streamer's own connection health surfaces as `:link_down` / `:link_reconnecting` from
-  `Socket`, a different `kind` entirely, on a code path this poller never touches. The
+  Streamer's own connection health surfaces as `:link_down` / `:link_up` from `Socket` (and
+  `:credentials_rejected` when the venue refuses the login itself), different `kind`s
+  entirely, on a code path this poller never touches. The
   label passed to `PollingFeed.start_link/1` is `"schwab-fallback-poll"`, not `"schwab"`,
   precisely so the notice is unambiguous on its text alone too — a consumer reading only
   the message pasted into an issue, with no other context, can tell at a glance this is
@@ -528,8 +529,8 @@ defmodule DpExchange.Schwab.Feed do
       PollingFeed.start_link(
         # Not "schwab" — this label reaches a consumer inside `Core.Notice.message` and
         # `details.label`, and `PollingFeed` only ever runs on this venue's `:poll` route
-        # (the Streamer's own health surfaces separately, as `:link_down`/`:link_reconnecting`
-        # from `Socket`). A plain "schwab" label on a `:coverage_change` notice would read,
+        # (the Streamer's own health surfaces separately, as `:link_down`/`:link_up` from
+        # `Socket`). A plain "schwab" label on a `:coverage_change` notice would read,
         # pasted into an issue with no other context, as if the Streamer itself had gone
         # dark. "schwab-fallback-poll" makes the source unambiguous in the text alone.
         label: "schwab-fallback-poll",

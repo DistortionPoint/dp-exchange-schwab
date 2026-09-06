@@ -6,7 +6,7 @@ import Config
 # carries a dev/test fallback literal so a missing var degrades to a working
 # development default rather than a boot crash:
 #
-#     config :dp_exchange_gemini,
+#     config :dp_exchange_schwab,
 #       some_key: System.get_env("SOME_KEY") || "dev-only-some-key"
 #
 # Adding a var is a five-step lifecycle — all five or none:
@@ -17,7 +17,9 @@ import Config
 #   4. tell CI to set it
 #   5. tell the deploy platform to set it
 #
-# `dp_exchange_gemini` currently reads nothing. It is a contract library: it
-# opens no sockets, holds no credentials, and takes its one configurable seam
-# (`:rate_limit_module`, D5) from the CONSUMER's application environment at
-# call time, never from here.
+# `dp_exchange_schwab` currently reads nothing, and that is not because it does
+# nothing: it opens the venue's Streamer socket and signs every request. It holds
+# no credentials — they are passed per call by the host and never stored here
+# (§6.0) — and it takes its configurable seams (`:rate_limit_module`,
+# `:http_adapter`, D5) from the CONSUMER's application environment at call time,
+# never from here.

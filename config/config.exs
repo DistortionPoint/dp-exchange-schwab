@@ -8,6 +8,6 @@ import Config
 #
 # Nothing here ships. `config/` is absent from `mix.exs`'s `files:`, so it
 # governs this package's own dev and test only — a consumer configures
-# `:dp_exchange_gemini` from their own config.
+# `:dp_exchange_schwab` from their own config.
 
 import_config "#{config_env()}.exs"

@@ -91,7 +91,7 @@ defmodule DpExchange.Schwab do
   @spec venue_does_not_serve() :: [{atom(), arity()}]
   defdelegate venue_does_not_serve, to: Capabilities
 
-  @doc "Canonical candle widths this venue serves."
+  @doc "The quote currencies this venue settles in."
   @spec quotes() :: [String.t()]
   def quotes, do: ["USD"]
 
@@ -507,10 +507,22 @@ defmodule DpExchange.Schwab do
   end
 
   @doc """
-  Registers `opts[:to]` (the caller, by default) for this package's own notices — the
-  `:degraded` notice `DpExchange.Schwab.Feed` emits when the Streamer cannot bootstrap and
-  falls back to polling, and the `:coverage_change` notice the fallback poll emits itself
-  when it stops, or resumes, delivering.
+  Registers `opts[:to]` (the caller, by default) for this package's own notices — every
+  `Core.Notice` either half of the feed emits:
+
+  - `:degraded`, from `DpExchange.Schwab.Feed`, when the Streamer cannot bootstrap and it
+    falls back to polling — and from `DpExchange.Schwab.Socket` for a login the venue
+    refused for a reason a new token would not fix.
+  - `:credentials_rejected`, from `DpExchange.Schwab.Socket`, when the venue answers a
+    `LOGIN` with `3 LOGIN_DENIED`. **This is the kind a host must handle**: the socket
+    cannot fix its own token, so it backs off and retries the same rejected credential
+    until `refresh_credentials/2` and `update_credentials/2` replace it. See
+    `usage-rules.md` §3.
+  - `:link_up` and `:link_down`, from `DpExchange.Schwab.Socket`, as a session is
+    established and lost. `:link_up` follows the *login* response, not merely a reconnected
+    socket.
+  - `:coverage_change`, which the fallback poll emits itself when it stops, or resumes,
+    delivering.
 
   **This was a no-op.** It ignored `opts` entirely and returned `:ok` without registering
   anything, while `DpExchange.Schwab.Feed.subscribe_notices/2` — the registry that actually

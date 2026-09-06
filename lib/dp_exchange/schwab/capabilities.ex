@@ -37,8 +37,10 @@ defmodule DpExchange.Schwab.Capabilities do
   about *the documents* rather than the venue. Schwab's WebSocket **Streamer** carries
   fifteen services including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is
   documented in the prose beside those specifications. This package speaks it as of
-  2026-09-01, so `streamable` names quotes, top of book, depth and candles, and
-  `authenticated_streamable` adds the order and fill events `ACCT_ACTIVITY` carries.
+  2026-09-01, so `streamable` names quotes, top of book, depth, candles, and the order and
+  fill events `ACCT_ACTIVITY` carries. `authenticated_streamable` is the **same list**, not
+  a longer one: there is no anonymous socket here, so nothing is streamable without a
+  credential and nothing a credential adds is missing from the first list.
 
   **`get_order_book/2` stays `:unsupported` and that is now a narrower claim**: there is no
   *REST* order book, and the contract's callback is a request-response read. Depth arrives
@@ -238,7 +240,9 @@ defmodule DpExchange.Schwab.Capabilities do
       # `assetType` admits EQUITY, OPTION, FUTURE, FOREX, INDEX, MUTUAL_FUND, FIXED_INCOME
       # and more, and this used to declare nine of them: `:spot, :option, :future,
       # :future_option, :index, :mutual_fund, :bond, :forex, :cash_equivalent`. That was a
-      # defect (S2, `docs/design/2026-09-05_family-wide-defect-sweep.md`): a capability
+      # defect (S2, `dp_exchange_core`'s
+      # `docs/design/2026-09-05_family-wide-defect-sweep.md` — the sweep is family-wide and
+      # its document lives in Core, not here): a capability
       # declaration is a claim about what the *package* can route, not about what the
       # venue's schema admits. What follows is the accounting per type, and each line
       # names what was actually checked, not what looked plausible.

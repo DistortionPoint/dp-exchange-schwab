@@ -374,7 +374,7 @@ defmodule DpExchange.Schwab.FeedTest do
     # These notices must never read as the Streamer's own health. `PollingFeed` only ever
     # runs on this venue's `:poll` route, so a `:coverage_change` notice can only ever
     # describe the fallback poll — the Streamer's connection health is a different `kind`
-    # entirely (`:link_down` / `:link_reconnecting`, from `Socket`, provider `:schwab` as
+    # entirely (`:link_down` / `:link_up`, from `Socket`, provider `:schwab` as
     # an atom). This poller's label is `"schwab-fallback-poll"`, a *string*, precisely so
     # both the notice's `provider` and its message text are unambiguous even read alone.
 

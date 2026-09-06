@@ -142,7 +142,13 @@ lib/dp_exchange/schwab/capabilities.ex the declaration, derived before any provi
 lib/dp_exchange/schwab/rest.ex         both servers: /marketdata/v1 and /trader/v1
 lib/dp_exchange/schwab/orders.ex       order construction and the published instruction matrix
 lib/dp_exchange/schwab/symbol_format.ex translation (total) and validation (refusing)
-lib/dp_exchange/schwab/feed.ex         a REST poll behind Core.PollingFeed
+lib/dp_exchange/schwab/feed.ex         the venue's Streamer, or a REST poll behind
+                                       Core.PollingFeed when it cannot bootstrap
+lib/dp_exchange/schwab/socket.ex       the Streamer's WebSocket, login and reconnect
+lib/dp_exchange/schwab/streamer_info.ex     the /userPreference bootstrap
+lib/dp_exchange/schwab/streamer_protocol.ex the wire format: commands, frames, envelopes
+lib/dp_exchange/schwab/streamer_fields.ex   what each numbered field means, per service
+lib/dp_exchange/schwab/streamer_decode.ex   frames into Core.Types.* values
 lib/dp_exchange/schwab/supervisor.ex   limiter + feed
 lib/dp_exchange/schwab/fake.ex         in-process stand-in for consumers
 docs/reference/schwab/                 Schwab's own documentation, committed verbatim

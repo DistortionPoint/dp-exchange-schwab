@@ -2,8 +2,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
   @moduledoc """
   Streamer data frames into the contract's value types.
 
-  Pure functions. The socket hands frames here and gets `Quote`, `TopOfBook` or `Candle`
-  back — or an error, which is the point of several of the rules below.
+  Pure functions. The socket hands frames here and gets `Quote`, `TopOfBook`, `Candle` or
+  `OrderBook` back — or an error, which is the point of several of the rules below.
 
   ## A LEVELONE frame is two different things at once
 

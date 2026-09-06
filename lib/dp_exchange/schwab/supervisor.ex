@@ -2,9 +2,10 @@ defmodule DpExchange.Schwab.Supervisor do
   @moduledoc """
   This venue's process tree — internal.
 
-  A limiter and a feed, exactly as every other venue in the family, even though the feed
-  behind them is a poll rather than a socket. That sameness is the point: a consumer's
-  supervision tree looks identical whichever venue it holds.
+  A limiter and a feed, exactly as every other venue in the family. That sameness is the
+  point: a consumer's supervision tree looks identical whichever venue it holds — and it
+  stays identical whichever route the feed takes, since `Feed` chooses between the venue's
+  Streamer and its own REST poll behind this tree rather than in front of it.
 
   ## The limiter is configured, not declared
 

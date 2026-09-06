@@ -1,76 +1,81 @@
 # Schwab Trader API — coverage matrix
 
 **Source**: the two OpenAPI documents in `openapi/`, committed here. Enumerated
-2026-08-31 against the paths `lib/` constructs. **REST counts re-verified 2026-09-03; the
-Streamer section below was written when this package asserted a false negative about
-streaming and is kept as the record of that, with what has since changed added below it.**
+2026-08-31 against the paths `lib/` constructs. **REST counts re-verified 2026-09-06
+against `lib/dp_exchange/schwab/rest.ex`; the Streamer section below was written when this
+package asserted a false negative about streaming and is kept as the record of that, with
+what has since changed added below it.**
 
 ## Counts
 
 | | operations | implemented |
 |---|---|---|
-| Market Data Production | 10 | 9 |
-| Accounts and Trading Production | 13 | 11 |
-| **total** | **23** | **20** |
+| Market Data Production | 10 | 10 |
+| Accounts and Trading Production | 13 | 13 |
+| **total** | **23** | **23** |
 
-**87%** of the two REST specifications, up from 52% at the original capture. What remains:
-`GET /orders` (cross-account), `GET /accounts` (cross-account list; this package uses
-`accountNumbers` + per-account fetch), `GET /instruments/{cusip_id}` (lookup by symbol
-covers the common case). Options chains and expirations, and movers, now have facade
-homes and are implemented — see `capabilities/0`.
+**100%** of the two REST specifications — 52% at the original capture, 87% on 2026-09-03.
+Every operation in both documents has a path constructed and a response read in `Rest`.
+
+**"Implemented" here means the operation is reached, not that a `Core.Venue` callback
+returns its data in the contract's vocabulary.** Two are deliberately still `:unsupported`
+on the facade and neither is an unreached endpoint:
+
+- **`get_trade_history/2`** — `/transactions` is implemented and reached as
+  `get_transactions/2`, which returns the venue's own shape. Mapping a Schwab transaction
+  onto `Core.Types.Fill` needs a live response to check against, and this repository holds
+  no credential.
+- **`get_order_book/2`** — no REST operation in either document returns depth, so there is
+  nothing for a request-response callback to read. Depth is a Streamer service.
 
 ## Matrix
 
+Every operation, with the facade entry point that reaches it.
+
 ```
-✓ GET    /quotes
-  GET    /{symbol_id}/quotes
-  GET    /chains
-  GET    /expirationchain
-✓ GET    /pricehistory
-  GET    /movers/{symbol_id}
-✓ GET    /markets
-  GET    /markets/{market_id}
-✓ GET    /instruments
-  GET    /instruments/{cusip_id}
+✓ GET    /quotes                                        get_price/2, get_top_of_book/2
+✓ GET    /{symbol_id}/quotes                            get_symbol_quote/3
+✓ GET    /chains                                        get_option_chain/2
+✓ GET    /expirationchain                               get_option_expirations/2
+✓ GET    /pricehistory                                  get_historical_prices/4
+✓ GET    /movers/{symbol_id}                            get_screener/2
+✓ GET    /markets                                       market_status/1
+✓ GET    /markets/{market_id}                           get_market/3
+✓ GET    /instruments                                   get_symbols/1  (requires :query)
+✓ GET    /instruments/{cusip_id}                        get_instrument/3
 
-✓ GET    /accounts/accountNumbers
-  GET    /accounts
-✓ GET    /accounts/{accountNumber}
-✓ GET    /accounts/{accountNumber}/orders
-✓ POST   /accounts/{accountNumber}/orders
-✓ GET    /accounts/{accountNumber}/orders/{orderId}
-✓ DELETE /accounts/{accountNumber}/orders/{orderId}
-✓ PUT    /accounts/{accountNumber}/orders/{orderId}
-✓ POST   /accounts/{accountNumber}/previewOrder
-  GET    /orders
-  GET    /accounts/{accountNumber}/transactions
-  GET    /accounts/{accountNumber}/transactions/{transactionId}
-  GET    /userPreference
+✓ GET    /accounts/accountNumbers                       get_accounts/2
+✓ GET    /accounts                                      get_account_summaries/2, get_positions/1
+✓ GET    /accounts/{accountNumber}                      get_balances/2
+✓ GET    /accounts/{accountNumber}/orders               get_orders/2
+✓ POST   /accounts/{accountNumber}/orders               place_order/3
+✓ GET    /accounts/{accountNumber}/orders/{orderId}     get_order/3
+✓ DELETE /accounts/{accountNumber}/orders/{orderId}     cancel_order/3
+✓ PUT    /accounts/{accountNumber}/orders/{orderId}     replace_order/4
+✓ POST   /accounts/{accountNumber}/previewOrder         preview_order/3
+✓ GET    /orders                                        get_all_orders/2
+✓ GET    /accounts/{accountNumber}/transactions         get_transactions/2
+✓ GET    /accounts/{accountNumber}/transactions/{id}    get_transaction/4
+✓ GET    /userPreference                                get_user_preference/2, and the
+                                                        Streamer bootstrap in `Feed`
 ```
 
-## The eleven gaps, and what each costs
+## Where two operations answer the same question differently
 
-| endpoint | consequence of not having it |
+Nothing below is a gap. They are recorded because reaching for the wrong one of a pair
+costs a request or an answer to a different question.
+
+| pair | which to reach for |
 |---|---|
-| `GET /accounts/{n}/transactions` | **`get_trade_history/2` is `:unsupported`.** Fills live here; this is the only source of them |
-| `GET /accounts/{n}/transactions/{id}` | single transaction |
-| `GET /accounts` | a host with several accounts must loop `accountNumbers` and fetch each |
-| `GET /orders` | orders across all accounts in one call; same looping cost |
-| `GET /{symbol_id}/quotes` | single-symbol quote; `/quotes` covers it with a list of one |
-| `GET /chains` | option chains — no facade home |
-| `GET /expirationchain` | option expirations — no facade home |
-| `GET /movers/{symbol_id}` | market movers — no facade home |
-| `GET /markets/{market_id}` | one market's hours; `/markets` covers it |
-| `GET /instruments/{cusip_id}` | lookup by CUSIP rather than by symbol |
-| `GET /userPreference` | **the streamer bootstrap** — returns `streamerInfo` with `streamerSocketUrl`. Without it there is no WebSocket connection at all |
+| `/quotes` vs `/{symbol_id}/quotes` | `/quotes` takes a list and is what the facade and the fallback poll use. `get_symbol_quote/3` is the single-symbol form, returned unnormalised |
+| `/accounts/accountNumbers` vs `/accounts` | the first returns the **encrypted hashes** every other account path is addressed by, and is the prerequisite call. The second returns balances, and positions when asked |
+| `/markets` vs `/markets/{market_id}` | `market_status/1` reads every market at once. `get_market/3` asks about one, and about a **different day** — which `/markets` cannot answer |
+| `/accounts/{n}/orders` vs `/orders` | per-account, versus across every account in one call. Both require a date window |
 
-**Three are conveniences** the facade already covers by another route
-(`/{symbol_id}/quotes`, `/markets/{market_id}`, and arguably `/accounts` and `/orders`).
-**Three have no facade home** — chains, expirations, movers — and are normalisation
-questions rather than implementation ones.
-
-**The two that matter most are the transactions pair and `/userPreference`.** The first is
-why this package cannot report a fill. The second is why it has no streaming.
+**`/userPreference` is the one whose absence would be structural.** It returns
+`streamerInfo.streamerSocketUrl` and the four identifiers `LOGIN` requires; without it
+there is no WebSocket connection at all, and `Feed` falls back to polling `/quotes` and
+says so through `coverage/1`.
 
 ## The Streamer — 15 services, and now the socket speaks them
 
