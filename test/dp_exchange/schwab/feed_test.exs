@@ -276,6 +276,86 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
       assert %{route: :internal_poll} = Feed.status(feed)
     end
+
+    test "coverage_by_kind on the poll route reports only :quotes, never :order_book" do
+      # Depth structurally cannot arrive on this route — the poller only ever calls
+      # `Rest.get_price/3` — so there must be no `:order_book` key at all, not an empty one.
+      feed =
+        start_feed(
+          plug: fn conn ->
+            if String.contains?(conn.request_path, "userPreference") do
+              Plug.Conn.resp(conn, 401, "no")
+            else
+              Req.Test.json(conn, quote_body())
+            end
+          end,
+          retry_attempts: 0,
+          interval_ms: 50,
+          start_delay_ms: 0,
+          symbols: ["AAPL"]
+        )
+
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind == %{quotes: %{"AAPL" => :internal_poll}}
+      refute Map.has_key?(by_kind, :order_book)
+
+      assert_union_matches_coverage(feed, by_kind)
+      assert_declared_streamable(by_kind)
+    end
+  end
+
+  describe "coverage_by_kind on the stream route" do
+    test "a symbol delivering only a Quote is :quotes, never :order_book" do
+      feed = start_feed(socket: fake_socket())
+      Feed.subscribe(feed, ["AAPL"])
+
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind == %{quotes: %{"AAPL" => :stream}}
+      refute Map.has_key?(by_kind, :order_book)
+
+      assert_union_matches_coverage(feed, by_kind)
+      assert_declared_streamable(by_kind)
+    end
+
+    test "a symbol delivering only an OrderBook is :order_book, never :quotes" do
+      feed = start_feed(socket: fake_socket())
+      Feed.subscribe(feed, ["MSFT"])
+
+      send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
+      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind == %{order_book: %{"MSFT" => :stream}}
+      refute Map.has_key?(by_kind, :quotes)
+
+      assert_union_matches_coverage(feed, by_kind)
+      assert_declared_streamable(by_kind)
+    end
+
+    test "two symbols delivering different kinds land under different keys, and the union still matches coverage/1" do
+      feed = start_feed(socket: fake_socket())
+      Feed.subscribe(feed, ["AAPL", "MSFT"])
+
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind == %{quotes: %{"AAPL" => :stream}, order_book: %{"MSFT" => :stream}}
+
+      assert_union_matches_coverage(feed, by_kind)
+      assert_declared_streamable(by_kind)
+    end
   end
 
   describe "rate_limit_blocking — DpCryptoManagement issue #23 (fallback poll)" do
@@ -371,6 +451,41 @@ defmodule DpExchange.Schwab.FeedTest do
       timestamp: DateTime.utc_now(),
       provider: :schwab
     }
+  end
+
+  defp order_book_for(symbol) do
+    %Types.OrderBook{
+      symbol: symbol,
+      bids: [{Decimal.new("100.00"), Decimal.new("10")}],
+      asks: [{Decimal.new("100.10"), Decimal.new("5")}],
+      timestamp: DateTime.utc_now(),
+      sequence: nil,
+      provider: :schwab
+    }
+  end
+
+  # The invariant `coverage_by_kind/1`'s own moduledoc states: every symbol `coverage/1`
+  # reports appears under some kind in `by_kind`, and vice versa — asserted as a set
+  # equality over symbol keys, not over the maps themselves, since the same symbol can
+  # legitimately repeat under more than one kind.
+  defp assert_union_matches_coverage(feed, by_kind) do
+    coverage_symbols = feed |> Feed.coverage() |> Map.keys() |> Enum.sort()
+
+    union =
+      by_kind
+      |> Map.values()
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    assert union == coverage_symbols
+  end
+
+  defp assert_declared_streamable(by_kind) do
+    declared = MapSet.new(DpExchange.Schwab.capabilities().streamable)
+    reported = by_kind |> Map.keys() |> MapSet.new()
+
+    assert MapSet.subset?(reported, declared)
   end
 
   defp quote_body do

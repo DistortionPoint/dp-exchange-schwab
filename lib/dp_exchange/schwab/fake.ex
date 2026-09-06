@@ -374,6 +374,24 @@ defmodule DpExchange.Schwab.Fake do
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :internal_poll})
 
+  @doc """
+  What `coverage/1` reports, split by kind — `:quotes` only, because that is all this fake
+  can deliver.
+
+  The real venue's `Feed` chooses between two routes and, on the Streamer route, can
+  deliver `:order_book` alongside `:quotes` for a symbol whose service is a `*_BOOK`
+  channel. This fake models neither the route split nor order-book decoding — `subscribe/2`
+  only ever pushes a `Types.Quote` built from `get_price/2` — so reporting anything beyond
+  `:quotes` here would assert a delivery this fake cannot produce. Keeping this honest to
+  what the fake actually does, rather than to everything the real venue can do, is the same
+  choice `coverage/1` itself already made by answering `:internal_poll` unconditionally.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
+        }
+  def coverage_by_kind(opts \\ []), do: %{quotes: coverage(opts)}
+
   @impl true
   def subscribe_notices(_opts \\ []), do: :ok
 

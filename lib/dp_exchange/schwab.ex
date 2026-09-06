@@ -359,6 +359,42 @@ defmodule DpExchange.Schwab do
   end
 
   @doc """
+  What is arriving, per symbol, split by which kind of data it is — never what `coverage/1`
+  alone can tell apart.
+
+  `coverage/1` reports one route for a symbol regardless of what actually delivered, which
+  is truthful and was measured not to be enough: Coinbase's order-book channel delivered
+  over 11,000 frames while quotes stayed dark, and `coverage/1` reported the symbol as
+  `:stream` throughout (DpCryptoManagement's issue #22), because it counts a
+  `Types.OrderBook` as coverage exactly as much as a `Types.Quote`.
+
+  This venue sharpens that blindness rather than merely repeating it, because Schwab's
+  fallback conflates kind with route too. **Only quotes survive the fallback**: when
+  `GET /userPreference` cannot bootstrap the Streamer, `Feed` falls back to polling
+  `/quotes` and nothing else, so depth, candles, orders and fills cannot arrive on that
+  route for *any* symbol — not "arrived rarely," structurally absent. A caller reading only
+  `coverage/1` cannot tell "the venue sent no depth for this symbol" from "this feed
+  silently fell back to a route that cannot carry depth at all." This is what separates the
+  two: on the poll route it reports `%{quotes: coverage(opts)}` and no other key; on the
+  Streamer route, kind comes from the decoded struct's own type, never from a service name.
+
+  Delegates to `Feed.coverage_by_kind/1` — see there for the full accounting, including why
+  this venue's own architecture (one route for the whole feed, chosen once) does not reach
+  the "a symbol is `:internal_poll` for one kind and `:stream` for another" case the
+  callback's own moduledoc describes as merely possible in general.
+
+  Returns `%{}` when no feed is started, matching `coverage/1`.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
+        }
+  def coverage_by_kind(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+  end
+
+  @doc """
   Refusals reach the subscriber through the same mailbox as quotes, so a caller
   registering here receives them.
   """

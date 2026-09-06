@@ -31,6 +31,54 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`coverage_by_kind/1` implemented — Core 0.1.48's optional `Venue` callback
+  (`{:dp_exchange_core, "~> 0.1.48"}`, bumped from `~> 0.1.36`).** `coverage/1` reports one
+  route per symbol regardless of what actually arrived, which Core's own moduledoc traces
+  to a measured incident: Coinbase's order-book channel delivered over 11,000 frames for
+  406 symbols while `ticker` was dark for all but 5, and `coverage/1` reported every one of
+  the 406 as `:stream` — correctly, and uselessly, because it counts a `Types.OrderBook` as
+  coverage exactly as much as a `Types.Quote`.
+
+  **This venue sharpens the same blindness rather than merely repeating it, because it also
+  conflates kind with route.** This package's own moduledoc has said since the Streamer
+  landed that "only quotes survive the fallback": when `GET /userPreference` cannot
+  bootstrap the Streamer, `Feed` polls `/quotes` and nothing else, so depth, candles,
+  orders and fills cannot arrive on that route for *any* symbol — not merely rare, but
+  structurally absent. A caller reading only `coverage/1` cannot distinguish "the venue
+  sent no depth for this symbol" from "this feed silently fell back to a route that cannot
+  carry depth at all," which is exactly the family's forbidden substitution shape wearing a
+  route label instead of a value.
+
+  `Feed.coverage_by_kind/1` now answers that. On the **stream** route, kind is read off the
+  decoded value's own struct type — confirmed by reading `Socket.decode/4` and
+  `StreamerDecode`, not assumed: `LEVELONE_*` frames decode to `Types.Quote` and/or
+  `Types.TopOfBook`, `CHART_*` frames decode to `Types.Candle`, and `NYSE_BOOK`,
+  `NASDAQ_BOOK` and `OPTIONS_BOOK` frames decode to `Types.OrderBook` — never off the
+  venue's service name, which must not cross the facade. On the **poll** route it reports
+  `%{quotes: PollingFeed.coverage(poller)}` and nothing else; no `:order_book` key is
+  invented to look complete, because depth cannot arrive there regardless of what is
+  subscribed.
+
+  **The design tension named up front, checked and resolved rather than assumed away:**
+  Core's moduledoc for this callback describes a venue where "a symbol can legitimately be
+  `:internal_poll` for one kind while another is `:stream`." That is **not reachable on
+  this venue as currently built** — `state.route` is feed-wide, chosen once in
+  `ensure_route/1`, and its own first clause (`when route in [:stream, :poll]`) short-
+  circuits every later call before the choice is ever revisited. A symbol's *kinds* can
+  differ from another symbol's on the same feed (one quotes-only, one depth-only), but
+  every kind for every symbol on a given feed process comes from the one route that process
+  chose at bootstrap. Recorded here rather than forced into a test that cannot exist.
+
+  Wired through the facade (`DpExchange.Schwab.coverage_by_kind/1`) and the fake
+  (`DpExchange.Schwab.Fake.coverage_by_kind/1`, which reports `:quotes` only — it never
+  models order-book delivery, so claiming that key would assert a delivery the fake cannot
+  produce). `Core.AdapterContract`'s assertion group 15 — which asserts nothing when a venue
+  has not implemented this callback — now runs against this venue and passes: the union of
+  symbols across `coverage_by_kind/1`'s values equals `coverage/1`'s keys, and every kind
+  key reported is one `capabilities().streamable` declares, on both routes.
+
 ### Documentation
 
 - **`usage-rules.md` audited against the S1/S2/S2a fixes below, since it ships inside the

@@ -178,6 +178,17 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.coverage(feed: name) == %{}
     end
 
+    test "coverage_by_kind reports :quotes with nothing in it until something actually arrives",
+         %{name: name} do
+      :ok = Schwab.subscribe(["AAPL"], feed: name)
+
+      # This feed has no plug configured, so `/userPreference` cannot reach a real Streamer
+      # bootstrap and the feed lands on the poll route — which reports `%{quotes: ...}`
+      # unconditionally, per `Feed.coverage_by_kind/1`'s own contract for that route, even
+      # before the poller's `start_delay_ms: 60_000` lets anything through.
+      assert Schwab.coverage_by_kind(feed: name) == %{quotes: %{}}
+    end
+
     test "the poller exposes its own status", %{feed: feed} do
       assert %{delivering: _delivering} = Feed.status(feed)
       assert Feed.interval_ms() > 0
@@ -197,6 +208,7 @@ defmodule DpExchange.SchwabTest do
     test "unsubscribing from nothing is :ok, and coverage is empty" do
       assert Schwab.unsubscribe(["AAPL"], feed: :no_such_feed) == :ok
       assert Schwab.coverage(feed: :no_such_feed) == %{}
+      assert Schwab.coverage_by_kind(feed: :no_such_feed) == %{}
     end
   end
 
@@ -300,11 +312,27 @@ defmodule DpExchange.SchwabTest do
       assert Fake.coverage() == %{"MSFT" => :internal_poll}
     end
 
+    test "coverage_by_kind reports :quotes only, and its union matches coverage/1" do
+      :ok = Fake.subscribe(["AAPL", "MSFT"], to: self())
+
+      by_kind = Fake.coverage_by_kind()
+
+      assert by_kind == %{quotes: %{"AAPL" => :internal_poll, "MSFT" => :internal_poll}}
+      refute Map.has_key?(by_kind, :order_book)
+
+      union = by_kind |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.sort()
+      assert union == Fake.coverage() |> Map.keys() |> Enum.sort()
+
+      declared = MapSet.new(Fake.capabilities().streamable)
+      assert by_kind |> Map.keys() |> MapSet.new() |> MapSet.subset?(declared)
+    end
+
     test "an unlisted symbol is not covered and pushes nothing" do
       :ok = Fake.update_symbols([])
       :ok = Fake.subscribe(["ZZZZ"], to: self())
 
       assert Fake.coverage() == %{}
+      assert Fake.coverage_by_kind() == %{quotes: %{}}
       refute_receive {:dp_exchange, :schwab, _anything}, 50
     end
 

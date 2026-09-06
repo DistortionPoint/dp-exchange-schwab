@@ -77,6 +77,7 @@ defmodule DpExchange.Schwab.Feed do
   use GenServer
 
   alias DpExchange.Core.{Config, Notice, PollingFeed}
+  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
   alias DpExchange.Schwab.{Rest, Socket, StreamerInfo, SymbolFormat}
 
   # Equities move fast intraday, but a REST snapshot every 30 seconds is what the
@@ -159,6 +160,59 @@ defmodule DpExchange.Schwab.Feed do
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll}
   def coverage(feed), do: GenServer.call(feed, :coverage)
 
+  @doc """
+  What is arriving, per symbol, split by **which kind** of data it is.
+
+  `coverage/1` answers "is anything arriving" and collapses every payload into one
+  boolean-shaped route. That was measured to be actively misleading on Coinbase
+  (DpCryptoManagement's issue #22): an order-book channel delivered over 11,000 frames
+  while quotes were dark, and `coverage/1` correctly-and-uselessly reported the symbol as
+  `:stream` regardless — because it counts any payload as coverage, a `Types.OrderBook`
+  exactly as much as a `Types.Quote`.
+
+  Schwab makes the same blindness sharper, because this venue *also* conflates kind with
+  route. `coverage/1` alone cannot tell a caller "no depth because the venue sent none for
+  this symbol" from "no depth because this feed silently fell back to a route that
+  structurally cannot carry it" — and this venue's own fallback does exactly that: when the
+  Streamer cannot be bootstrapped, `Core.PollingFeed` polls `/quotes` and nothing else, so
+  depth, candles, orders and fills never arrive on that route **at all**, for any symbol,
+  regardless of what the venue would have sent over the socket.
+
+  ## What each route reports
+
+  On `:stream`, kind is read off the **decoded struct's own type** — `Types.Quote` is
+  `:quotes`, `Types.TopOfBook` is `:top_of_book`, `Types.Candle` is `:candles`,
+  `Types.OrderBook` is `:order_book` — never off the venue's service name
+  (`LEVELONE_EQUITIES`, `NYSE_BOOK`, …), which must never cross this facade. A symbol
+  delivering only a quote appears under `:quotes` and nowhere else; a symbol delivering
+  only depth appears under `:order_book` and nowhere else.
+
+  On `:poll`, this reports `%{quotes: PollingFeed.coverage(poller)}` and nothing more.
+  There is no empty `:order_book` key invented to look complete — depth cannot arrive on
+  this route, so claiming coverage of zero for it would still be a claim about a kind this
+  route cannot carry.
+
+  ## The design-doc scenario this does NOT reach
+
+  Core's moduledoc for this callback describes a venue where "a symbol can legitimately be
+  `:internal_poll` for one kind while another is `:stream`". **That is not reachable here.**
+  `state.route` is chosen once, for the whole feed, in `ensure_route/1` — the very first
+  clause matches and short-circuits once `route` is `:stream` or `:poll`, and nothing in
+  this module ever revisits that choice for a live feed. A symbol's kinds can differ from
+  each other (quotes but not depth, or the reverse), but every kind for every symbol comes
+  from the **same** route, because there is only one route for the process's whole life.
+
+  ## The invariant
+
+  `Map.keys(coverage(feed))` equals the union of symbol-keys across every value in this
+  map's result, on both routes, and every kind key present is one `capabilities().streamable`
+  declares. `Core.AdapterContract`'s assertion group 15 checks this.
+  """
+  @spec coverage_by_kind(GenServer.server()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{String.t() => :stream | :internal_poll}
+        }
+  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
+
   @doc "Whether the feed is delivering, on which route, and what it last failed on."
   @spec status(GenServer.server()) :: map()
   def status(feed), do: GenServer.call(feed, :status)
@@ -212,6 +266,11 @@ defmodule DpExchange.Schwab.Feed do
       poller: nil,
       route: nil,
       delivering: %{},
+      # `symbol => MapSet.t(Core.Capabilities.data_kind())`, populated only from the
+      # delivered struct's own type — see `record_kind/2`. Kept apart from `delivering`
+      # (`symbol => arrival timestamp`) rather than folded into it, so nothing already
+      # reading `delivering`'s shape had to change to add this.
+      kinds: %{},
       last_error: nil,
       config_snapshot: snapshot
     }
@@ -240,7 +299,8 @@ defmodule DpExchange.Schwab.Feed do
     state = %{
       state
       | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
-        delivering: Map.drop(state.delivering, symbols)
+        delivering: Map.drop(state.delivering, symbols),
+        kinds: Map.drop(state.kinds, symbols)
     }
 
     {:reply, apply_symbols(state), state}
@@ -252,7 +312,8 @@ defmodule DpExchange.Schwab.Feed do
     state = %{
       state
       | wanted: MapSet.new(symbols),
-        delivering: Map.take(state.delivering, symbols)
+        delivering: Map.take(state.delivering, symbols),
+        kinds: Map.take(state.kinds, symbols)
     }
 
     state = ensure_route(state)
@@ -268,6 +329,26 @@ defmodule DpExchange.Schwab.Feed do
     # Only what arrived. A subscribed symbol that has delivered nothing is absent, and the
     # facade documents absence as `:not_covered`.
     {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+  end
+
+  # The poll route reaches `/quotes` and nothing else — see `Rest.get_price/3`, the only
+  # fetch this route ever calls — so there is exactly one kind to report, sourced the same
+  # way `coverage/1` sources it on this route: from `PollingFeed`, not from `state.kinds`.
+  # No `:order_book` key is invented here; depth cannot arrive on this route at all.
+  def handle_call(:coverage_by_kind, _from, %{route: :poll, poller: poller} = state)
+      when is_pid(poller) or is_atom(poller) do
+    {:reply, %{quotes: PollingFeed.coverage(poller)}, state}
+  end
+
+  def handle_call(:coverage_by_kind, _from, state) do
+    by_kind =
+      for {symbol, kind_set} <- state.kinds,
+          kind <- MapSet.to_list(kind_set),
+          reduce: %{} do
+        acc -> Map.update(acc, kind, %{symbol => :stream}, &Map.put(&1, symbol, :stream))
+      end
+
+    {:reply, by_kind, state}
   end
 
   def handle_call(:status, _from, %{route: :poll, poller: poller} = state)
@@ -436,11 +517,38 @@ defmodule DpExchange.Schwab.Feed do
     end
   end
 
-  defp record_delivery(state, %{symbol: symbol}) when is_binary(symbol) do
-    %{state | delivering: Map.put(state.delivering, symbol, :os.system_time(:millisecond))}
+  defp record_delivery(state, %{symbol: symbol} = value) when is_binary(symbol) do
+    state = %{
+      state
+      | delivering: Map.put(state.delivering, symbol, :os.system_time(:millisecond))
+    }
+
+    record_kind(state, symbol, value)
   end
 
   defp record_delivery(state, _value), do: state
+
+  # Kind is read off the decoded value's own struct type, never off a venue service name —
+  # `StreamerFields`/`Socket` decode `LEVELONE_*`, `NYSE_BOOK`, `NASDAQ_BOOK` and
+  # `OPTIONS_BOOK` frames into exactly these four types (confirmed by reading
+  # `Socket.decode/4` and `StreamerDecode`), and this is the one place their service names
+  # would leak across the facade if this matched on them instead.
+  defp record_kind(state, symbol, %Quote{}), do: put_kind(state, symbol, :quotes)
+  defp record_kind(state, symbol, %TopOfBook{}), do: put_kind(state, symbol, :top_of_book)
+  defp record_kind(state, symbol, %Candle{}), do: put_kind(state, symbol, :candles)
+  defp record_kind(state, symbol, %OrderBook{}), do: put_kind(state, symbol, :order_book)
+  # A value with a `:symbol` field and no kind mapping — e.g. a bare test map — still
+  # counts toward `coverage/1` through `delivering` above, but contributes no kind. Nothing
+  # in this package emits such a value on the stream route today; a real one always decodes
+  # to one of the four clauses above.
+  defp record_kind(state, _symbol, _value), do: state
+
+  defp put_kind(state, symbol, kind) do
+    %{
+      state
+      | kinds: Map.update(state.kinds, symbol, MapSet.new([kind]), &MapSet.put(&1, kind))
+    }
+  end
 
   # `Core.Config` resolves through the calling process and its `$callers` chain. A
   # GenServer is in neither, so an override a consumer set for its own async test would be
