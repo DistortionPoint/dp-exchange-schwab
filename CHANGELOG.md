@@ -31,6 +31,37 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconnect meant silence until a consumer noticed, and a crashed socket or poller
+  took the whole `Feed` down with it.** Two related supervision defects, found by a
+  2026-09-07 cross-package audit:
+
+  `Socket.handle_disconnect/2` clears the venue's own subscriptions on every reconnect
+  (see `Socket`'s own moduledoc, "Reconnection is not resubscription"), but nothing on
+  this side of the link ever re-issued them: a routine network blip — not a crash, just
+  an ordinary reconnect — left this feed connected, logged in, and asking the venue for
+  nothing, until whoever was watching `subscribe_notices/1` noticed `:link_up` on their
+  own and called `subscribe/2` again. `dp_exchange_coinbase` and `dp_exchange_gemini`
+  both already close this exact "reconnect with no memory" gap; this package never had.
+  `Feed` now re-issues `state.wanted` on a periodic, unconditional 60-second timer, the
+  same shape those two packages use.
+
+  Separately, `start_socket/1` and `start_poller/1` both run inside `ensure_route/1`, a
+  `Feed` callback, which links either process to `Feed` the way `start_link` always
+  does. `Feed` never called `Process.flag(:trap_exit, true)`, so either one exiting
+  abnormally sent an untrappable `EXIT` signal along its link and crashed `Feed` too —
+  every subscriber, the whole `wanted` set, gone, restarted by `DpExchange.Schwab.
+  Supervisor` from the STATIC `opts` it was given at tree-start. Proven by linking a
+  real process into a running `Feed` the way `start_socket/1` does and killing it with
+  `Process.exit(pid, :kill)` (not `:normal`, which a non-trapping process ignores).
+  `Feed` now traps exits; a crashed socket or poller clears its route (so `ensure_route/1`
+  reconsiders from scratch), resets `coverage/1`/`coverage_by_kind/1` rather than leaving
+  them reporting `:stream` for a route that no longer exists, reports a `:link_down`
+  `Core.Notice`, and immediately retries — a fresh Streamer bootstrap if the credential
+  still works, falling back to the poll the same way a first-ever bootstrap failure
+  already does.
+
 ### Added
 
 - **`Fake` is now wired to `DpExchange.Core.FakeInjection`.** This was the only package in

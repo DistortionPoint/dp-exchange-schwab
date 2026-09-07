@@ -402,3 +402,32 @@ local bookkeeping that always succeeds by construction. And not yet wired, state
 rather than left to be discovered: `get_option_chain/2`, `get_option_expirations/2`,
 `get_screener/2`, `get_transactions/2` and `get_rate_limit_status/2` — they gate credentials
 correctly but cannot yet be made to fail on demand.
+
+## 14. A reconnect resubscribes on its own; a crash costs one retry, never a lost consumer state
+
+The Streamer socket and the fallback poller are both **linked** children of `Feed` — not
+supervised siblings you can restart independently. `Feed` traps exits, so either one
+dying abnormally does not take `Feed` down with it: `coverage/1` and `coverage_by_kind/1`
+clear (this feed has exactly one active route at a time, so a crash costs everything it
+was delivering, not a partial set), you get a `:link_down` `Core.Notice`, and this
+package retries the route on its own — a fresh Streamer bootstrap if the credential
+still works, falling back to the poll otherwise. You never need to call `subscribe/2`
+again for this.
+
+**An ordinary reconnect — no crash, just the venue dropping the TCP connection — also
+resubscribes on its own**, on a 60-second unconditional timer: `Socket.handle_disconnect/2`
+clears the venue's own subscriptions on every reconnect (see `Socket`'s own moduledoc),
+and `Feed` re-issues your `wanted` symbols whether or not it can tell a reconnect
+happened. Worst case, up to 60 seconds of silence after a reconnect before delivery
+resumes on its own — sooner if you notice `:link_up` via `subscribe_notices/1` and call
+`subscribe/2` or `update_symbols/2` yourself, which also re-issues immediately.
+
+**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
+the crash-isolation path above, or anything that kills the `Feed` pid directly.
+`DpExchange.Schwab.Supervisor` restarts `Feed` under `:one_for_one`, but from the
+*static* `opts` your supervision tree started it with; every `subscribe/2`,
+`update_symbols/2`, `subscribe_notices/1` call and every `update_credentials/2` push you
+made afterward is gone. Nothing inside this package can replay those calls — it never
+held onto the functions or the process that made them. If your consumer needs to survive
+a `Feed` restart unattended, monitor the `Feed` pid (or the `DpExchange.Schwab` pid it
+sits under) yourself and re-issue `subscribe/2` on `:DOWN`.

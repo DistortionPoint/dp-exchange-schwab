@@ -153,6 +153,45 @@ defmodule DpExchange.Schwab.Feed do
   `DpExchange.Schwab.refresh_credentials/2` — persists the result per §6.0, and passes it
   here as `DpExchange.Schwab.update_credentials/2`. Both halves of the round trip now
   cross the facade; neither required reaching past it.
+
+  ## A reconnect used to mean silence until a consumer noticed — now it means one frame
+
+  `Socket.handle_disconnect/2` clears the venue's own subscriptions on every reconnect —
+  see `Socket`'s own moduledoc, "Reconnection is not resubscription." Before this fix,
+  nothing on this side of the link ever acted on that: `handle_info({:dp_exchange,
+  :schwab, %Notice{}}, state)` fanned a `:link_up` notice out to consumers and did
+  nothing else, so a routine network blip — not a crash, just an ordinary reconnect —
+  left this feed connected, logged in, and asking the venue for nothing, until whoever
+  was watching `subscribe_notices/1` noticed `:link_up` on their own and called
+  `subscribe/2` again. This is the exact "reconnect with no memory" shape
+  `dp_exchange_coinbase`'s and `dp_exchange_gemini`'s `Feed` moduledocs record under the
+  same heading — this package had never closed it.
+
+  This module now re-issues `state.wanted` on a periodic, unconditional timer, the same
+  shape those two packages use rather than a reactive-only fix keyed off `:link_up`:
+  unconditional is what survives a notice this process's own crash-recovery might have
+  raced, not only the ordinary case. Re-subscribing a service the socket already carries
+  costs one frame the venue ignores; not re-subscribing one it silently dropped costs
+  this feed's whole coverage until someone notices.
+
+  ## A crashed socket or poller used to be Feed's crash too — and now it is caught
+
+  `start_socket/1` calls `Socket.start_link/1`, and `start_poller/1` calls
+  `PollingFeed.start_link/1` — both from inside `Feed`'s own callback (`ensure_route/1`),
+  which links either process to `Feed` the way `start_link` always does. `Feed` never
+  called `Process.flag(:trap_exit, true)`, so either one exiting abnormally sent an
+  untrappable `EXIT` signal along its link and crashed `Feed` too — every subscriber, the
+  whole `wanted` set, gone, restarted by `DpExchange.Schwab.Supervisor` from the STATIC
+  `opts` it was given at tree-start, which never carry a consumer's later `subscribe/2`
+  calls or a credential pushed in through `update_credentials/2`.
+
+  `Feed` now traps exits. A crashed socket or poller clears `state.route`, `state.socket`
+  and `state.poller` (so `ensure_route/1` reconsiders the route from scratch rather than
+  treating a dead pid as still live) and resets `state.delivering`/`state.kinds` — this
+  feed has exactly one active route at a time, so a crash costs everything it was
+  delivering, not a partial set — reports a `:link_down` `Core.Notice`, and immediately
+  calls `ensure_route/1` again: a fresh Streamer bootstrap if the credential still works,
+  falling back to the poll the same way a first-ever bootstrap failure already does.
   """
 
   use GenServer
@@ -171,6 +210,13 @@ defmodule DpExchange.Schwab.Feed do
   # headroom, because a `GenServer.call` timing out first would surface a slow socket as a
   # caller-side exit rather than as an error the caller can retry.
   @call_timeout 15_000
+
+  # Re-issues `state.wanted` on the `:stream` route on this cadence, unconditionally — see
+  # the moduledoc's "A reconnect used to mean silence" section. Matches the interval
+  # `dp_exchange_coinbase` and `dp_exchange_gemini` use for the identical purpose; there is
+  # no measurement behind the number for any of the three, and this one has not been tuned
+  # against a wide production scope.
+  @resubscribe_interval_ms 60_000
 
   # The seams a consumer's test may vary that this process resolves for itself.
   @config_keys [:rate_limit_module, :http_adapter]
@@ -336,10 +382,21 @@ defmodule DpExchange.Schwab.Feed do
 
   @impl true
   def init(opts) do
+    # `start_socket/1` and `start_poller/1` both run inside `ensure_route/1`, a `Feed`
+    # callback — `Socket.start_link/1` and `PollingFeed.start_link/1` are therefore
+    # linked children of `Feed`, not supervised siblings. Without this flag, either one
+    # exiting abnormally sends an untrappable EXIT signal along that link and takes
+    # `Feed` down with it — see the moduledoc's "A crashed socket or poller used to be
+    # Feed's crash too" section, and `handle_info({:EXIT, pid, reason}, state)` below,
+    # which this flag is what makes reachable at all.
+    Process.flag(:trap_exit, true)
+
     snapshot = Keyword.get(opts, :config_snapshot, %{})
     apply_config(snapshot)
 
     validate_interval_ms!(Config.opt(opts, :interval_ms, @interval_ms))
+
+    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     subscriber = Keyword.get(opts, :subscriber, self())
 
@@ -495,6 +552,41 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, record_delivery(state, value)}
   end
 
+  # Unconditional: sent whether or not a reconnect actually happened, because a socket
+  # this process never saw go down reads identically to a healthy connection from here —
+  # see the moduledoc's "A reconnect used to mean silence" section. Only the `:stream`
+  # route has anything to re-issue; the `:poll` route re-reads `state.credentials` on its
+  # own next tick via `PollingFeed`'s own `fetch` closure, which already needs nothing
+  # pushed to it, and `apply_symbols/1`'s `:poll` clause would only repeat the identical
+  # `update_symbols/2` call `PollingFeed` already keeps current.
+  def handle_info(:resubscribe, %{route: :stream} = state) do
+    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+
+    if MapSet.size(state.wanted) > 0 do
+      apply_symbols(state)
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info(:resubscribe, state) do
+    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    {:noreply, state}
+  end
+
+  # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
+  # "A crashed socket or poller used to be Feed's crash too" section. Matching on
+  # `state.socket`/`state.poller` is what tells a real crash apart from an `EXIT` this
+  # feed cannot attribute to anything it started; a stale `EXIT` for a pid already
+  # replaced falls through to the catch-all below and is correctly ignored.
+  def handle_info({:EXIT, pid, reason}, %{socket: pid} = state) do
+    {:noreply, isolate_crashed_route(state, reason)}
+  end
+
+  def handle_info({:EXIT, pid, reason}, %{poller: pid} = state) do
+    {:noreply, isolate_crashed_route(state, reason)}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- routing ------------------------------------------------------------
@@ -526,6 +618,35 @@ defmodule DpExchange.Schwab.Feed do
 
         start_poller(%{state | last_error: reason})
     end
+  end
+
+  # See the moduledoc's "A crashed socket or poller used to be Feed's crash too" section
+  # and `handle_info({:EXIT, pid, reason}, %{socket: pid} = state)`/`%{poller: pid}`
+  # above. `state.route` is cleared along with `state.socket`/`state.poller` so
+  # `ensure_route/1`'s own first clause — `when route in [:stream, :poll], do: state` —
+  # does not treat the pid that just died as still live and skip reconnecting entirely.
+  # `state.delivering`/`state.kinds` reset because this feed has exactly one active
+  # route at a time: whichever one crashed was the only thing delivering.
+  defp isolate_crashed_route(state, reason) do
+    state = %{state | socket: nil, poller: nil, route: nil, delivering: %{}, kinds: %{}}
+
+    notify(
+      state,
+      Notice.new(:link_down, :schwab,
+        severity: :warning,
+        message: "route crashed (#{inspect(reason)}) — reconnecting now",
+        details: %{reason: inspect(reason)}
+      )
+    )
+
+    # Tries the Streamer first and falls back to the poll on failure, exactly like a
+    # first-ever bootstrap — a poller crash is not assumed to mean "restart the same
+    # route," since the credential that made the Streamer unreachable earlier may have
+    # been fixed since (`update_credentials/2`) in the meantime. Both of `ensure_route/1`'s
+    # own branches already apply `state.wanted` to the fresh route themselves (the
+    # `:stream` clause calls `apply_symbols/1` directly; `start_poller/1` seeds
+    # `PollingFeed` with `state.wanted` at start) — nothing further to do here.
+    ensure_route(state)
   end
 
   defp failure_reason({:error, reason}), do: reason

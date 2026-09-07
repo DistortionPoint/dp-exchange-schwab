@@ -92,7 +92,21 @@ defmodule DpExchange.Schwab.FeedTest do
         Keyword.merge([name: nil, credentials: @credentials, subscriber: self()], opts)
       )
 
-    on_exit(fn -> if Process.alive?(feed), do: GenServer.stop(feed, :normal) end)
+    # `feed` is linked to THIS test process (plain `start_link`, no supervisor) and
+    # on_exit callbacks run after the test process itself has already exited — so by the
+    # time this runs, `feed` may already be gone, a race whose window `Feed` trapping
+    # exits (added for the crash-isolation fix) widens: `Process.alive?/1` can still
+    # answer `true` a moment before the same teardown catches up and the process is
+    # gone by the time `GenServer.stop/2` actually reaches it. `:noproc` here means
+    # cleanup has nothing left to do, not a test failure.
+    on_exit(fn ->
+      try do
+        GenServer.stop(feed, :normal)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
     feed
   end
 
@@ -167,6 +181,132 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 2_000
       assert details.reason =~ "missing_credentials"
+    end
+  end
+
+  describe "a crashed socket is isolated, not fatal" do
+    # `fake_socket/0` is injected via `opts` — it was never `start_link`'d FROM `Feed`,
+    # so it is not actually linked to it. Every real socket this module ever opens IS
+    # linked — `start_socket/1` calls `Socket.start_link/1` from inside `ensure_route/1`,
+    # a `Feed` callback, and `start_link` always links. `:sys.replace_state/2` runs the
+    # given function INSIDE the target process, so `Process.link/1` inside it creates a
+    # link owned by `feed`, matching what `start_socket/1` does in production, from a
+    # place this test controls.
+    defp link_socket_into_feed(feed, socket) do
+      :sys.replace_state(feed, fn state ->
+        Process.link(socket)
+        state
+      end)
+    end
+
+    test "the feed survives a linked socket being killed" do
+      socket = fake_socket()
+
+      # `isolate_crashed_route/2` retries the route immediately, through the real
+      # `start_socket/1` this time — `retry_attempts: 0` and a refusing plug keep that
+      # retry from ever reaching the live network from this test.
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      link_socket_into_feed(feed, socket)
+
+      # `:kill`, not `:normal` — a non-trapping process ignores a peer's normal exit,
+      # which would prove nothing about the trap_exit flag this test exists to check.
+      ref = Process.monitor(feed)
+      Process.exit(socket, :kill)
+      refute_receive {:DOWN, ^ref, :process, ^feed, _reason}, 500
+      assert Process.alive?(feed)
+    end
+
+    test "coverage clears, a :link_down notice fires, and it retries the route immediately" do
+      socket = fake_socket()
+      # The REPLACEMENT route, dialled by `isolate_crashed_route/2` -> `ensure_route/1`,
+      # goes through the real `start_socket/1` this time (`fake_socket/0` only ever
+      # stands in for the FIRST socket, injected directly) — `retry_attempts: 0` and a
+      # refusing plug make that attempt fail fast and land on the poll route, which is
+      # itself the proof an attempt was made right away rather than never.
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert Feed.coverage(feed) == %{"AAPL" => :stream}
+
+      link_socket_into_feed(feed, socket)
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 2_000
+      assert Process.alive?(feed)
+
+      # Cleared immediately — not "eventually, once something else overwrites it" — the
+      # coverage-truthfulness question the audit asked directly: does `coverage/1` still
+      # say `:stream` right after the socket carrying "AAPL" crashed? It must not.
+      assert Feed.coverage(feed) == %{}
+
+      # The replacement route landed on `:poll` (the only place a refusing plug can take
+      # it), which is itself proof `isolate_crashed_route/2` retried right away instead
+      # of leaving this feed on a dead `:stream` route forever.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     2_000
+
+      assert %{route: :internal_poll} = Feed.status(feed)
+    end
+  end
+
+  describe "a reconnect resends the wanted set on its own — no consumer action needed" do
+    test "the periodic timer re-issues every wanted symbol on the stream route" do
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert subscribed_services(socket) == %{
+               "LEVELONE_EQUITIES" => ["AAPL"],
+               "CHART_EQUITY" => ["AAPL"]
+             }
+
+      send(feed, :resubscribe)
+      # A synchronous call forces the cast above to be processed before this returns.
+      Feed.coverage(feed)
+
+      assert subscribed_services(socket) == %{
+               "LEVELONE_EQUITIES" => ["AAPL", "AAPL"],
+               "CHART_EQUITY" => ["AAPL", "AAPL"]
+             }
+    end
+
+    test "sends nothing when nothing is wanted" do
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+
+      send(feed, :resubscribe)
+      Feed.coverage(feed)
+
+      assert subscribed_services(socket) == %{}
+      assert Process.alive?(feed)
+    end
+
+    test "the poll route is left to PollingFeed's own ticking" do
+      feed =
+        start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+
+      send(feed, :resubscribe)
+      Feed.coverage(feed)
+
+      assert %{route: :internal_poll} = Feed.status(feed)
+      assert Process.alive?(feed)
     end
   end
 

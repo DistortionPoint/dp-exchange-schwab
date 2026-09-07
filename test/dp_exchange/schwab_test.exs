@@ -420,7 +420,17 @@ defmodule DpExchange.SchwabTest do
           retry_attempts: 0
         )
 
-      on_exit(fn -> if Process.alive?(feed), do: GenServer.stop(feed, :normal) end)
+      # See `FeedTest`'s own `start_feed/1` helper for why this catches `:noproc`
+      # rather than gating on `Process.alive?/1`: `feed` is linked to this test
+      # process, and the race between that link tearing it down and this callback
+      # running is real, not hypothetical.
+      on_exit(fn ->
+        try do
+          GenServer.stop(feed, :normal)
+        catch
+          :exit, _reason -> :ok
+        end
+      end)
 
       assert Schwab.subscribe_notices(feed: name, to: self()) == :ok
 
@@ -463,7 +473,13 @@ defmodule DpExchange.SchwabTest do
           start_delay_ms: 60_000
         )
 
-      on_exit(fn -> if Process.alive?(feed), do: GenServer.stop(feed, :normal) end)
+      on_exit(fn ->
+        try do
+          GenServer.stop(feed, :normal)
+        catch
+          :exit, _reason -> :ok
+        end
+      end)
 
       new_credentials = Map.put(@creds, :access_token, "fresh-token")
       assert Schwab.update_credentials(new_credentials, feed: name) == :ok
