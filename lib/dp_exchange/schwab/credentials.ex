@@ -29,8 +29,9 @@ defmodule DpExchange.Schwab.Credentials do
   `Feed.init/1` used to keep BOTH `state.credentials` and `state.opts` — the latter the
   complete keyword list `init/1` received, `:credentials` entry included. That was a
   second, unwrapped copy of the same secret sitting in the same state map. `state.opts`
-  never needed the credential itself (`Keyword.take/2` and `Config.opt/2` calls against it
-  only ever read `:url`, `:interval_ms`, `:start_delay_ms` and similar), so it is now
+  never needed the credential itself (`Keyword.take/2` and `DpExchange.Core.Config.opt/3`
+  calls against it only ever read `:url`, `:interval_ms`, `:start_delay_ms` and similar),
+  so it is now
   stored with `:credentials` stripped rather than wrapped-and-duplicated.
   """
 
