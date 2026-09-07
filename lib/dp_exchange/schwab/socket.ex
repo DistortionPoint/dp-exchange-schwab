@@ -62,7 +62,7 @@ defmodule DpExchange.Schwab.Socket do
   use WebSockex
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Schwab.{StreamerDecode, StreamerFields, StreamerProtocol}
+  alias DpExchange.Schwab.{Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
 
   require Logger
 
@@ -101,7 +101,10 @@ defmodule DpExchange.Schwab.Socket do
 
     state = %{
       info: info,
-      access_token: Keyword.fetch!(opts, :access_token),
+      # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the
+      # token for as long as the Streamer connection is up, and a WebSockex crash
+      # prints its state via the same OTP crash report `Feed`'s does.
+      credentials: opts |> Keyword.fetch!(:access_token) |> Credentials.wrap_token(),
       subscriber: Keyword.fetch!(opts, :subscriber),
       logged_in?: false,
       request_id: 1,
@@ -211,7 +214,7 @@ defmodule DpExchange.Schwab.Socket do
 
   @impl true
   def handle_info(:login, state) do
-    login = StreamerProtocol.login(state.info, state.access_token, state.request_id)
+    login = StreamerProtocol.login(state.info, state.credentials.access_token, state.request_id)
     frame = Jason.encode!(StreamerProtocol.envelope([login]))
 
     {:reply, {:text, frame}, %{state | request_id: state.request_id + 1}}
@@ -240,7 +243,7 @@ defmodule DpExchange.Schwab.Socket do
 
   @impl true
   def handle_cast({:update_access_token, access_token}, state),
-    do: {:ok, %{state | access_token: access_token}}
+    do: {:ok, %{state | credentials: Credentials.wrap_token(access_token)}}
 
   def handle_cast({:subscribe, _service, _command, _keys, _opts}, %{logged_in?: false} = state) do
     # Dropped deliberately rather than queued: a caller told the subscription succeeded

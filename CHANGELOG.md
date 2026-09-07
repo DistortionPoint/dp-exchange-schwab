@@ -33,6 +33,27 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **A crash of `Feed` or `Socket` printed OAuth credentials — the refresh token and
+  client secret included — in cleartext, in OTP's own crash report.** `Feed` held
+  `state.credentials` for its entire lifetime AND a second, unwrapped copy inside
+  `state.opts` (the raw `init/1` keyword list, `:credentials` entry still in it).
+  `Socket` held the access token as a bare string in `state.access_token`. OTP's default
+  crash report prints a process's state in full on termination, and a plain map or
+  string field prints in full — verified by crashing an equivalent process holding
+  `%{access_token: ..., refresh_token: ..., client_secret: ...}` as a bare field and
+  reading the resulting log line back. This venue's own moduledoc already calls
+  `refresh_token` rotation "destructive" — a one-time-use token spent by the moment
+  anyone reads a log is not a credential that can simply be reissued.
+  `Process.flag(:sensitive, true)` does not help: the same crash, with the flag set,
+  printed the same cleartext state. Now both processes wrap credentials in
+  `DpExchange.Schwab.Credentials`, a struct whose `Inspect` is derived with `except:`
+  naming every secret field, at the point they enter state; `state.opts` no longer
+  carries a second copy at all (`Keyword.delete(opts, :credentials)`). Nothing
+  downstream changes: a struct is a map, so `Auth.headers/2`'s `%{access_token: token} =
+  credentials` still binds the real value inside the one function that has to send it.
+  Re-verified against a real crash of the new shape: the log line now reads
+  `credentials: #DpExchange.Schwab.Credentials<expires_at: nil, ...>`.
+
 - **This was the one venue in the family that dialled the Streamer at boot, before any
   `subscribe/2` — a family-wide rule violation found by a 2026-09-07 cross-package
   audit.** `CLAUDE.md` states it plainly: "A library does not start itself… A consumer

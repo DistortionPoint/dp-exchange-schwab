@@ -258,7 +258,7 @@ defmodule DpExchange.Schwab.Feed do
 
   alias DpExchange.Core.{Config, Notice, PollingFeed}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
-  alias DpExchange.Schwab.{Rest, Socket, StreamerInfo, SymbolFormat}
+  alias DpExchange.Schwab.{Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
   # Equities move fast intraday, but a REST snapshot every 30 seconds is what the
   # collection layer consumes; faster buys nothing a snapshot can express. Used only on the
@@ -461,8 +461,16 @@ defmodule DpExchange.Schwab.Feed do
     subscriber = Keyword.get(opts, :subscriber, self())
 
     state = %{
-      credentials: Keyword.get(opts, :credentials, %{}),
-      opts: opts,
+      # Wrapped immediately, before it reaches `state` — see `Credentials`'s moduledoc.
+      # Every downstream use (`Rest.get_user_preference/2`, `Rest.get_price/3`,
+      # `access_token/1`, `Socket.start_link/1`'s `access_token:` opt) keeps working
+      # unchanged: a struct is a map.
+      credentials: opts |> Keyword.get(:credentials, %{}) |> Credentials.wrap(),
+      # `:credentials` stripped rather than carried twice — see the moduledoc's "Why
+      # `Feed` no longer stores the raw `opts` it was started with". Nothing below reads
+      # `:credentials` back out of `state.opts`; only `state.credentials` is ever signed
+      # with.
+      opts: Keyword.delete(opts, :credentials),
       request_opts:
         opts
         |> Keyword.take([
@@ -596,7 +604,7 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call({:update_credentials, credentials}, _from, state) do
     push_access_token(state, Map.get(credentials, :access_token))
-    {:reply, :ok, %{state | credentials: credentials}}
+    {:reply, :ok, %{state | credentials: Credentials.wrap(credentials)}}
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}

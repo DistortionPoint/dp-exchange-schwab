@@ -10,7 +10,7 @@ defmodule DpExchange.Schwab.SocketTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Notice, Types}
-  alias DpExchange.Schwab.{Socket, StreamerInfo}
+  alias DpExchange.Schwab.{Credentials, Socket, StreamerInfo}
 
   @info %StreamerInfo{
     socket_url: "wss://streamer-api.schwab.com/ws",
@@ -21,10 +21,16 @@ defmodule DpExchange.Schwab.SocketTest do
   }
 
   defp state(overrides \\ %{}) do
+    # `:access_token` is accepted as a convenience override — the state field it
+    # actually became, `:credentials`, wraps it via `Credentials.wrap_token/1`. See
+    # `Credentials`'s moduledoc for why `Socket`'s state carries the wrapped struct
+    # rather than the bare string it used to.
+    {access_token, overrides} = Map.pop(overrides, :access_token, "token-abc")
+
     Map.merge(
       %{
         info: @info,
-        access_token: "token-abc",
+        credentials: Credentials.wrap_token(access_token),
         subscriber: self(),
         logged_in?: false,
         request_id: 1,
@@ -283,7 +289,7 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, new_state} =
                Socket.handle_cast({:update_access_token, "fresh-token"}, before)
 
-      assert new_state.access_token == "fresh-token"
+      assert new_state.credentials.access_token == "fresh-token"
       # Not forced to log out. A session already logged in keeps running on the token it
       # logged in with — only the *next* LOGIN uses the new one.
       assert new_state.logged_in?

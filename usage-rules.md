@@ -123,6 +123,17 @@ one presents.
 DpExchange.Schwab.update_credentials(renewed)
 ```
 
+**Your refresh token and client secret will not appear in the crash log.** `Feed` and
+`Socket` both hold your credential for as long as they run, and a crash of either logs
+that process's state via OTP's default crash report — which is where you *would* see it,
+because a crash report prints unredacted `Logger` metadata otherwise. Both processes wrap
+the credential set in a struct before it ever reaches state, so the crash line reads
+`credentials: #DpExchange.Schwab.Credentials<expires_at: nil, ...>` rather than the
+tokens and secret themselves — `expires_at` stays visible because it is not a secret and
+is useful to see mid-incident. This is not a claim about your own code: if you read
+`state.credentials` yourself via `:sys.get_state/1` or similar, you get the same struct —
+call `Map.from_struct/1` on it to get the plain map back.
+
 ## 4. A symbol is one instrument, not a pair
 
 `"AAPL"`, not `"AAPL-USD"`. Pair-shaped input is refused, and this matters more than it
