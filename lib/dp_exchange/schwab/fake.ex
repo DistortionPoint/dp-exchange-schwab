@@ -379,12 +379,13 @@ defmodule DpExchange.Schwab.Fake do
   can deliver.
 
   The real venue's `Feed` chooses between two routes and, on the Streamer route, can
-  deliver `:order_book` alongside `:quotes` for a symbol whose service is a `*_BOOK`
-  channel. This fake models neither the route split nor order-book decoding — `subscribe/2`
-  only ever pushes a `Types.Quote` built from `get_price/2` — so reporting anything beyond
-  `:quotes` here would assert a delivery this fake cannot produce. Keeping this honest to
-  what the fake actually does, rather than to everything the real venue can do, is the same
-  choice `coverage/1` itself already made by answering `:internal_poll` unconditionally.
+  deliver `:top_of_book` and `:candles` alongside `:quotes` for a symbol subscribed on
+  `LEVELONE_EQUITIES`/`LEVELONE_OPTIONS` and `CHART_EQUITY`. This fake models neither the
+  route split nor the Streamer's second and third kinds — `subscribe/2` only ever pushes a
+  `Types.Quote` built from `get_price/2` — so reporting anything beyond `:quotes` here
+  would assert a delivery this fake cannot produce. Keeping this honest to what the fake
+  actually does, rather than to everything the real venue can do, is the same choice
+  `coverage/1` itself already made by answering `:internal_poll` unconditionally.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{

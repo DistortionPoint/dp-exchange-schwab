@@ -217,18 +217,30 @@ count, wanted count, last error) a health check reaches for instead of assemblin
 
 ## 9. The Streamer, and what arrives only there
 
-**This package speaks the WebSocket Streamer as of 2026-09-01.** Fifteen services, and the
-four kinds a consumer subscribes to are quotes, top of book, **depth** and candles; with a
-credential — which is every call here — order and fill events arrive too.
+**This package speaks the WebSocket Streamer as of 2026-09-01.** Schwab's Streamer carries
+fifteen services, and the three kinds a consumer subscribes to and actually receives are
+quotes, top of book and candles — `services_for/1` sends every non-option symbol to both
+`LEVELONE_EQUITIES` and `CHART_EQUITY`, and an option symbol to `LEVELONE_OPTIONS` only.
 
 ```elixir
 DpExchange.Schwab.capabilities().streamable
-# [:quotes, :top_of_book, :order_book, :candles, :orders, :fills]
+# [:quotes, :top_of_book, :candles]
 ```
 
-**Depth arrives on the socket and nowhere else.** `get_order_book/2` still returns
-`{:error, :not_supported}`, and that is now a narrow and accurate claim: there is no
-*request-response* order book, and the contract's callback is a read. Subscribe instead.
+**A documentation-accuracy sweep (2026-09-06) found `streamable` naming three more kinds —
+`:order_book`, `:orders`, `:fills` — that nothing here ever subscribed.** The decoders for
+`NYSE_BOOK`/`NASDAQ_BOOK`/`OPTIONS_BOOK` and `ACCT_ACTIVITY` existed and were tested, which
+is exactly why the gap was easy to miss: decoding a frame and asking the venue to send one
+are different facts, and only the second one was true. That declaration is corrected here.
+
+**Depth does not arrive by subscription, and neither do order or fill events, and each is
+absent for a reason that would make wiring it a guess:** `NYSE_BOOK` and `NASDAQ_BOOK` are
+both documented only as "Level Two book for Equities," with no stated rule for which
+service a given equity belongs on; `ACCT_ACTIVITY`'s `message_data` is documented JSON
+"whose shape depends on `message_type`" that the vendor does not publish. `get_order_book/2`
+still returns `{:error, :not_supported}`, and that remains a narrow and accurate claim:
+there is no *request-response* order book, and the contract's callback is a read — that has
+never depended on whether depth is streamable, which it is not.
 
 **`:trades` is deliberately not in that list.** `LEVELONE_*` carries a *last* price — one
 print restated on every update, not the sequence of them. If you need a tape, this venue
@@ -283,8 +295,10 @@ broker moves money through cheques, ACH and wires arranged with a person, not th
 API**, and the Accounts and Trading specification has no payment method, transfer, allowlist
 or network list. `get_transactions/2` *reports* money that moved and is served.
 
-- **`get_order_book/2`** — the venue publishes depth on the Streamer, and this package now
-  reads it there. The REST callback stays unsupported because there is no REST endpoint.
+- **`get_order_book/2`** — the venue publishes depth on the Streamer, but this package does
+  not subscribe it (§9): the vendor names no rule for routing an equity symbol between
+  `NYSE_BOOK` and `NASDAQ_BOOK`, and guessing one is exactly what this package refuses to
+  do. The REST callback stays unsupported because there is, separately, no REST endpoint.
 - **`get_trade_history/2`** — `get_transactions/2` is where fills live on this venue, and it
   is implemented. Use that.
 
@@ -293,3 +307,12 @@ or network list. `get_transactions/2` *reports* money that moved and is served.
 The documented ceiling is `0..120` order writes per minute **per account**, set **per
 application at registration**. Pass `:order_limit_per_minute` matching your own app's. Zero
 is a legal registration value.
+
+**Leaving `:order_limit_per_minute` out defaults it to `0`, not to your read limit.** A
+documentation-accuracy sweep (2026-09-06) found the supervisor silently reusing
+`:read_limit_per_minute` (120 by default) for order writes whenever this option was
+omitted — the top of Schwab's own range, assumed for a registration this package was never
+told about. A consumer that only ever reads quotes is unaffected either way; one that
+places orders without stating this option now gets throttled to almost nothing rather than
+sailing through at 120 against a registration it may not hold — state your own ceiling if
+you place orders at all.

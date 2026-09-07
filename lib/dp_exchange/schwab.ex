@@ -30,20 +30,28 @@ defmodule DpExchange.Schwab do
   minting a new refresh token each time with a fresh seven days. A host that keeps
   refreshing never needs a person again.
 
-  **`get_order_book/2` is `:unsupported`, and the reason has now changed twice.** It first
-  read "there is no order book and no socket" — a claim about the venue, and wrong. The
-  venue has both. It then read that the Streamer's depth services were not implemented here,
-  which was true until this release and is not now: `NYSE_BOOK`, `NASDAQ_BOOK` and
-  `OPTIONS_BOOK` are decoded and delivered, and `streamable` names `:order_book`.
+  **`get_order_book/2` is `:unsupported`, and the reason has now changed three times.** It
+  first read "there is no order book and no socket" — a claim about the venue, and wrong.
+  The venue has both. It then read that the Streamer's depth services were not implemented
+  here, and for one release it read that they were, because `NYSE_BOOK`, `NASDAQ_BOOK` and
+  `OPTIONS_BOOK` had real, tested decoders in `StreamerDecode` — which was also wrong, in
+  the opposite direction: nothing in `Feed` ever *subscribed* any of the three, so
+  `capabilities().streamable` named `:order_book` for a symbol that could never actually
+  deliver one. A documentation-accuracy sweep (2026-09-06) found that gap and narrowed
+  `streamable` back to what `Feed` genuinely asks the venue for.
 
-  What remains true is narrower and is the only thing this value now says: **the REST API
-  publishes no depth**, so there is nothing for a *pull* call to return. Depth on this venue
-  arrives by subscription. A caller wanting it calls `subscribe/2` and reads `coverage/1`,
-  not `get_order_book/2`.
+  What is true now, and is the only thing this value says: **the REST API publishes no
+  depth**, so there is nothing for a *pull* call to return — and depth does not arrive by
+  subscription either, because doing so honestly needs a fact this package does not have
+  (which of `NYSE_BOOK`/`NASDAQ_BOOK` an equity symbol belongs on; the vendor names no
+  rule). `Candles` do arrive by subscription now — `CHART_EQUITY` reaches the same symbols
+  `LEVELONE_EQUITIES` does — so a caller wanting them calls `subscribe/2` and reads
+  `coverage/1`, the same way `get_order_book/2`'s moduledoc once promised for depth and
+  could not yet deliver.
 
-  That is three different reasons behind one unchanged `:unsupported`, which is the argument
-  for writing the reason down rather than the value alone — two of the three were wrong, and
-  the value never moved to show it.
+  That is four different reasons behind one unchanged `:unsupported`, which is the argument
+  for writing the reason down rather than the value alone — three of the four were wrong
+  (one of them by over-correcting), and the value never moved to show it.
 
   **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection
   — all six of its projections search against a term — so `get_symbols/1` requires a
@@ -463,12 +471,14 @@ defmodule DpExchange.Schwab do
   This venue sharpens that blindness rather than merely repeating it, because Schwab's
   fallback conflates kind with route too. **Only quotes survive the fallback**: when
   `GET /userPreference` cannot bootstrap the Streamer, `Feed` falls back to polling
-  `/quotes` and nothing else, so depth, candles, orders and fills cannot arrive on that
-  route for *any* symbol — not "arrived rarely," structurally absent. A caller reading only
-  `coverage/1` cannot tell "the venue sent no depth for this symbol" from "this feed
-  silently fell back to a route that cannot carry depth at all." This is what separates the
-  two: on the poll route it reports `%{quotes: coverage(opts)}` and no other key; on the
-  Streamer route, kind comes from the decoded struct's own type, never from a service name.
+  `/quotes` and nothing else, so candles cannot arrive on that route for *any* symbol —
+  not "arrived rarely," structurally absent. A caller reading only `coverage/1` cannot tell
+  "the venue sent no candle for this symbol" from "this feed silently fell back to a route
+  that cannot carry candles at all." This is what separates the two: on the poll route it
+  reports `%{quotes: coverage(opts)}` and no other key; on the Streamer route, kind comes
+  from the decoded struct's own type, never from a service name. (Depth, order events and
+  fill events arrive on **neither** route — `capabilities().streamable` does not declare
+  them; see its moduledoc for why.)
 
   Delegates to `Feed.coverage_by_kind/1` — see there for the full accounting, including why
   this venue's own architecture (one route for the whole feed, chosen once) does not reach

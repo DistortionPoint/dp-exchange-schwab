@@ -132,3 +132,36 @@ The lesson this section exists to carry forward: **the error was reading the Ope
 documents and stopping there.** Neither document claims to describe the whole venue: the
 Streamer is documented in the prose beside them. A capability audit that reads only the
 machine-readable specification will miss a transport that vendor chose not to put in one.
+
+## A second correction (2026-09-06): decoded is not delivered
+
+The paragraph above — "Depth arrives by subscription — `NYSE_BOOK`, `NASDAQ_BOOK` and
+`OPTIONS_BOOK` are decoded and delivered" — was itself wrong, in the direction opposite
+the original finding. **Decoded, yes; delivered, no.** `StreamerDecode.to_order_book/2`
+and `Socket.decode/4`'s book-frame clause were real and tested, but nothing in `Feed` ever
+*subscribed* `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` or `ACCT_ACTIVITY` — a consumer
+calling `subscribe/2` and asking for `:order_book`, `:orders` or `:fills` got the
+declaration and permanent silence. A documentation-accuracy sweep found the gap by reading
+`Feed.services_for/1` (then `service_for/1`) against `capabilities().streamable` rather
+than against `StreamerDecode`'s decoder coverage, which is what the first correction had
+checked instead.
+
+**What is genuinely true as of this correction:**
+
+- **`streamable` is `[:quotes, :top_of_book, :candles]`.** `:candles` is newly wired —
+  `services_for/1` sends every non-option symbol to `CHART_EQUITY` as well as
+  `LEVELONE_EQUITIES`, and the two services share the identical "Equities symbols in upper
+  case" key format, so nothing about that routing is a guess.
+- **`:order_book` and `:orders`/`:fills` are not declared, and wiring either would need a
+  fact this package does not have**: which book service (`NYSE_BOOK` vs `NASDAQ_BOOK`) an
+  equity symbol belongs on — the vendor documents no rule — and the per-`message_type`
+  schema of `ACCT_ACTIVITY`'s `message_data`, which the vendor states exists and does not
+  publish. See `docs/design/ideas/schwab-depth-and-account-activity-streaming.md`.
+- **`get_order_book/2` stays `:unsupported`, for a reason now narrower than either prior
+  one**: the REST API publishes no depth, and depth does not arrive by subscription either,
+  because subscribing it honestly is not currently possible.
+
+The lesson this correction adds to the one above: **a capability audit that checks decoder
+coverage instead of the subscribe call graph will find the same kind of gap from the other
+side** — a service the code can turn into a value is not the same fact as a service the
+code ever asks the venue for.

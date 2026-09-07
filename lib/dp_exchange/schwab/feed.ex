@@ -15,6 +15,37 @@ defmodule DpExchange.Schwab.Feed do
   committed at `docs/reference/schwab/documentation/market-data-production.txt`, and its
   bootstrap is `GET /userPreference`, which returns `streamerInfo.streamerSocketUrl`.
 
+  ## Three kinds are actually subscribed, and three are not — found by defect, not design
+
+  `capabilities/0` once declared `:order_book`, `:orders` and `:fills` streamable on the
+  strength of `StreamerDecode` and `Socket.decode/4` being able to turn a `*_BOOK` or
+  `CHART_*` frame into a real value. **Decoding is not subscribing**, and this module's own
+  routing never asked the venue for any of the three services those kinds need — a consumer
+  subscribing to any of them got the declaration and then silence, forever, because nothing
+  here ever sent the frame that would start it. That was the defect; this section is its
+  correction.
+
+  `:candles` is now wired, because it can be without guessing: `CHART_EQUITY`'s `keys`
+  parameter is documented identically to `LEVELONE_EQUITIES`'s — "Equities symbols in upper
+  case… e.g.: AAPL,TSLA,IBM" — so `services_for/1` sends the same non-option symbols to both
+  services, and `StreamerDecode.to_candle/3` already turns the result into a `Types.Candle`.
+
+  `:order_book` and `:orders`/`:fills` stay **out** of `streamable`, and each for a reason
+  that would make wiring it a guess rather than a fix:
+
+  - `NYSE_BOOK` and `NASDAQ_BOOK` are both documented only as "Level Two book for Equities" —
+    the vendor names no rule for which of the two a given symbol belongs on. `LEVELONE_EQUITIES`
+    field 13 (`exchange_id`, the vendor's "Primary 'listing' Exchange") could in principle
+    answer that, but only *after* a quote has already arrived for the symbol, which this
+    module does not read for routing today and building that two-hop subscribe-then-route
+    flow is new product surface, not a wiring fix. Subscribing every symbol to both books, or
+    guessing NYSE for one and NASDAQ for the rest, is exactly the plausible-wrong-answer this
+    family exists to refuse.
+  - `ACCT_ACTIVITY`'s `message_data` is, per `StreamerFields`' own comment, "a string
+    carrying JSON whose shape depends on `message_type`" that "the vendor does not publish in
+    this document." There is no `Core.Types.Order` or `Core.Types.Fill` decode to wire,
+    because writing one would mean inventing the schema Schwab did not document.
+
   ## The bootstrap can fail, and the fallback is not a substitution
 
   `GET /userPreference` is an authenticated call. A credential that cannot make it — no
@@ -58,9 +89,10 @@ defmodule DpExchange.Schwab.Feed do
 
   ## Only quotes survive the fallback
 
-  The poll fetches `/quotes`. **Depth, candles, orders and fills exist only on the socket**,
-  so a feed that fell back delivers none of them and says so through `coverage/1` rather
-  than through a subscription that quietly never fires.
+  The poll fetches `/quotes`. **Candles exist only on the socket, and depth, orders and
+  fills are not delivered by this package at all** (see above) — so a feed that fell back
+  delivers only quotes and says so through `coverage/1` rather than through a subscription
+  that quietly never fires.
 
   ## The market closes, and silence is usually correct
 
@@ -126,7 +158,7 @@ defmodule DpExchange.Schwab.Feed do
   use GenServer
 
   alias DpExchange.Core.{Config, Notice, PollingFeed}
-  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.{Rest, Socket, StreamerInfo, SymbolFormat}
 
   # Equities move fast intraday, but a REST snapshot every 30 seconds is what the
@@ -204,7 +236,8 @@ defmodule DpExchange.Schwab.Feed do
   nothing is wrong.
 
   `:stream` means the Streamer delivered it. `:internal_poll` means this package fetched it.
-  A caller that needs depth, candles or fills should check for the first.
+  A caller that needs candles should check for the first — the fallback poll cannot carry
+  them.
   """
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll}
   def coverage(feed), do: GenServer.call(feed, :coverage)
@@ -220,24 +253,26 @@ defmodule DpExchange.Schwab.Feed do
   exactly as much as a `Types.Quote`.
 
   Schwab makes the same blindness sharper, because this venue *also* conflates kind with
-  route. `coverage/1` alone cannot tell a caller "no depth because the venue sent none for
-  this symbol" from "no depth because this feed silently fell back to a route that
-  structurally cannot carry it" — and this venue's own fallback does exactly that: when the
-  Streamer cannot be bootstrapped, `Core.PollingFeed` polls `/quotes` and nothing else, so
-  depth, candles, orders and fills never arrive on that route **at all**, for any symbol,
-  regardless of what the venue would have sent over the socket.
+  route. `coverage/1` alone cannot tell a caller "no candles because the venue sent none
+  for this symbol" from "no candles because this feed silently fell back to a route that
+  structurally cannot carry them" — and this venue's own fallback does exactly that: when
+  the Streamer cannot be bootstrapped, `Core.PollingFeed` polls `/quotes` and nothing else,
+  so candles never arrive on that route **at all**, for any symbol, regardless of what the
+  venue would have sent over the socket.
 
   ## What each route reports
 
   On `:stream`, kind is read off the **decoded struct's own type** — `Types.Quote` is
-  `:quotes`, `Types.TopOfBook` is `:top_of_book`, `Types.Candle` is `:candles`,
-  `Types.OrderBook` is `:order_book` — never off the venue's service name
-  (`LEVELONE_EQUITIES`, `NYSE_BOOK`, …), which must never cross this facade. A symbol
-  delivering only a quote appears under `:quotes` and nowhere else; a symbol delivering
-  only depth appears under `:order_book` and nowhere else.
+  `:quotes`, `Types.TopOfBook` is `:top_of_book`, `Types.Candle` is `:candles` — never off
+  the venue's service name (`LEVELONE_EQUITIES`, `CHART_EQUITY`, …), which must never cross
+  this facade. A symbol delivering only a quote appears under `:quotes` and nowhere else;
+  a symbol delivering only candles appears under `:candles` and nowhere else. `record_kind/3`
+  below has no `Types.OrderBook` clause — `services_for/1` never subscribes a book service,
+  so nothing this module's own subscriptions produce is ever that type; see the moduledoc's
+  "Three kinds are actually subscribed" section for why.
 
   On `:poll`, this reports `%{quotes: PollingFeed.coverage(poller)}` and nothing more.
-  There is no empty `:order_book` key invented to look complete — depth cannot arrive on
+  There is no empty `:candles` key invented to look complete — candles cannot arrive on
   this route, so claiming coverage of zero for it would still be a claim about a kind this
   route cannot carry.
 
@@ -248,7 +283,7 @@ defmodule DpExchange.Schwab.Feed do
   `state.route` is chosen once, for the whole feed, in `ensure_route/1` — the very first
   clause matches and short-circuits once `route` is `:stream` or `:poll`, and nothing in
   this module ever revisits that choice for a live feed. A symbol's kinds can differ from
-  each other (quotes but not depth, or the reverse), but every kind for every symbol comes
+  each other (quotes but not candles, or the reverse), but every kind for every symbol comes
   from the **same** route, because there is only one route for the process's whole life.
 
   ## The invariant
@@ -399,7 +434,7 @@ defmodule DpExchange.Schwab.Feed do
   # The poll route reaches `/quotes` and nothing else — see `Rest.get_price/3`, the only
   # fetch this route ever calls — so there is exactly one kind to report, sourced the same
   # way `coverage/1` sources it on this route: from `PollingFeed`, not from `state.kinds`.
-  # No `:order_book` key is invented here; depth cannot arrive on this route at all.
+  # No `:candles` key is invented here; candles cannot arrive on this route at all.
   def handle_call(:coverage_by_kind, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
     {:reply, %{quotes: PollingFeed.coverage(poller)}, state}
@@ -572,10 +607,13 @@ defmodule DpExchange.Schwab.Feed do
 
   defp apply_symbols(%{route: :stream, socket: socket} = state) when is_pid(socket) do
     # `SUBS` replaces the service's whole symbol set, which is what a wanted-set update
-    # means. `ADD` would accumulate the symbols a caller just removed.
+    # means. `ADD` would accumulate the symbols a caller just removed. A symbol can now
+    # reach more than one service (an equity reaches both `LEVELONE_EQUITIES` and
+    # `CHART_EQUITY`), so this groups `{service, symbol}` pairs rather than symbols.
     state.wanted
     |> MapSet.to_list()
-    |> Enum.group_by(&service_for/1)
+    |> Enum.flat_map(fn symbol -> Enum.map(services_for(symbol), &{&1, symbol}) end)
+    |> Enum.group_by(fn {service, _symbol} -> service end, fn {_service, symbol} -> symbol end)
     |> Enum.each(fn {service, symbols} ->
       Socket.subscribe(socket, service, "SUBS", Enum.map(symbols, &native/1))
     end)
@@ -597,11 +635,25 @@ defmodule DpExchange.Schwab.Feed do
 
   defp push_access_token(_state, _token), do: :ok
 
-  # An option symbol reaches `LEVELONE_OPTIONS`; everything else is an equity. The two
-  # services **do not share field numbering**, so routing a symbol to the wrong one decodes
-  # every field against the wrong table and produces prices that are the right shape.
-  defp service_for(symbol) do
-    if SymbolFormat.option?(symbol), do: "LEVELONE_OPTIONS", else: "LEVELONE_EQUITIES"
+  # An option symbol reaches `LEVELONE_OPTIONS` only — Schwab publishes no `CHART_OPTIONS`
+  # service, so there is no second subscription to add for it. Everything else reaches
+  # `LEVELONE_EQUITIES` for quotes and top of book, and `CHART_EQUITY` for one-minute
+  # candles: the two services are documented with the identical "Equities symbols in upper
+  # case… e.g.: AAPL,TSLA,IBM" key format, so the same symbol set that already reached one
+  # reaches the other — no new judgement about which symbols qualify.
+  #
+  # `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` and `ACCT_ACTIVITY` are deliberately absent
+  # from every symbol's list — see the moduledoc's "Three kinds are actually subscribed"
+  # section for why wiring either would be a guess, not a fix. `LEVELONE_*` **does not
+  # share field numbering** with `CHART_EQUITY` either, so routing a symbol to the wrong
+  # service decodes every field against the wrong table and produces prices that are the
+  # right shape — `StreamerFields.for_service/1` refuses that per-service, not per-symbol.
+  defp services_for(symbol) do
+    if SymbolFormat.option?(symbol) do
+      ["LEVELONE_OPTIONS"]
+    else
+      ["LEVELONE_EQUITIES", "CHART_EQUITY"]
+    end
   end
 
   defp native(symbol) do
@@ -625,18 +677,26 @@ defmodule DpExchange.Schwab.Feed do
   defp record_delivery(state, _value), do: state
 
   # Kind is read off the decoded value's own struct type, never off a venue service name —
-  # `StreamerFields`/`Socket` decode `LEVELONE_*`, `NYSE_BOOK`, `NASDAQ_BOOK` and
-  # `OPTIONS_BOOK` frames into exactly these four types (confirmed by reading
-  # `Socket.decode/4` and `StreamerDecode`), and this is the one place their service names
-  # would leak across the facade if this matched on them instead.
+  # `StreamerFields`/`Socket` decode `LEVELONE_*` and `CHART_EQUITY` frames into exactly
+  # these three types (confirmed by reading `Socket.decode/4` and `StreamerDecode`), and
+  # this is the one place their service names would leak across the facade if this matched
+  # on them instead.
+  #
+  # **`Types.OrderBook` has deliberately no clause here.** `Socket.decode/4` and
+  # `StreamerDecode.to_order_book/2` are real and tested, but `services_for/1` never
+  # subscribes `NYSE_BOOK`, `NASDAQ_BOOK` or `OPTIONS_BOOK` — see the moduledoc — so no
+  # `Types.OrderBook` value can reach this function through the stream route this package
+  # actually runs. Adding a `:order_book` mapping anyway would let a value nothing here can
+  # produce report a kind `capabilities().streamable` does not declare, which
+  # `Core.AdapterContract`'s conformance suite checks for exactly this reason.
   defp record_kind(state, symbol, %Quote{}), do: put_kind(state, symbol, :quotes)
   defp record_kind(state, symbol, %TopOfBook{}), do: put_kind(state, symbol, :top_of_book)
   defp record_kind(state, symbol, %Candle{}), do: put_kind(state, symbol, :candles)
-  defp record_kind(state, symbol, %OrderBook{}), do: put_kind(state, symbol, :order_book)
-  # A value with a `:symbol` field and no kind mapping — e.g. a bare test map — still
-  # counts toward `coverage/1` through `delivering` above, but contributes no kind. Nothing
-  # in this package emits such a value on the stream route today; a real one always decodes
-  # to one of the four clauses above.
+  # A value with a `:symbol` field and no kind mapping — e.g. a bare test map, or (should
+  # `services_for/1` ever change) a `Types.OrderBook` — still counts toward `coverage/1`
+  # through `delivering` above, but contributes no kind. Nothing this package's own
+  # subscriptions produce today reaches this clause; a real one always decodes to one of
+  # the three above.
   defp record_kind(state, _symbol, _value), do: state
 
   defp put_kind(state, symbol, kind) do

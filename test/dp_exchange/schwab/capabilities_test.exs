@@ -295,13 +295,24 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       assert Subject.declaration().authenticated_ceiling == nil
     end
 
-    test "the Streamer's six kinds are declared, and a tape is not among them" do
+    test "the Streamer's three genuinely-subscribed kinds are declared, and no more" do
       caps = Subject.declaration()
 
       # This asserted `[:quotes]` until 2026-09-01, when the package started speaking the
-      # Streamer. Depth, candles, order events and fill events all arrive on it.
-      assert caps.streamable ==
-               [:quotes, :top_of_book, :order_book, :candles, :orders, :fills]
+      # Streamer, and briefly asserted six kinds (adding `:order_book, :orders, :fills`)
+      # until a documentation-accuracy sweep (2026-09-06) found that nothing in `Feed`
+      # ever subscribed `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` or `ACCT_ACTIVITY` — the
+      # decoders were real and tested, but decoding is not subscribing. `:candles` is the
+      # one kind added and genuinely wired: `CHART_EQUITY` reaches the same symbols
+      # `LEVELONE_EQUITIES` does.
+      assert caps.streamable == [:quotes, :top_of_book, :candles]
+
+      # Depth and account activity stay out — see `Capabilities`' moduledoc: wiring either
+      # needs a fact this package does not have (which book service an equity belongs on;
+      # `ACCT_ACTIVITY`'s undocumented per-`message_type` schema).
+      refute :order_book in caps.streamable
+      refute :orders in caps.streamable
+      refute :fills in caps.streamable
 
       # `:trades` is the one to keep out. `LEVELONE_*` carries a *last* price — one print
       # restated on every update, not the sequence of them — so declaring a tape would
@@ -309,7 +320,7 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       # prints.
       refute :trades in caps.streamable
 
-      # `ACCT_ACTIVITY` reports activity, not state.
+      # `ACCT_ACTIVITY` reports activity, not state — and is not subscribed either way.
       refute :balances in caps.streamable
       refute :positions in caps.streamable
 

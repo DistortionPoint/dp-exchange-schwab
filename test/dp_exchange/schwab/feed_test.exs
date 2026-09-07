@@ -65,6 +65,10 @@ defmodule DpExchange.Schwab.FeedTest do
     ]
   }
 
+  # A real 21-character Schwab option symbol — root, padded to 6; expiry as YYMMDD; C/P;
+  # strike * 1000 padded to 8 digits — matching `SymbolFormat.option?/1`'s pattern.
+  @option_symbol "AAPL  260116C00250000"
+
   defp responding(body, status \\ 200) do
     fn conn ->
       conn
@@ -512,16 +516,16 @@ defmodule DpExchange.Schwab.FeedTest do
       assert_declared_streamable(by_kind)
     end
 
-    test "a symbol delivering only an OrderBook is :order_book, never :quotes" do
+    test "a symbol delivering only a Candle is :candles, never :quotes" do
       feed = start_feed(socket: fake_socket())
       Feed.subscribe(feed, ["MSFT"])
 
-      send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
-      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+      send(feed, {:dp_exchange, :schwab, candle_for("MSFT")})
+      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 2_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
-      assert by_kind == %{order_book: %{"MSFT" => :stream}}
+      assert by_kind == %{candles: %{"MSFT" => :stream}}
       refute Map.has_key?(by_kind, :quotes)
 
       assert_union_matches_coverage(feed, by_kind)
@@ -533,16 +537,74 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["AAPL", "MSFT"])
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
+      send(feed, {:dp_exchange, :schwab, candle_for("MSFT")})
       assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
-      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 2_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
-      assert by_kind == %{quotes: %{"AAPL" => :stream}, order_book: %{"MSFT" => :stream}}
+      assert by_kind == %{quotes: %{"AAPL" => :stream}, candles: %{"MSFT" => :stream}}
 
       assert_union_matches_coverage(feed, by_kind)
       assert_declared_streamable(by_kind)
+    end
+
+    test "an OrderBook value has no kind mapping — nothing this feed subscribes ever produces one" do
+      # `services_for/1` never asks for `NYSE_BOOK`, `NASDAQ_BOOK` or `OPTIONS_BOOK` (see
+      # `Feed`'s moduledoc), so a real stream never delivers a `Types.OrderBook` here. This
+      # injects one anyway to prove `record_kind/3` does not misreport it as a declared
+      # kind — `capabilities().streamable` no longer names `:order_book`, and a reported
+      # kind the declaration does not name is exactly what `Core.AdapterContract`'s
+      # conformance suite checks for.
+      feed = start_feed(socket: fake_socket())
+      Feed.subscribe(feed, ["MSFT"])
+
+      send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
+      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+
+      assert Feed.coverage_by_kind(feed) == %{}
+      assert Feed.coverage(feed) == %{"MSFT" => :stream}
+    end
+  end
+
+  describe "the socket subscribe wiring — services_for/1" do
+    test "an equity symbol reaches both LEVELONE_EQUITIES and CHART_EQUITY" do
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, ["AAPL"])
+
+      services = subscribed_services(socket)
+      assert %{"LEVELONE_EQUITIES" => ["AAPL"]} = services
+      assert %{"CHART_EQUITY" => ["AAPL"]} = services
+    end
+
+    test "an option symbol reaches only LEVELONE_OPTIONS — no CHART_EQUITY, no book service" do
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, [@option_symbol])
+
+      services = subscribed_services(socket)
+      assert Map.has_key?(services, "LEVELONE_OPTIONS")
+      refute Map.has_key?(services, "CHART_EQUITY")
+      refute Map.has_key?(services, "LEVELONE_EQUITIES")
+    end
+
+    test "NYSE_BOOK, NASDAQ_BOOK, OPTIONS_BOOK and ACCT_ACTIVITY are never sent" do
+      # The defect this section guards: `capabilities/0` once declared these streamable
+      # with nothing here ever asking the venue for them. Wiring `:candles` must not
+      # accidentally start asking for the other three too.
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, ["AAPL", @option_symbol])
+
+      services = subscribed_services(socket)
+      refute Map.has_key?(services, "NYSE_BOOK")
+      refute Map.has_key?(services, "NASDAQ_BOOK")
+      refute Map.has_key?(services, "OPTIONS_BOOK")
+      refute Map.has_key?(services, "ACCT_ACTIVITY")
     end
   end
 
@@ -646,6 +708,33 @@ defmodule DpExchange.Schwab.FeedTest do
       sequence: nil,
       provider: :schwab
     }
+  end
+
+  defp candle_for(symbol) do
+    %Types.Candle{
+      symbol: symbol,
+      timeframe: "1m",
+      opened_at: DateTime.utc_now(),
+      open: Decimal.new("100.0"),
+      high: Decimal.new("101.0"),
+      low: Decimal.new("99.5"),
+      close: Decimal.new("100.5"),
+      volume: Decimal.new("1000"),
+      provider: :schwab
+    }
+  end
+
+  # `WebSockex.cast/2` sends `{:"$websockex_cast", message}` straight to the pid via
+  # `Kernel.send/2` — `fake_socket/0`'s process never calls `receive`, so every subscribe
+  # this feed sent is still sitting in its mailbox by the time a synchronous
+  # `Feed.subscribe/2,3` call has returned. Returns `%{service => keys}`.
+  defp subscribed_services(socket_pid) do
+    {:messages, messages} = Process.info(socket_pid, :messages)
+
+    for {:"$websockex_cast", {:subscribe, service, "SUBS", keys, _opts}} <- messages,
+        reduce: %{} do
+      acc -> Map.update(acc, service, keys, &(&1 ++ keys))
+    end
   end
 
   # The invariant `coverage_by_kind/1`'s own moduledoc states: every symbol `coverage/1`

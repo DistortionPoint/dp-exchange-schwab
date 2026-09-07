@@ -19,6 +19,27 @@ defmodule DpExchange.Schwab.Supervisor do
   `:order_limit_per_minute` matching what its own app was registered with. Zero is a legal
   registration value, and a host with it should pass `0` rather than discover the ceiling
   by being refused.
+
+  ## Omitting `:order_limit_per_minute` is not the same question as omitting reads
+
+  This used to default the missing option to `reads` — generous, because reads are
+  unthrottled, and therefore **exactly the wrong number to reuse for writes**: a host that
+  said nothing about its own registration got a ceiling as high as this venue's own
+  documented maximum (`0..120`), which is an optimistic guess about somebody else's
+  registration dressed up as a courtesy default. That was a defect (found by a
+  documentation-accuracy sweep, 2026-09-06): this module's own moduledoc already said "a
+  number baked in here would be a claim about somebody else's registration," and the code
+  baked one in anyway for the one case — silence — where the claim is least justified.
+
+  The fix does not invent a *different* number to fill the same hole. A registration this
+  package was never told about is not usefully approximated by any single digit, optimistic
+  or not — the honest content of "the host said nothing" is that this package does not
+  know whether the host can write **any** orders, so `@default_order_limit` is `0`, and it
+  is documented as exactly that: not a measured ceiling, not the venue's default (the venue
+  has none), but this package's own refusal to assume a registration exists until told
+  otherwise. A host that can place orders states its own ceiling; one that never intends to
+  place any pays nothing for leaving it out, because the read limiter it does use is
+  unaffected.
   """
 
   use Supervisor
@@ -30,6 +51,15 @@ defmodule DpExchange.Schwab.Supervisor do
   # one, and it is not a claim about the venue — it exists so a runaway poll cannot become
   # a self-inflicted incident.
   @default_read_limit 120
+
+  # **Not a venue fact and not a guess at one.** Schwab's own ceiling for order writes is
+  # `0..120` per minute per account, set per application at registration, and this package
+  # holds no consumer's registration. Zero is the one number in that range that is never
+  # wrong to assume when nothing was said: a host actually registered higher loses nothing
+  # it needed by default (it states its own ceiling via `:order_limit_per_minute` and gets
+  # it), while a host silently defaulted to any higher number would have been allowed to
+  # write orders against a permission this package never confirmed it has.
+  @default_order_limit 0
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -58,13 +88,15 @@ defmodule DpExchange.Schwab.Supervisor do
   @doc """
   The limits this tree meters with.
 
-  `:read_limit_per_minute` defaults to #{@default_read_limit}; `:order_limit_per_minute`
-  has **no default**, because the venue has no default — see the moduledoc.
+  `:read_limit_per_minute` defaults to #{@default_read_limit}. `:order_limit_per_minute`
+  defaults to #{@default_order_limit} — not a venue fact, since the venue has none to
+  default to, but this package's own refusal to assume a registration it was never told
+  about. A host that can place orders passes its own ceiling; see the moduledoc.
   """
   @spec limits(keyword()) :: map()
   def limits(opts) do
     reads = Keyword.get(opts, :read_limit_per_minute, @default_read_limit)
-    orders = Keyword.get(opts, :order_limit_per_minute, reads)
+    orders = Keyword.get(opts, :order_limit_per_minute, @default_order_limit)
 
     %{
       default: %{limit: reads, per_ms: 60_000, burst: reads},

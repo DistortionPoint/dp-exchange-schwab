@@ -134,13 +134,21 @@ defmodule DpExchange.SchwabTest do
       assert %{id: DpExchange.Schwab} = Schwab.child_spec([])
     end
 
-    test "the ORDER ceiling has no default, because the venue has none" do
+    test "the order ceiling defaults to zero, never to the read ceiling" do
       # 0..120 per minute per account, set per application at registration. A number
-      # baked into the package would be a claim about somebody else's registration. The
-      # read ceiling is this package's own courtesy self-protection, not a venue fact —
-      # asserted by value, since a host has no reason to ask this package what it is.
+      # baked into the package would be a claim about somebody else's registration — and
+      # until a documentation-accuracy sweep (2026-09-06) found it, omitting the option
+      # silently defaulted `schwab_orders.limit` to `reads` (120, the TOP of Schwab's own
+      # range): the worst possible guess, because it is the one most likely to let a
+      # consumer write orders past a registration it does not hold. The read ceiling is
+      # this package's own courtesy self-protection, not a venue fact — asserted by
+      # value, since a host has no reason to ask this package what it is.
       limits = Supervisor.limits([])
       assert limits.default.limit == 120
+
+      # Omitting the option now reads identically to registering explicit zero — this
+      # package assumes no order throughput at all until a host states its own ceiling.
+      assert limits.schwab_orders == Supervisor.limits(order_limit_per_minute: 0).schwab_orders
 
       configured = Supervisor.limits(order_limit_per_minute: 20)
       assert configured.schwab_orders.limit == 20
@@ -148,7 +156,10 @@ defmodule DpExchange.SchwabTest do
 
     test "a registration with zero order throughput is legal and does not divide by zero" do
       # Zero is a legal registration value. It is not `:unsupported` — the endpoint
-      # exists, the app cannot use it — and the limiter must still start.
+      # exists, the app cannot use it — and the limiter must still start. `max(orders, 1)`
+      # is a floor on the GCRA arithmetic (it divides by the rate), not a claim that a
+      # zero-registered host may actually place one order a minute — `capabilities/0` is
+      # where the real ceiling is said.
       limits = Supervisor.limits(order_limit_per_minute: 0)
       assert limits.schwab_orders.limit >= 1
     end

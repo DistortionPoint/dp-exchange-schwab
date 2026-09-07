@@ -32,19 +32,45 @@ defmodule DpExchange.Schwab.Capabilities do
   `:unsupported`, and the difference is the point: "needs a search term" and "has no
   endpoint" are different facts, and a caller has to be able to act on each.
 
-  **The order book and the socket are both here now.** Neither OpenAPI document returns
-  depth and neither describes a streaming surface — both still true, and both statements
-  about *the documents* rather than the venue. Schwab's WebSocket **Streamer** carries
-  fifteen services including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is
-  documented in the prose beside those specifications. This package speaks it as of
-  2026-09-01, so `streamable` names quotes, top of book, depth, candles, and the order and
-  fill events `ACCT_ACTIVITY` carries. `authenticated_streamable` is the **same list**, not
-  a longer one: there is no anonymous socket here, so nothing is streamable without a
-  credential and nothing a credential adds is missing from the first list.
+  **The socket is here now, and `streamable` names what it actually delivers, not what it
+  can decode.** Neither OpenAPI document returns depth and neither describes a streaming
+  surface — both still true, and both statements about *the documents* rather than the
+  venue. Schwab's WebSocket **Streamer** carries fifteen services including `NYSE_BOOK`,
+  `NASDAQ_BOOK` and `OPTIONS_BOOK`, and is documented in the prose beside those
+  specifications. This package speaks it as of 2026-09-01.
 
-  **`get_order_book/2` stays `:unsupported` and that is now a narrower claim**: there is no
-  *REST* order book, and the contract's callback is a request-response read. Depth arrives
-  through the feed, which is a different shape and a different callback.
+  **A defect found by a documentation-accuracy sweep (2026-09-06), corrected here rather
+  than carried forward**: `streamable` used to name `:order_book`, `:orders` and `:fills`
+  alongside `:quotes`, `:top_of_book` and `:candles`, on the strength of `StreamerDecode`
+  being able to turn a `*_BOOK` or `ACCT_ACTIVITY` frame into a value — but nothing in
+  `Feed` ever *subscribed* `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` or `ACCT_ACTIVITY`.
+  A consumer asking to stream any of the three got the declaration and then permanent
+  silence, which is the family's forbidden substitution wearing a capability flag instead
+  of a value: plausible, and wrong only in meaning.
+
+  `:candles` is genuinely wired, not merely decodable: `CHART_EQUITY`'s `keys` parameter
+  is documented identically to `LEVELONE_EQUITIES`'s ("Equities symbols in upper case…"),
+  so `Feed.services_for/1` sends the same symbols to both and nothing about the routing is
+  a guess.
+
+  `:order_book` and `:orders`/`:fills` are **not** declared, and each stays out for a
+  reason that would make wiring it a guess: `NYSE_BOOK` and `NASDAQ_BOOK` are documented
+  identically ("Level Two book for Equities") with no stated rule for which service a
+  given equity belongs on, and `ACCT_ACTIVITY`'s `message_data` is documented as JSON
+  "whose shape depends on `message_type`" that the vendor does not publish. Guessing
+  either — which book a symbol belongs on, or what an order-fill payload looks like — is
+  exactly the substitution this family exists to refuse. See
+  `docs/design/ideas/schwab-depth-and-account-activity-streaming.md` for what closing
+  either gap for real would need.
+
+  `authenticated_streamable` is the **same list** as `streamable`, not a longer one: there
+  is no anonymous socket here, so nothing is streamable without a credential and nothing a
+  credential adds is missing from the first list.
+
+  **`get_order_book/2` stays `:unsupported`, and for the reason that was always true of
+  the REST API**: there is no *REST* order book, and the contract's callback is a
+  request-response read. That is unrelated to whether depth is declared streamable — it is
+  not, for the reason above.
 
   **`:trades` is not in either list.** No Streamer service publishes a tape: `LEVELONE_*`
   carries a *last* price, which is one print restated on every update rather than the
@@ -386,25 +412,37 @@ defmodule DpExchange.Schwab.Capabilities do
       # nearest of the three.
       supported_time_in_force: [:day, :gtc, :fok, :ioc],
 
-      # **What the Streamer actually carries, now that this package speaks it.**
+      # **What `Feed` actually subscribes, not what `StreamerDecode` can turn into a
+      # value.** `LEVELONE_*` gives quotes and top of book, and `CHART_EQUITY` gives
+      # candles — `Feed.services_for/1` sends every non-option symbol to both, and both
+      # are documented with the identical "Equities symbols in upper case" key format, so
+      # nothing about that routing is guessed.
       #
-      # `LEVELONE_*` gives quotes and top of book, `CHART_*` gives candles, `NYSE_BOOK`,
-      # `NASDAQ_BOOK` and `OPTIONS_BOOK` give depth, and `ACCT_ACTIVITY` gives order and
-      # fill events.
+      # **`:order_book` and `:orders`/`:fills` were declared here until a
+      # documentation-accuracy sweep (2026-09-06) found the defect: nothing ever
+      # subscribed `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` or `ACCT_ACTIVITY`, so a
+      # consumer asking for any of the three got a declaration and permanent silence.**
+      # Wiring the subscribe side for either needs a fact this package does not have:
+      # which book service an equity symbol belongs on (the vendor states no rule, and
+      # `NYSE_BOOK`/`NASDAQ_BOOK` are documented identically), or the per-`message_type`
+      # schema of `ACCT_ACTIVITY`'s `message_data` (the vendor states it exists and does
+      # not publish it). Declaring either without that fact would be a guess wearing a
+      # capability flag. See the moduledoc and
+      # `docs/design/ideas/schwab-depth-and-account-activity-streaming.md`.
       #
       # **`:trades` is absent, and that is a real distinction rather than an omission.** No
       # Streamer service publishes a tape: `LEVELONE_*` carries a *last* price, which is one
       # print restated on every update and not the sequence of them. Declaring `:trades`
       # would promise a consumer a tape it would then have to reconstruct from a field that
       # skips prints. `:balances` and `:positions` are absent for the same kind of reason —
-      # `ACCT_ACTIVITY` reports activity, not state.
-      streamable: [:quotes, :top_of_book, :order_book, :candles, :orders, :fills],
+      # `ACCT_ACTIVITY` reports activity, not state, and this package does not subscribe it.
+      streamable: [:quotes, :top_of_book, :candles],
 
       # **Identical, because this venue requires a credential for everything.** There is no
       # public market data here and no anonymous socket: the Streamer's login is built from
       # `/userPreference`, which is itself authenticated. The two lists being the same is
       # the declaration saying so rather than an oversight.
-      authenticated_streamable: [:quotes, :top_of_book, :order_book, :candles, :orders, :fills],
+      authenticated_streamable: [:quotes, :top_of_book, :candles],
       historical_timeframes: timeframes(),
 
       # Not a fixed number. The cap is a *period*, not a bar count, and it differs per

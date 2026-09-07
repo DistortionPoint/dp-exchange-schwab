@@ -44,19 +44,25 @@ price.
 delivering nothing at 3am is correct, and a consumer that alarms on silence would alarm
 every night — making a real outage indistinguishable from a Saturday.
 
-**This package speaks the Streamer.** Schwab publishes a WebSocket **Streamer** with 15
-services — `LEVELONE_*` for quotes and top of book, `NYSE_BOOK`, `NASDAQ_BOOK` and
-`OPTIONS_BOOK` for depth, `CHART_*` for candles, and `ACCT_ACTIVITY` for order and fill
-events. It is documented in the prose beside the OpenAPI specifications, not in them, which
-is how this README once claimed the venue had no socket at all.
+**This package speaks the Streamer, for the three kinds it can wire honestly.** Schwab
+publishes a WebSocket **Streamer** with 15 services — `LEVELONE_*` for quotes and top of
+book, `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK` for depth, `CHART_*` for candles, and
+`ACCT_ACTIVITY` for order and fill events. It is documented in the prose beside the OpenAPI
+specifications, not in them, which is how this README once claimed the venue had no socket
+at all. `subscribe/2` actually reaches `LEVELONE_EQUITIES`/`LEVELONE_OPTIONS` (quotes, top
+of book) and `CHART_EQUITY` (candles) — `capabilities().streamable` names exactly these
+three, corrected by a documentation-accuracy sweep (2026-09-06) after it briefly named
+three more that nothing here ever subscribed.
 
-`subscribe/2` bootstraps it through `GET /userPreference` and `coverage/1` reports
+`subscribe/2` bootstraps the socket through `GET /userPreference` and `coverage/1` reports
 `:stream`. **Where that bootstrap fails — no token, an expired one, a response without
 `streamerInfo` — the feed polls instead, emits `:degraded`, and reports `:internal_poll` for
 every symbol.** The route is always visible; nothing claims to be a stream that is not one.
 
 `get_order_book/2` remains `:unsupported`, and the reason is now narrow and true: **the REST
-API publishes no depth.** Depth on this venue arrives by subscription.
+API publishes no depth.** Depth does not arrive by subscription either — the vendor names no
+rule for routing an equity symbol to `NYSE_BOOK` or `NASDAQ_BOOK`, and this package will not
+guess one.
 
 **The catalogue cannot be enumerated.** `/instruments` has no list-everything projection —
 every lookup is a search. `get_symbols/1` therefore requires a `:query` and returns
@@ -116,7 +122,8 @@ children = [
 The order ceiling is **not** declared in `capabilities/0`, because Schwab has none to
 declare: the documented limit is `0..120` order writes per minute *per account*, set *per
 application at registration*. Pass `:order_limit_per_minute` matching your own app's
-registration.
+registration — **omitting it defaults to `0`**, not to the read ceiling, because this
+package will not assume a registration it was never told about.
 
 ## Testing against it
 

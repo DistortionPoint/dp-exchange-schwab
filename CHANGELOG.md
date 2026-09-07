@@ -31,6 +31,62 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`capabilities/0` declared four streamable kinds this package could not deliver —
+  `:order_book`, `:candles`, `:orders` and `:fills` — found by a documentation-accuracy
+  sweep (2026-09-06) that read `Feed.services_for/1` (then `service_for/1`) against
+  `capabilities().streamable` rather than against decoder coverage, which is what missed it
+  the first time. `Feed` only ever subscribed `LEVELONE_EQUITIES`/`LEVELONE_OPTIONS`; it
+  never sent `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` or `ACCT_ACTIVITY` a subscribe
+  request. `StreamerDecode` and `Socket.decode/4` could turn any of the four into a real
+  value — the decoders were real and tested — but decoding a frame and asking the venue to
+  send one are different facts, and a consumer calling `subscribe/2` for any of the four
+  got the declaration and then permanent silence: this family's forbidden substitution,
+  wearing a capability flag instead of a value.
+
+  **`:candles` is wired rather than narrowed**, because it can be without guessing:
+  `CHART_EQUITY`'s `keys` parameter is documented identically to `LEVELONE_EQUITIES`'s
+  ("Equities symbols in upper case… e.g.: AAPL,TSLA,IBM"), so `services_for/1` now sends
+  every non-option symbol to both services, and `StreamerDecode.to_candle/3` — already
+  real and tested — turns the result into a `Types.Candle`.
+
+  **`:order_book` and `:orders`/`:fills` are narrowed out, because wiring either would be a
+  guess.** `NYSE_BOOK` and `NASDAQ_BOOK` are both documented only as "Level Two book for
+  Equities," with no vendor-stated rule for which service a given equity symbol belongs
+  on. `ACCT_ACTIVITY`'s `message_data` is documented JSON "whose shape depends on
+  `message_type`" that the vendor does not publish — there is no schema to decode against,
+  only one to invent. `capabilities/0` now declares `streamable: [:quotes, :top_of_book,
+  :candles]`, and `record_kind/3` no longer maps `Types.OrderBook` to `:order_book`, since
+  nothing this module subscribes can ever produce one and a dead mapping left the
+  possibility of `coverage_by_kind/1` reporting a kind the declaration does not name. What
+  wiring either gap for real would need is recorded at
+  `docs/design/ideas/schwab-depth-and-account-activity-streaming.md`.
+
+  **This is breaking for a consumer routing on `capabilities().streamable`**: a check for
+  `:order_book`, `:orders` or `:fills` in that list now returns `false` where it previously
+  (wrongly) returned `true`. No consumer could have received any of the three regardless,
+  since nothing ever delivered them — the declaration is the only thing that changes.
+
+  `usage-rules.md`, `README.md`, `DpExchange.Schwab`'s moduledoc, `Capabilities`'
+  moduledoc, `Feed`'s moduledoc and `docs/reference/schwab/coverage-matrix.md` are
+  corrected in this same commit.
+
+- **`DpExchange.Schwab.Supervisor.limits/1` defaulted `:order_limit_per_minute` to the read ceiling (120 by
+  default) whenever a host omitted it — the top of Schwab's own documented `0..120` range,
+  assumed for a registration this package was never told about, and the worst of the
+  choices available: it fails open, letting a consumer write orders against a permission it
+  may not hold.** Found by the same documentation-accuracy sweep: this module's own
+  moduledoc already said a number baked in here "would be a claim about somebody else's
+  registration," and said `:order_limit_per_minute` "has no default" — the code disagreed
+  with its own comment for the one case, silence, where the claim is least justified.
+
+  `:order_limit_per_minute` now defaults to `0` (`@default_order_limit`) — not a venue fact,
+  since the venue has none to default to, but this package's own refusal to assume a
+  registration until told otherwise. A host that places orders states its own ceiling; one
+  that never does pays nothing for leaving it out, since the default only affects order
+  writes. `README.md` and `usage-rules.md` §12 now say so.
+
 ### Changed
 
 - **A rejected Streamer LOGIN now emits `:credentials_rejected` rather than a generic
