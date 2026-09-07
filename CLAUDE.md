@@ -15,9 +15,13 @@ Guidance for Claude Code working in this repository.
 9. ALL Credo issues must pass. Not just some, not just critical, ALL
 10. NEVER USE PERL or PYTHON
 11. NEVER USE the SYSTEM TMP. NEVER MEANS NEVER. DO NOT EVER DO THIS
-12. NEVER REWRITE SHARED GIT HISTORY — no force-push, no rewriting a pushed branch, no
-    `git reset --hard` over work you did not create. Ordinary git IS allowed and expected.
-    Rule 6 is the gate on commit and push, and it is the only gate.
+12. NEVER REWRITE SHARED GIT HISTORY — no force-push, no rewriting a branch that has
+    been pushed, no `git reset --hard` over work you did not create. Ordinary git IS
+    allowed and expected: `status`, `diff`, `log`, `add`, `commit`, `rebase` onto
+    `origin`, `push`. Rule 6 is the gate on commit and push, and it is the only gate.
+    This rule was previously written as "NEVER USE GIT", which was wrong: publishing is
+    a merge to `main`, so that reading made the package pipeline unrunnable and turned a
+    self-imposed rule into a fake blocker handed back to the architect.
 13. NEVER USE KILL/PKILL UNSCOPED, only scoped to your specific things. NEVER MEANS NEVER. DO NOT EVER DO THIS
 
 **THIS REPO IS PUBLIC.** Every commit is a public commit, and git history is not
