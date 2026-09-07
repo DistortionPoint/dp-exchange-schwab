@@ -79,7 +79,7 @@ defmodule DpExchange.Schwab do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.Venue
-  alias DpExchange.Schwab.{Auth, Capabilities, Feed, Orders, Rest, Supervisor}
+  alias DpExchange.Schwab.{Auth, Capabilities, Feed, OrderLimit, Orders, Rest, Supervisor}
 
   # --- identity -----------------------------------------------------------
 
@@ -225,9 +225,20 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_transfers(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Place an order.
+
+  `{:error, :order_limit_not_declared}` when this tree was supervised without
+  `:order_limit_per_minute` — see `Supervisor`'s moduledoc and `OrderLimit`. That is
+  distinct from a real ceiling of `0`, which reaches the limiter and is throttled for
+  real, and distinct from a consumer that never supervises this module at all, which gets
+  no opinion from this check. Checked before `Orders.build/2`, so an undeclared ceiling is
+  never masked by, or confused with, a separate refusal about the order's own shape.
+  """
   @impl true
   def place_order(credentials, request, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
+         :ok <- ensure_order_limit_declared(opts),
          {:ok, payload} <- Orders.build(request, opts) do
       Rest.place_order(credentials, hash, payload, with_limiter(opts))
     end
@@ -273,18 +284,29 @@ defmodule DpExchange.Schwab do
   Returns the **new** order id. Schwab treats a replacement as a new order, so the old id
   is dead afterwards and a caller still holding it would be tracking something that no
   longer exists.
+
+  `{:error, :order_limit_not_declared}` under the same conditions as `place_order/3` — a
+  replacement is a `PUT` order write, the same throttled category as a placement.
   """
   @impl true
   def replace_order(credentials, order_id, request, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
+         :ok <- ensure_order_limit_declared(opts),
          {:ok, payload} <- Orders.build(request, opts) do
       Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts))
     end
   end
 
+  @doc """
+  Cancel an open order.
+
+  `{:error, :order_limit_not_declared}` under the same conditions as `place_order/3` — a
+  cancel is a `DELETE` order write, the same throttled category as a placement.
+  """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts) do
+    with {:ok, hash} <- account_hash(opts),
+         :ok <- ensure_order_limit_declared(opts) do
       Rest.cancel_order(credentials, hash, order_id, with_limiter(opts))
     end
   end
@@ -602,6 +624,22 @@ defmodule DpExchange.Schwab do
 
   defp with_limiter(opts) do
     Keyword.put_new(opts, :limiter, Supervisor.limiter_name(opts))
+  end
+
+  # See `OrderLimit`'s moduledoc and `Supervisor`'s "A silent 0 is still the wrong fix"
+  # section. `{:error, :not_started}` means this consumer never supervised `OrderLimit` at
+  # all — bypassing `Supervisor` entirely with a `:limiter` of its own, which this package
+  # has always allowed — and gets no opinion here, not a refusal: collapsing "I was never
+  # asked" into "refused" would fail every consumer who does that, several of this
+  # package's own tests among them. `declared?: false` means a tree WAS started through
+  # `Supervisor` and specifically never told an order ceiling, which every order write
+  # refuses rather than let masquerade as the venue's own throttling.
+  defp ensure_order_limit_declared(opts) do
+    case OrderLimit.status(Supervisor.order_limit_name(opts)) do
+      {:error, :not_started} -> :ok
+      %{declared?: true} -> :ok
+      %{declared?: false} -> {:error, :order_limit_not_declared}
+    end
   end
 
   defp feed(opts), do: Keyword.get(opts, :feed, Supervisor.feed_name(opts))

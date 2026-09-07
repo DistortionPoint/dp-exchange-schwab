@@ -87,6 +87,53 @@ an acceptable changelog line.
   that never does pays nothing for leaving it out, since the default only affects order
   writes. `README.md` and `usage-rules.md` §12 now say so.
 
+- **The `0`-default above was reviewed and sent back: it failed closed illegibly.** Trace
+  what a consumer who omitted `:order_limit_per_minute` actually saw calling
+  `place_order/3`: the order-write bucket was starved, and
+  `DpExchange.Core.DefaultRateLimiter.check/3` answered `{:rate_limited, wait_ms}` — or,
+  under `rate_limit_blocking: true`, `acquire/3` simply made them wait, which presents as a
+  hang. **That is a plausible value with the wrong meaning**, exactly the failure mode this
+  family fails closed against: `:rate_limited` says the venue is pushing back, when the
+  venue said nothing at all and this package is refusing on the consumer's own behalf for a
+  reason the answer cannot show. Worse, a host who explicitly registered at `0` — a real,
+  deliberate "I place no orders" — got the identical answer, so the two cases were
+  indistinguishable from the outside despite meaning opposite things.
+
+  **`DpExchange.Schwab.OrderLimit`** is new: a small supervised process, started alongside
+  the limiter and the feed, holding exactly one fact for the tree's life — whether
+  `:order_limit_per_minute` was ever passed, kept apart from what number it resolved to.
+  `place_order/3`, `replace_order/4` and `cancel_order/3` consult it **before** any
+  rate-limit call is made: a tree that was never told an order ceiling now answers
+  `{:error, :order_limit_not_declared}`, unmistakable on its face from `{:rate_limited, _}`;
+  a tree explicitly told `0` reaches the limiter exactly as before and is throttled for
+  real, because that is what a stated `0` means. A consumer who bypasses `Supervisor`
+  entirely — calling `Rest.place_order/4` with a `:limiter` of its own, which this package
+  has always allowed — gets no opinion from `OrderLimit` at all: `{:error, :not_started}`
+  is answered `:ok` by the new check, never collapsed into a refusal nobody asked for.
+
+  **A second, independent gap surfaced in the same review: a declared ceiling was not
+  enforced either.** `Rest`'s order writes (`place_order/4`, `replace_order/5`,
+  `cancel_order/4`) reached the rate limiter through the same `provider: :schwab` every
+  read uses, so `schwab_orders` — the bucket `DpExchange.Schwab.Supervisor.limits/1` has always built —
+  metered nothing. A host who did everything right, passing a real `:order_limit_per_minute`
+  matching its own registration, got **no protection from it**: writes sailed through at the
+  generous read ceiling, and any real over-limit behaviour would have surfaced as a
+  rejection from Schwab itself, never from this package's own guard. It went unnoticed
+  because the read ceiling and Schwab's documented order maximum are both `120`, so nothing
+  about it ever looked wrong. `Rest.place_order/4`, `replace_order/5` and `cancel_order/4`
+  now tag their requests `provider: :schwab_orders` (a new `order_write_request_opts/1`),
+  so a declared ceiling is finally the one that actually meters them. `preview_order/4` is
+  deliberately unaffected — it is not a throttled order write on this venue.
+
+  **This is breaking for a consumer who omitted `:order_limit_per_minute` and was relying
+  on the old optimistic `120`.** `place_order/3`, `replace_order/4` and `cancel_order/3`
+  now return `{:error, :order_limit_not_declared}` for such a consumer instead of silently
+  reaching the venue. The fix is to declare the real ceiling: pass
+  `:order_limit_per_minute` matching what the consumer's own application was registered
+  with at `Supervisor`/`DpExchange.Schwab` start, or `0` if it places no orders at all.
+  `Supervisor`'s moduledoc, `OrderLimit`'s moduledoc, `README.md` and `usage-rules.md` §12
+  all state this.
+
 ### Changed
 
 - **A rejected Streamer LOGIN now emits `:credentials_rejected` rather than a generic

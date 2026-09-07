@@ -218,10 +218,12 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     end
 
     test "a 5xx on the trading endpoints is an error, not a refusal" do
-      assert {:error, {:exchange_error, :schwab, _msg}} =
+      # Both are order writes and meter against `:schwab_orders`, not `:schwab` — see
+      # `Rest.order_write_request_opts/1`.
+      assert {:error, {:exchange_error, :schwab_orders, _msg}} =
                Rest.place_order(@creds, "H", %{}, opts(responding(%{}, 500)))
 
-      assert {:error, {:exchange_error, :schwab, _msg}} =
+      assert {:error, {:exchange_error, :schwab_orders, _msg}} =
                Rest.cancel_order(@creds, "H", "1", opts(responding(%{}, 500)))
     end
 

@@ -105,13 +105,14 @@ defmodule DpExchange.SchwabTest do
   end
 
   describe "the supervision tree" do
-    test "starts a limiter and a feed, like every other venue" do
+    test "starts a limiter, an order-ceiling record and a feed" do
       unique = System.unique_integer([:positive])
 
       opts = [
         name: :"sup_#{unique}",
         feed: :"sfeed_#{unique}",
         limiter: :"slim_#{unique}",
+        order_limit: :"solim_#{unique}",
         symbols: [],
         start_delay_ms: 60_000
       ]
@@ -119,14 +120,18 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, pid} = Schwab.start_link(opts)
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
 
-      assert length(Elixir.Supervisor.which_children(pid)) == 2
+      # One more than every other venue in the family — `OrderLimit`, the record of
+      # whether `:order_limit_per_minute` was ever stated. See `Supervisor`'s moduledoc.
+      assert length(Elixir.Supervisor.which_children(pid)) == 3
     end
 
     test "names default and are overridable" do
       assert Supervisor.limiter_name([]) == DpExchange.Schwab.RateLimiter
       assert Supervisor.feed_name([]) == Feed
+      assert Supervisor.order_limit_name([]) == DpExchange.Schwab.OrderLimit
       assert Supervisor.limiter_name(limiter: :mine) == :mine
       assert Supervisor.feed_name(feed: :mine) == :mine
+      assert Supervisor.order_limit_name(order_limit: :mine) == :mine
     end
 
     test "child_spec takes its id from the name" do
@@ -162,6 +167,118 @@ defmodule DpExchange.SchwabTest do
       # where the real ceiling is said.
       limits = Supervisor.limits(order_limit_per_minute: 0)
       assert limits.schwab_orders.limit >= 1
+    end
+  end
+
+  describe "place_order/3, replace_order/4, cancel_order/3 — the order-write gate" do
+    # A consumer who omitted `:order_limit_per_minute` used to reach the venue at the
+    # (wrongly optimistic) read ceiling; then it was fixed to reach a starved limiter and
+    # come back looking exactly like the venue itself was throttling — `{:rate_limited,
+    # _}` or a silent block under `rate_limit_blocking: true`, a plausible value with the
+    # wrong meaning. These prove the actual, reviewed fix: a distinct refusal, raised
+    # before any HTTP call, that only fires for a tree that was told nothing.
+    #
+    # `PermissiveLimiter` is defined once, below, in "refresh_credentials/2". Elixir's
+    # nested-module alias is lexically scoped to that `describe` block, not this whole
+    # file, so it is named in full here rather than redefined.
+    setup do
+      Config.put_override(:rate_limit_module, __MODULE__.PermissiveLimiter)
+      :ok
+    end
+
+    @order_request %{symbol: "AAPL", side: :buy, quantity: 1}
+
+    defp placed_ok_plug do
+      fn conn ->
+        conn |> Plug.Conn.put_resp_header("location", "/orders/7") |> Plug.Conn.resp(201, "")
+      end
+    end
+
+    defp start_order_tree(extra_opts) do
+      unique = System.unique_integer([:positive])
+
+      opts =
+        [
+          name: :"sup_#{unique}",
+          feed: :"sfeed_#{unique}",
+          limiter: :"slim_#{unique}",
+          order_limit: :"solim_#{unique}",
+          symbols: [],
+          start_delay_ms: 60_000
+        ] ++ extra_opts
+
+      {:ok, pid} = Schwab.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      [account_hash: "H", order_limit: :"solim_#{unique}"]
+    end
+
+    test "a tree started without :order_limit_per_minute refuses all three, before the venue is ever reached" do
+      base = start_order_tree([])
+      exploding = fn _conn -> raise "an order write should never have reached the venue" end
+      call_opts = base ++ [plug: exploding, retry_attempts: 0]
+
+      assert Schwab.place_order(@creds, @order_request, call_opts) ==
+               {:error, :order_limit_not_declared}
+
+      assert Schwab.replace_order(@creds, "1", @order_request, call_opts) ==
+               {:error, :order_limit_not_declared}
+
+      assert Schwab.cancel_order(@creds, "1", call_opts) == {:error, :order_limit_not_declared}
+    end
+
+    test "a tree started WITH :order_limit_per_minute lets every one of the three reach the venue" do
+      base = start_order_tree(order_limit_per_minute: 20)
+      call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
+
+      assert {:ok, "7"} = Schwab.place_order(@creds, @order_request, call_opts)
+      assert {:ok, "7"} = Schwab.replace_order(@creds, "1", @order_request, call_opts)
+
+      assert :ok =
+               Schwab.cancel_order(@creds, "1",
+                 account_hash: "H",
+                 order_limit: base[:order_limit],
+                 plug: fn c -> Plug.Conn.resp(c, 200, "") end,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an EXPLICIT zero also reaches the venue path — it is a stated ceiling, not silence" do
+      # Distinct from the undeclared case on purpose: `0` said on purpose is this
+      # consumer's own answer, and `PermissiveLimiter` here stands in for the real
+      # limiter that would then throttle it for real — `Supervisor.limits/1`'s own tests
+      # cover that arithmetic. This test only proves the GATE does not confuse the two.
+      base = start_order_tree(order_limit_per_minute: 0)
+      call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
+
+      assert {:ok, "7"} = Schwab.place_order(@creds, @order_request, call_opts)
+    end
+
+    test "preview_order/3 is never gated — it is not a throttled order write on this venue" do
+      base = start_order_tree([])
+
+      body = %{
+        "orderStrategy" => %{"orderType" => "MARKET"},
+        "orderValidationResult" => %{"rejects" => []},
+        "commissionAndFee" => %{"commission" => %{}}
+      }
+
+      plug = fn conn -> Req.Test.json(conn, body) end
+      call_opts = base ++ [plug: plug, retry_attempts: 0]
+
+      assert {:ok, _preview} = Schwab.preview_order(@creds, @order_request, call_opts)
+    end
+
+    test "a consumer who never supervises this module at all is unaffected — no tree, no new refusal" do
+      # Matches the existing "no account hash" refusal's own calling convention: a bare
+      # facade call with no supervision tree behind it, which this package has always
+      # allowed by letting a caller supply its own `:limiter`.
+      assert {:ok, "7"} =
+               Schwab.place_order(@creds, @order_request,
+                 account_hash: "H",
+                 plug: placed_ok_plug(),
+                 retry_attempts: 0
+               )
     end
   end
 

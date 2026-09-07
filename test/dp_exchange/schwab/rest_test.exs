@@ -600,10 +600,13 @@ defmodule DpExchange.Schwab.RestTest do
     end
 
     test "a 5xx on either is an error worth retrying" do
+      # `preview_order/4` meters against `:schwab` (unthrottled, like a read);
+      # `replace_order/5` meters against `:schwab_orders` (an order write) — see
+      # `Rest.order_write_request_opts/1`.
       assert {:error, {:exchange_error, :schwab, _m}} =
                Rest.preview_order(@creds, "H", %{}, plug: responding(%{}, 500), retry_attempts: 0)
 
-      assert {:error, {:exchange_error, :schwab, _m}} =
+      assert {:error, {:exchange_error, :schwab_orders, _m}} =
                Rest.replace_order(@creds, "H", "1", %{},
                  plug: responding(%{}, 500),
                  retry_attempts: 0

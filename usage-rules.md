@@ -308,11 +308,35 @@ The documented ceiling is `0..120` order writes per minute **per account**, set 
 application at registration**. Pass `:order_limit_per_minute` matching your own app's. Zero
 is a legal registration value.
 
-**Leaving `:order_limit_per_minute` out defaults it to `0`, not to your read limit.** A
-documentation-accuracy sweep (2026-09-06) found the supervisor silently reusing
-`:read_limit_per_minute` (120 by default) for order writes whenever this option was
-omitted — the top of Schwab's own range, assumed for a registration this package was never
-told about. A consumer that only ever reads quotes is unaffected either way; one that
-places orders without stating this option now gets throttled to almost nothing rather than
-sailing through at 120 against a registration it may not hold — state your own ceiling if
-you place orders at all.
+**Leaving `:order_limit_per_minute` out no longer sails through at your read limit — a
+tree started without it refuses every order write outright.** A documentation-accuracy
+sweep (2026-09-06) found the supervisor silently reusing `:read_limit_per_minute` (120 by
+default) for order writes whenever this option was omitted — the top of Schwab's own
+range, assumed for a registration this package was never told about. The first fix
+defaulted the *number* to `0` instead, and was itself sent back on review: a starved
+limiter answers `{:rate_limited, _}` or blocks under `rate_limit_blocking: true`, which
+looks exactly like the *venue* throttling you, when in fact the venue said nothing and
+this package was refusing on your behalf for a reason that answer cannot show.
+
+```elixir
+DpExchange.Schwab.place_order(creds, request)
+# {:error, :order_limit_not_declared} — this tree was never told a ceiling
+```
+
+`place_order/3`, `replace_order/4` and `cancel_order/3` now check **before** touching the
+limiter at all, and answer `{:error, :order_limit_not_declared}` distinctly — never
+`{:rate_limited, _}` — when the tree behind them was started without
+`:order_limit_per_minute`. **State your own ceiling if you place orders at all**, matching
+what your application was registered with, or `0` if it places none. A consumer that only
+ever reads quotes is unaffected either way, and a consumer using its own `:limiter`
+outside `DpExchange.Schwab.Supervisor` entirely gets no opinion from this check — it only
+applies to a tree this package itself supervises.
+
+**A declared ceiling is now actually enforced, which it was not before.** `place_order/3`,
+`replace_order/4` and `cancel_order/3` used to meter against the same `:schwab` bucket
+every read does, so a correctly-stated `:order_limit_per_minute` never gated a real write
+— it would have sailed through at the read ceiling regardless, and any true over-limit
+behaviour surfaced as a rejection from Schwab itself. They now meter against
+`:schwab_orders`, the bucket `DpExchange.Schwab.Supervisor.limits/1` has always built for exactly this.
+`preview_order/3` is unaffected by both changes — it is not a throttled order write on
+this venue.

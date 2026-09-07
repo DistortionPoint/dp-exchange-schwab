@@ -1326,7 +1326,12 @@ defmodule DpExchange.Schwab.Rest do
   defp available("CASH", current), do: current["cashAvailableForTrading"]
   defp available(_unknown, _current), do: nil
 
-  @doc "Place an order. Returns the venue's order id, read from the `Location` header."
+  @doc """
+  Place an order. Returns the venue's order id, read from the `Location` header.
+
+  Meters against this module's own `:schwab_orders` rate-limit bucket, not `:schwab` —
+  see `DpExchange.Schwab.Supervisor.limits/1`.
+  """
   @spec place_order(map(), String.t(), map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, account_hash, payload, opts) do
@@ -1338,7 +1343,7 @@ defmodule DpExchange.Schwab.Rest do
 
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
+      case HttpClient.request(:post, url, headers, body, order_write_request_opts(opts)) do
         # Schwab answers a placed order with 201 and an empty body; the id is in the
         # Location header. A caller that needs the order must be given the id, so a 201
         # without one is a failure rather than a success with nothing in it.
@@ -1432,7 +1437,7 @@ defmodule DpExchange.Schwab.Rest do
       headers = [{"Content-Type", "application/json"} | headers]
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:put, url, headers, body, request_opts(opts)) do
+      case HttpClient.request(:put, url, headers, body, order_write_request_opts(opts)) do
         {:ok, %{status: status} = response} when status in 200..299 ->
           order_id_from_location(response)
 
@@ -1478,7 +1483,7 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, headers} <- Auth.headers(credentials, opts) do
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:delete, url, headers, nil, request_opts(opts)) do
+      case HttpClient.request(:delete, url, headers, nil, order_write_request_opts(opts)) do
         {:ok, %{status: status}} when status in 200..299 ->
           :ok
 
@@ -1556,6 +1561,38 @@ defmodule DpExchange.Schwab.Rest do
       :rate_limit_blocking
     ])
     |> Keyword.merge(provider: :schwab, raw_status: true)
+  end
+
+  # **`:schwab_orders`, not `:schwab` — found by the same review that corrected
+  # `Supervisor`'s optimistic default.** Schwab's documented ceiling — "PUT/POST/DELETE
+  # order requests per minute per account... Get order requests are unthrottled"
+  # (`accounts-and-trading-production.txt`) — is a separate budget from every other call
+  # this module makes, and `Supervisor.limits/1` has always built a separate
+  # `schwab_orders` bucket for it. Until this helper existed, `place_order/4`,
+  # `replace_order/5` and `cancel_order/4` reached `request_opts/1` like everything else
+  # and metered against `:schwab` — the SAME bucket as reads — so a host's own
+  # `:order_limit_per_minute` never actually gated a write. The gap went unnoticed because
+  # the read ceiling and Schwab's own maximum order ceiling default to the same `120`, so
+  # nothing about it ever looked wrong.
+  #
+  # `previewOrder` is deliberately excluded — it is `POST /accounts/{hash}/previewOrder`,
+  # not a request against `/orders`, and this package's own capability declaration already
+  # treats it as unthrottled: "order writes are throttled and reads are not, so a
+  # rejection found by previewing costs nothing while one found by placing costs a scarce
+  # write." Tagging it `:schwab_orders` would spend a scarce write budget on the one call
+  # that exists so a caller does not have to.
+  defp order_write_request_opts(opts) do
+    opts
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
+    |> Keyword.merge(provider: :schwab_orders, raw_status: true)
   end
 
   defp refusal(status, body) do

@@ -122,8 +122,15 @@ children = [
 The order ceiling is **not** declared in `capabilities/0`, because Schwab has none to
 declare: the documented limit is `0..120` order writes per minute *per account*, set *per
 application at registration*. Pass `:order_limit_per_minute` matching your own app's
-registration — **omitting it defaults to `0`**, not to the read ceiling, because this
-package will not assume a registration it was never told about.
+registration.
+
+**Omitting it refuses every order write outright, rather than guessing.**
+`place_order/3`, `replace_order/4` and `cancel_order/3` answer `{:error,
+:order_limit_not_declared}` for a tree started without this option — never a silent
+120/minute, and never a bare `{:rate_limited, _}` that could be mistaken for the venue
+itself throttling you. Pass `0` explicitly if the application places no orders at all;
+that reaches the real limiter and is throttled for real, which is a different, honest
+thing from never having been asked.
 
 ## Testing against it
 
