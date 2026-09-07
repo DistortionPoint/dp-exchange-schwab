@@ -574,33 +574,50 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
 
   describe "the fake and the facade" do
     test "the fake's chain has a one-sided strike and no underlying price" do
-      assert {:ok, chain} = Fake.get_option_chain("AAPL")
+      assert {:ok, chain} = Fake.get_option_chain("AAPL", credentials: @creds)
       assert chain.underlying_price == nil
       assert chain.expiries[~D[2026-06-19]][Decimal.new("220")].put == nil
     end
 
     test "the fake's position is a short with a positive size and no liquidation price" do
-      assert {:ok, [position]} = Fake.get_positions()
+      assert {:ok, [position]} = Fake.get_positions(credentials: @creds)
       assert position.side == :short
       refute Decimal.negative?(position.quantity)
       assert position.liquidation_price == nil
     end
 
+    # Every endpoint on this venue needs OAuth — there is no anonymous surface at all — so
+    # the fake refuses without credentials the way `Rest` does. These five are outside
+    # `Core.AdapterContract`'s hardcoded `@credentialed` list, so assertion 17 never asks
+    # about them even though this venue declares `credential_benefit: :required`.
+    test "the widened surface needs credentials, as the real venue does" do
+      assert Fake.get_positions() == {:error, {:missing_credentials, :schwab}}
+      assert Fake.get_option_chain("AAPL") == {:error, {:missing_credentials, :schwab}}
+
+      assert Fake.get_option_expirations("AAPL") ==
+               {:error, {:missing_credentials, :schwab}}
+
+      assert Fake.get_screener("$DJI") == {:error, {:missing_credentials, :schwab}}
+      assert Fake.get_transactions(%{}) == {:error, {:missing_credentials, :schwab}}
+    end
+
     test "the fake refuses the same three missing parameters, in the same order" do
-      assert {:error, {:account_hash_required, :schwab}} = Fake.get_transactions(%{})
+      # Credentials first, then the account hash, then the venue's own three — matching
+      # the order `Rest` checks them in.
+      assert {:error, {:missing_account_hash, :schwab}} = Fake.get_transactions(@creds)
 
       assert {:error, {:from_and_to_required, :schwab}} =
-               Fake.get_transactions(%{}, account_hash: "h")
+               Fake.get_transactions(@creds, account_hash: "h")
 
       assert {:error, {:types_required, :schwab}} =
-               Fake.get_transactions(%{},
+               Fake.get_transactions(@creds,
                  account_hash: "h",
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z]
                )
 
       assert {:ok, [_row]} =
-               Fake.get_transactions(%{},
+               Fake.get_transactions(@creds,
                  account_hash: "h",
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
@@ -609,8 +626,10 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
     end
 
     test "the fake's screener refuses an unknown universe" do
-      assert {:error, {:unknown_movers_universe, "AAPL"}} = Fake.get_screener("AAPL")
-      assert {:ok, [%{rank: 1}]} = Fake.get_screener("$DJI")
+      assert {:error, {:unknown_movers_universe, "AAPL"}} =
+               Fake.get_screener("AAPL", credentials: @creds)
+
+      assert {:ok, [%{rank: 1}]} = Fake.get_screener("$DJI", credentials: @creds)
     end
 
     test "the facade reaches the new surface" do
@@ -636,7 +655,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
 
       assert {:ok, []} = DpExchange.Schwab.get_positions(base ++ [plug: responding([])])
 
-      assert {:error, {:account_hash_required, :schwab}} =
+      assert {:error, {:missing_account_hash, :schwab}} =
                DpExchange.Schwab.get_transactions(@creds, [])
 
       assert {:ok, []} =

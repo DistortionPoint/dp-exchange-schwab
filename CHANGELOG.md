@@ -31,7 +31,105 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`Fake` is now wired to `DpExchange.Core.FakeInjection`.** This was the only package in
+  the family with no wiring at all — Coinbase, Gemini, Webull and Robinhood all had it, and
+  `usage-rules/testing.md` states the convention as "every venue's `Fake` is wired to
+  `DpExchange.Core.FakeInjection`". Found by a cross-package audit; no single-package review
+  could see it, because nothing inside this repo was missing. A consumer exercising its own
+  retry, circuit-breaker or alerting code against several venues at once could not point
+  that code at Schwab.
+
+  The market-data and account/order callbacks with a real success path now check
+  `FakeInjection.next_outcome/2` first, and `require_credentials/1` honours
+  `FakeInjection.bypass_credentials/1`. The bypass matters more here than anywhere else in
+  the family: this venue has no anonymous surface at all, so without it there is no way to
+  exercise dispatch or decode logic without constructing a credential map for every call.
+
+  Deliberately not wired, and documented as such in the module: `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` (whole-call injection cannot express "one symbol in
+  the batch fails"), and `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` (local
+  bookkeeping that always succeeds by construction). Also not yet wired, and stated rather
+  than left to be found: `get_option_chain/2`, `get_option_expirations/2`, `get_screener/2`,
+  `get_transactions/2` and `get_rate_limit_status/2`.
+
 ### Fixed
+
+- **Supervision ceilings and the feed's poll interval failed open on a bad value, and an
+  explicit `nil` was read as a registration.** Two related gaps, both the forwarded-`opts`
+  trap this family already has three incidents for:
+
+  `Supervisor`'s `init/1` and `limits/1` read `:order_limit_per_minute` and
+  `:read_limit_per_minute` with `Keyword.has_key?/2` and `Keyword.get/3`. A consumer
+  forwarding an `Application.get_env/2` lookup that resolved to nothing passes
+  `order_limit_per_minute: nil` — **present and `nil`, not absent** — so `has_key?/2`
+  answered `true` (the host "stated a registration", which is the single fact `OrderLimit`
+  exists to get right) and `Keyword.get/3` returned the `nil` rather than the default.
+  `max(nil, 1)` is `nil` under Erlang term ordering, so that `nil` reached
+  `DefaultRateLimiter` as `limit: nil, burst: nil` and failed inside its arithmetic, far
+  from the option that caused it. Both now read through `DpExchange.Core.Config.opt/3`,
+  which differs from `Keyword.get/3` in exactly that one case, and a value that is not a
+  non-negative integer now raises `ArgumentError` at start naming the option and the
+  venue's documented `0..120` range — `0` remains legal and distinct from "said nothing".
+
+  `Feed.init/1` passed `:interval_ms` to `Core.PollingFeed` unchecked, and `PollingFeed`
+  does not validate it either. A zero, negative or fractional value therefore did **not**
+  fail `start_link/1` — it returned `{:ok, pid}` and crashed later, inside the poller, the
+  first time `Process.send_after/3` was handed the delay, which under `:one_for_one` is a
+  restart loop rather than a refusal. It is now refused at `init/1`.
+  `DpExchange.Coinbase.Feed`'s `validate_shard_spacing_ms!/1` is the same guard for the
+  same reason; this venue had none. Zero is refused here, unlike Coinbase's shard spacing
+  where zero is a real if extreme choice: a poll interval of zero is not a fast poll, it is
+  a process that reschedules itself with no delay and spends the venue's whole rate budget
+  in one continuous burst.
+
+- **BREAKING: `Fake` reported a missing credential as `{:refused, :missing_credentials}`,
+  disagreeing with its own real facade.** The facade's own private `credentials/1`
+  plumbing and `Auth.headers/2` have always answered
+  `{:error, {:missing_credentials, :schwab}}`;
+  `Fake.require_credentials/1` — the helper behind thirteen call sites, market data and
+  account surface alike — answered a `:refused` tuple with a bare atom instead. Both halves
+  were wrong. `DpExchange.Core.Venue`'s own moduledoc reserves `{:refused, reason}` for the
+  venue's own permanent word about a request it **received**, and a call refused for want
+  of a local credential never reaches Schwab at all; and the payload shape differed from
+  the real one, so a consumer matching the real facade's error could not match the fake's.
+  Now `{:error, {:missing_credentials, :schwab}}` in both. Assertion 17 cannot catch this —
+  it asserts only that the result is not `{:ok, _}`, never that the refusal has the same
+  shape as the real venue's.
+
+- **BREAKING: `Fake` answered `{:ok, _}` with no credentials on five endpoints, on a venue
+  where every single call requires OAuth.** `get_positions/1`, `get_option_chain/2`,
+  `get_option_expirations/2`, `get_screener/2` and `get_transactions/2` never inspected
+  credentials at all — `get_transactions/2` bound them as `_credentials` outright — while
+  each real counterpart reaches the venue through `Rest`'s `get/3` → `Auth.headers/2` path
+  and answers `{:error, {:missing_credentials, :schwab}}` without one. A consumer's suite
+  calling any of them with no credentials and asserting success was going green against
+  behaviour this venue does not have. All five now gate through the existing
+  `require_credentials/1` helper, checked before each call's own argument validation so the
+  refusal point matches the real order, not just the final answer.
+
+  **Why assertion 17 did not catch it, even though this venue declares
+  `credential_benefit: :required`.** The assertion gates on `Core.AdapterContract`'s
+  hardcoded `@credentialed` list — `get_balances`, `get_accounts`, `get_fees`,
+  `get_transfers`, `place_order`, `cancel_order`, `get_order`, `get_orders`,
+  `get_trade_history` — which names none of the five. That list predates the widened
+  callback surface and was never extended with it, so a venue can pass assertion 17 with
+  its whole options/positions/screener/transactions surface ungated. Found by a
+  cross-package audit comparing all five venue packages against each other, which found the
+  identical gap in `dp_exchange_webull`'s fake on its own widened surface — a property of
+  the assertion's fixed list rather than of either venue, and the durable fix belongs in
+  Core.
+
+- **BREAKING: `get_transactions/2` reported a missing account hash as
+  `{:error, {:account_hash_required, :schwab}}` while every other account endpoint reported
+  the identical condition as `{:error, {:missing_account_hash, :schwab}}`.** One condition,
+  two spellings, on the same facade — so a consumer handling "you forgot the account hash"
+  uniformly could not, and `CLAUDE.md`'s own refusal table documents only the second. Both
+  the facade (`DpExchange.Schwab.get_transactions/2`) and `Fake` now go through the shared
+  `account_hash/1` / `require_account/1` helper and answer `{:missing_account_hash,
+  :schwab}`. The sibling atoms on that call, `:from_and_to_required` and `:types_required`,
+  are unchanged — they name genuinely different conditions that appear nowhere else.
 
 - **`capabilities/0` declared four streamable kinds this package could not deliver —
   `:order_book`, `:candles`, `:orders` and `:fills` — found by a documentation-accuracy

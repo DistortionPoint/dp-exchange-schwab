@@ -84,7 +84,7 @@ defmodule DpExchange.Schwab.Supervisor do
 
   use Supervisor
 
-  alias DpExchange.Core.DefaultRateLimiter
+  alias DpExchange.Core.{Config, DefaultRateLimiter}
   alias DpExchange.Schwab.{Feed, OrderLimit}
 
   # Reads are documented as unthrottled. This is a courtesy ceiling rather than a measured
@@ -109,8 +109,11 @@ defmodule DpExchange.Schwab.Supervisor do
 
   @impl true
   def init(opts) do
-    declared? = Keyword.has_key?(opts, :order_limit_per_minute)
-    order_limit = Keyword.get(opts, :order_limit_per_minute, @default_order_limit)
+    validate_ceiling!(opts, :order_limit_per_minute)
+    validate_ceiling!(opts, :read_limit_per_minute)
+
+    declared? = declared?(opts, :order_limit_per_minute)
+    order_limit = ceiling(opts, :order_limit_per_minute, @default_order_limit)
 
     children = [
       {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
@@ -149,8 +152,8 @@ defmodule DpExchange.Schwab.Supervisor do
   """
   @spec limits(keyword()) :: map()
   def limits(opts) do
-    reads = Keyword.get(opts, :read_limit_per_minute, @default_read_limit)
-    orders = Keyword.get(opts, :order_limit_per_minute, @default_order_limit)
+    reads = ceiling(opts, :read_limit_per_minute, @default_read_limit)
+    orders = ceiling(opts, :order_limit_per_minute, @default_order_limit)
 
     %{
       default: %{limit: reads, per_ms: 60_000, burst: reads},
@@ -170,5 +173,43 @@ defmodule DpExchange.Schwab.Supervisor do
         scope: :account
       }
     }
+  end
+
+  # ## An explicit `nil` is silence, not a registration
+  #
+  # `Keyword.has_key?/2` answers `true` for `order_limit_per_minute: nil`, and
+  # `Keyword.get/3` returns that `nil` rather than the default — it substitutes only for an
+  # ABSENT key, never for one present and `nil`. So a consumer forwarding an
+  # `Application.get_env/2` lookup that resolved to nothing got `declared? == true`, a
+  # claim that the host stated a real registration, together with `limit: nil`.
+  #
+  # `max(nil, 1)` is `nil` under Erlang term ordering — an atom sorts above every number —
+  # so that `nil` reached `DefaultRateLimiter` as `limit: nil, burst: nil` and failed in
+  # its arithmetic, far from the option that caused it. Worse than the crash: `declared?`
+  # was the thing this whole module exists to get right, and an explicit `nil` is exactly
+  # the shape of "the host said nothing", which is the case `@default_order_limit` and
+  # `OrderLimit` were built for.
+  #
+  # This is the same forwarded-`opts` trap behind this family's three `rate_limit_blocking`
+  # incidents, and `DpExchange.Core.Config.opt/3` is the shared answer to it: `Keyword.get/3`
+  # with the one difference that a present-and-`nil` value is treated as absent.
+  defp ceiling(opts, key, default), do: Config.opt(opts, key, default)
+
+  defp declared?(opts, key), do: not is_nil(Config.opt(opts, key, nil))
+
+  # Fails at start rather than deep inside the limiter's arithmetic. `0` is legal and
+  # meaningful — a registration granting no order throughput — so the floor is zero, not
+  # one. Anything that is not a non-negative integer cannot be a ceiling at all.
+  defp validate_ceiling!(opts, key) do
+    case Config.opt(opts, key, 0) do
+      value when is_integer(value) and value >= 0 ->
+        :ok
+
+      value ->
+        raise ArgumentError,
+              "#{inspect(key)} must be a non-negative integer, got: #{inspect(value)}. " <>
+                "Schwab's documented range is 0..120 per minute per account, set per " <>
+                "application at registration; 0 is legal and means no order throughput."
+    end
   end
 end

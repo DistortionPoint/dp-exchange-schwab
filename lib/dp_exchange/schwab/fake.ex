@@ -19,13 +19,45 @@ defmodule DpExchange.Schwab.Fake do
 
   Starts nothing. `start_link/1` returns `:ignore`, so a consumer that swaps this in does
   not find a process it did not ask for.
+
+  ## Failure injection
+
+  Wired to `DpExchange.Core.FakeInjection`, the same deterministic seam the other four
+  venue packages in this family expose. This package was the only one with no wiring at
+  all — a cross-package audit found it, and `usage-rules/testing.md` states the convention
+  as "every venue's `Fake` is wired to `DpExchange.Core.FakeInjection`". A consumer
+  exercising its own retry or alerting code against several venues could not point that
+  code at Schwab.
+
+  The market-data and account/order callbacks with a real success path check
+  `FakeInjection.next_outcome/2` first, so a queued or always-set outcome from
+  `queue_failures/2,3` or `fail_always/2,3` short-circuits the normal logic and is returned
+  as-is. `require_credentials/1` honours `FakeInjection.bypass_credentials/1`, which matters
+  more here than anywhere else in the family: this venue has **no anonymous surface at
+  all**, so without a bypass there is no way to exercise dispatch or decode logic without
+  constructing a credential map for every call.
+
+  **Not everything is wired, and the gaps are deliberate.** `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` each take a list of symbols in one call, and
+  "this one symbol in the batch fails, the rest succeed" is a case whole-call injection
+  cannot express. `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` are local
+  bookkeeping that always succeeds by construction, not a call standing in for one the
+  venue could refuse.
+
+  **The widened surface is not wired yet** — `get_option_chain/2`,
+  `get_option_expirations/2`, `get_screener/2`, `get_transactions/2` and
+  `get_rate_limit_status/2` have real success paths but no injection point. They gate
+  credentials correctly; they just cannot yet be made to fail on demand. Stated here rather
+  than left to be discovered, because a caller reaching for `queue_failures/2` against one
+  of them will otherwise get the fake's normal answer and read it as the injection not
+  working.
   """
 
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.Types.{Balance, Candle, Quote, TopOfBook}
 
-  alias DpExchange.Core.{Types, Venue}
+  alias DpExchange.Core.{FakeInjection, Notice, Types, Venue}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Orders, Rest, SymbolFormat}
 
@@ -87,6 +119,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_price(symbol, opts \\ []) do
+    with_injection(symbol, fn -> do_get_price(symbol, opts) end)
+  end
+
+  defp do_get_price(symbol, opts) do
     with :ok <- require_credentials(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, price} <- fetch_price(native) do
@@ -103,6 +139,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
+    with_injection(symbol, fn -> do_get_top_of_book(symbol, opts) end)
+  end
+
+  defp do_get_top_of_book(symbol, opts) do
     with :ok <- require_credentials(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, price} <- fetch_price(native) do
@@ -129,6 +169,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_historical_prices(symbol, timeframe, range, opts \\ []) do
+    with_injection(symbol, fn -> do_get_historical_prices(symbol, timeframe, range, opts) end)
+  end
+
+  defp do_get_historical_prices(symbol, timeframe, range, opts) do
     with :ok <- require_credentials(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          :ok <- check_timeframe(timeframe),
@@ -177,6 +221,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_symbols(opts \\ []) do
+    with_injection(nil, fn -> do_get_symbols(opts) end)
+  end
+
+  defp do_get_symbols(opts) do
     with :ok <- require_credentials(opts) do
       case Keyword.get(opts, :query) do
         query when is_binary(query) and query != "" ->
@@ -222,6 +270,10 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def market_status(opts \\ []) do
+    with_injection(nil, fn -> do_market_status(opts) end)
+  end
+
+  defp do_market_status(opts) do
     with :ok <- require_credentials(opts) do
       {:ok, Keyword.get(opts, :market_status, :open)}
     end
@@ -234,6 +286,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_accounts(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_accounts(credentials, opts) end)
+  end
+
+  defp do_get_accounts(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials) do
       {:ok, [%{account_number: "123456789", hash: Keyword.get(opts, :account_hash, "FAKEHASH")}]}
     end
@@ -241,6 +297,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_balances(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_balances(credentials, opts) end)
+  end
+
+  defp do_get_balances(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
       {:ok,
@@ -265,6 +325,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def place_order(credentials, request, opts \\ []) do
+    with_injection(nil, fn -> do_place_order(credentials, request, opts) end)
+  end
+
+  defp do_place_order(credentials, request, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts),
          # The real refusals, from the real module — a fake that accepted an order the
@@ -282,6 +346,10 @@ defmodule DpExchange.Schwab.Fake do
   # publishes as invalid must be refused here too.
   @impl true
   def preview_order(credentials, request, opts \\ []) do
+    with_injection(nil, fn -> do_preview_order(credentials, request, opts) end)
+  end
+
+  defp do_preview_order(credentials, request, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts),
          {:ok, _payload} <- Orders.build(request, opts) do
@@ -296,6 +364,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def replace_order(credentials, _order_id, request, opts \\ []) do
+    with_injection(nil, fn -> do_replace_order(credentials, request, opts) end)
+  end
+
+  defp do_replace_order(credentials, request, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts),
          {:ok, _payload} <- Orders.build(request, opts) do
@@ -307,6 +379,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def cancel_order(credentials, _order_id, opts \\ []) do
+    with_injection(nil, fn -> do_cancel_order(credentials, opts) end)
+  end
+
+  defp do_cancel_order(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
       :ok
@@ -315,6 +391,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
+    with_injection(nil, fn -> do_get_order(credentials, order_id, opts) end)
+  end
+
+  defp do_get_order(credentials, order_id, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
       {:ok, %{"orderId" => order_id, "status" => "FILLED"}}
@@ -323,6 +403,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_orders(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_orders(credentials, opts) end)
+  end
+
+  defp do_get_orders(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
       {:ok, []}
@@ -334,6 +418,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def test_connection(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_test_connection(credentials, opts) end)
+  end
+
+  defp do_test_connection(credentials, opts) do
     with {:ok, accounts} <- get_accounts(credentials, opts) do
       {:ok, %{accounts: length(accounts)}}
     end
@@ -393,8 +481,30 @@ defmodule DpExchange.Schwab.Fake do
         }
   def coverage_by_kind(opts \\ []), do: %{quotes: coverage(opts)}
 
+  @doc """
+  Registers for this fake's notice channel and delivers one, the way the real facade does.
+
+  This used to be `def subscribe_notices(_opts \\\\ []), do: :ok` — it discarded
+  `opts[:to]` and answered `:ok` unconditionally, so a consumer exercising its own notice
+  handling against this fake received nothing and had no way to distinguish that from a
+  venue with nothing to say.
+
+  It is the same defect `DpExchange.Schwab`'s own `subscribe_notices/1` had — a facade
+  backed by a real notice registry that discarded `opts[:to]` and answered `:ok` — which
+  `Core.AdapterContract`'s assertion 16 names as "mechanism built, documented, and never
+  wired". Fixing the real one and leaving the fake inert reproduces the gap in the one
+  tier every consumer actually runs. Coinbase's, Gemini's and Webull's fakes all send a
+  `:link_up` here; this one was the outlier.
+  """
   @impl true
-  def subscribe_notices(_opts \\ []), do: :ok
+  def subscribe_notices(opts \\ []) do
+    send(
+      Keyword.get(opts, :to, self()),
+      {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)}
+    )
+
+    :ok
+  end
 
   defp subscribed, do: Process.get(__MODULE__, [])
 
@@ -402,10 +512,41 @@ defmodule DpExchange.Schwab.Fake do
 
   # Market data needs credentials here exactly as it does on the real venue. A fake that
   # served quotes anonymously would let a consumer build a code path the venue rejects.
+  #
+  # `{:error, {:missing_credentials, :schwab}}`, not `{:refused, _}`: a missing *local*
+  # credential never reaches the venue at all, and `DpExchange.Core.Venue`'s own moduledoc
+  # reserves `:refused` for the venue's own permanent word about a request it received.
+  # This matches `DpExchange.Schwab`'s own `credentials/1` plumbing exactly — a fake
+  # disagreeing with its own real facade on the shape of this refusal is the same
+  # divergence assertion 17 exists to catch, one door down from a missing check entirely.
   defp require_credentials(opts) do
-    case Keyword.get(opts, :credentials) do
-      %{} = credentials when map_size(credentials) > 0 -> :ok
-      _absent -> {:refused, :missing_credentials}
+    if FakeInjection.credentials_bypassed?(:schwab) do
+      :ok
+    else
+      case Keyword.get(opts, :credentials) do
+        %{} = credentials when map_size(credentials) > 0 -> :ok
+        _absent -> {:error, {:missing_credentials, :schwab}}
+      end
+    end
+  end
+
+  # `Core.FakeInjection`, the family's deterministic seam for making a fake fail on demand.
+  #
+  # This module had no wiring to it at all — the only one of the five venue packages
+  # without any. A consumer could not use `queue_failures/2,3` or `fail_always/2,3` to
+  # exercise its own retry, circuit-breaker or alerting code against this venue, and could
+  # not use `bypass_credentials/1` to write a dispatch-only test without assembling a
+  # credential map for every call. On the venue where **every** endpoint needs a credential
+  # and there is no sandbox to fall back on, that is the package where the seam is worth
+  # the most, not the least.
+  #
+  # Per-symbol targeting is real isolation: an override queued for one symbol can never be
+  # satisfied by, or interfere with, a call for another. Functions taking no symbol pass
+  # `nil` and match only a venue-wide override.
+  defp with_injection(symbol, fun) do
+    case FakeInjection.next_outcome(:schwab, symbol) do
+      {:override, outcome} -> outcome
+      :none -> fun.()
     end
   end
 
@@ -428,27 +569,33 @@ defmodule DpExchange.Schwab.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []) do
-    # A short, and no liquidation price — Schwab publishes none per position, and `nil`
-    # there is not safety.
-    {:ok,
-     [
-       %Types.Position{
-         symbol: "AAPL",
-         side: :short,
-         quantity: Decimal.new("100"),
-         instrument_type: :equity,
-         average_cost: Decimal.new("180.25"),
-         mark_price: nil,
-         notional_value: Decimal.new("-17500"),
-         realised_pnl: Decimal.new("25"),
-         unrealised_pnl: Decimal.new("-125"),
-         liquidation_price: nil,
-         leverage: nil,
-         venue_time: nil,
-         provider: :schwab
-       }
-     ]}
+  def get_positions(opts \\ []) do
+    with_injection(nil, fn -> do_get_positions(opts) end)
+  end
+
+  defp do_get_positions(opts) do
+    with :ok <- require_credentials(opts) do
+      # A short, and no liquidation price — Schwab publishes none per position, and `nil`
+      # there is not safety.
+      {:ok,
+       [
+         %Types.Position{
+           symbol: "AAPL",
+           side: :short,
+           quantity: Decimal.new("100"),
+           instrument_type: :equity,
+           average_cost: Decimal.new("180.25"),
+           mark_price: nil,
+           notional_value: Decimal.new("-17500"),
+           realised_pnl: Decimal.new("25"),
+           unrealised_pnl: Decimal.new("-125"),
+           liquidation_price: nil,
+           leverage: nil,
+           venue_time: nil,
+           provider: :schwab
+         }
+       ]}
+    end
   end
 
   @impl true
@@ -510,29 +657,32 @@ defmodule DpExchange.Schwab.Fake do
     do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_option_chain(underlying, _opts \\ []) do
-    call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :call)
-    put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :put)
-    lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("220"), :call)
+  def get_option_chain(underlying, opts \\ []) do
+    with :ok <- require_credentials(opts) do
+      call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :call)
+      put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :put)
+      lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("220"), :call)
 
-    {:ok,
-     %Types.OptionChain{
-       underlying: underlying,
-       expiries: %{
-         ~D[2026-03-20] => %{Decimal.new("200") => %{call: call, put: put}},
-         # A strike with one side only, which a caller iterating strikes has to see.
-         ~D[2026-06-19] => %{Decimal.new("220") => %{call: lone, put: nil}}
-       },
-       # Carried only when the venue sent it, and this fake did not ask for it.
-       underlying_price: nil,
-       venue_time: nil,
-       provider: :schwab
-     }}
+      {:ok,
+       %Types.OptionChain{
+         underlying: underlying,
+         expiries: %{
+           ~D[2026-03-20] => %{Decimal.new("200") => %{call: call, put: put}},
+           # A strike with one side only, which a caller iterating strikes has to see.
+           ~D[2026-06-19] => %{Decimal.new("220") => %{call: lone, put: nil}}
+         },
+         # Carried only when the venue sent it, and this fake did not ask for it.
+         underlying_price: nil,
+         venue_time: nil,
+         provider: :schwab
+       }}
+    end
   end
 
   @impl true
-  def get_option_expirations(_underlying, _opts \\ []),
-    do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+  def get_option_expirations(_underlying, opts \\ []) do
+    with :ok <- require_credentials(opts), do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+  end
 
   defp fake_contract(underlying, expiry, strike, right) do
     %Types.OptionContract{
@@ -583,41 +733,46 @@ defmodule DpExchange.Schwab.Fake do
   def get_news(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_screener(name, _opts \\ []) do
-    if name in Rest.movers_universes() do
-      {:ok,
-       [
-         %Types.ScreenerResult{
-           symbol: "AAPL",
-           screener: name,
-           # The venue's returned order, not a metric this fake ranked on.
-           rank: 1,
-           metrics: %{"netPercentChange" => 0.031, "volume" => 1_000_000},
-           venue_time: nil,
-           provider: :schwab
-         }
-       ]}
-    else
-      {:error, {:unknown_movers_universe, name}}
+  def get_screener(name, opts \\ []) do
+    with :ok <- require_credentials(opts) do
+      if name in Rest.movers_universes() do
+        {:ok,
+         [
+           %Types.ScreenerResult{
+             symbol: "AAPL",
+             screener: name,
+             # The venue's returned order, not a metric this fake ranked on.
+             rank: 1,
+             metrics: %{"netPercentChange" => 0.031, "volume" => 1_000_000},
+             venue_time: nil,
+             provider: :schwab
+           }
+         ]}
+      else
+        {:error, {:unknown_movers_universe, name}}
+      end
     end
   end
 
   @impl true
-  def get_transactions(_credentials, opts \\ []) do
-    # Every one of the venue's three required parameters, checked in the same order the
-    # package checks them.
-    cond do
-      not is_binary(Keyword.get(opts, :account_hash)) ->
-        {:error, {:account_hash_required, :schwab}}
+  def get_transactions(credentials, opts \\ []) do
+    # Credentials first, then every one of the venue's three required parameters, in the
+    # same order the package checks them. `require_account/1` rather than a second
+    # spelling of the same check: this is the identical condition every other account
+    # endpoint reports as `{:missing_account_hash, :schwab}`, and a consumer handling
+    # "you forgot the account hash" uniformly cannot do it against two different atoms.
+    with :ok <- require_credentials(credentials: credentials),
+         {:ok, _hash} <- require_account(opts) do
+      cond do
+        is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) ->
+          {:error, {:from_and_to_required, :schwab}}
 
-      is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) ->
-        {:error, {:from_and_to_required, :schwab}}
+        is_nil(Keyword.get(opts, :types)) ->
+          {:error, {:types_required, :schwab}}
 
-      is_nil(Keyword.get(opts, :types)) ->
-        {:error, {:types_required, :schwab}}
-
-      true ->
-        {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
+        true ->
+          {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
+      end
     end
   end
 

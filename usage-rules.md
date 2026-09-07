@@ -25,7 +25,20 @@ credentials = %{access_token: "…", refresh_token: "…", client_id: "…", cli
 `:access_token` alone is enough to sign. The rest are needed to refresh.
 
 **There is no anonymous surface — market data included.** A call without a token is refused
-locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent.
+locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent. Not
+`{:refused, _}`: `Core.Venue` reserves that for the venue's own word about a request it
+actually received, and a call with no credential never leaves this process.
+
+**`DpExchange.Schwab.Fake` enforces that on every endpoint, and five of them slipped
+before.** `Fake.get_positions/1`, `Fake.get_option_chain/2`,
+`Fake.get_option_expirations/2`, `Fake.get_screener/2` and `Fake.get_transactions/2`
+answered `{:ok, _}` with no credentials at all, on a venue where every single call needs
+OAuth. A consuming suite that called them without credentials and asserted success was
+going green against behaviour this venue does not have. If yours does, it needs updating —
+that is the fix, not a regression in it. They were missed because `dp_exchange_core`'s
+assertion 17 checks a fixed list of nine callback names that predates this surface and
+includes none of the five; passing that assertion is not evidence that the rest of a fake
+gates credentials.
 
 ## 3. Refresh, and persist what you get back
 
@@ -271,7 +284,11 @@ not an invitation to fetch one separately and pair two observations taken at two
 the venue to price against a number you chose.
 
 **`get_transactions/2` needs four things and defaults none of them**: `:account_hash`,
-`:from`, `:to` and `:types`. There is no "all" in the venue's type enum —
+`:from`, `:to` and `:types`. A missing `:account_hash` is
+`{:error, {:missing_account_hash, :schwab}}` — the same atom every other account endpoint
+here uses. It answered `{:account_hash_required, :schwab}` until 2026-09-07: one condition
+with two spellings, so a consumer handling "you forgot the account hash" uniformly could
+not. There is no "all" in the venue's type enum —
 `DpExchange.Schwab.transaction_types/0` lists the fifteen, and passing all fifteen is how
 you ask for everything. A default here would hand you a real ledger missing whichever kinds
 it left out.
@@ -340,3 +357,48 @@ behaviour surfaced as a rejection from Schwab itself. They now meter against
 `:schwab_orders`, the bucket `DpExchange.Schwab.Supervisor.limits/1` has always built for exactly this.
 `preview_order/3` is unaffected by both changes — it is not a throttled order write on
 this venue.
+
+**A bad ceiling now fails at start, and an explicit `nil` reads as silence.**
+`:order_limit_per_minute` and `:read_limit_per_minute` must be non-negative integers;
+anything else raises `ArgumentError` from this package's own `Supervisor`, at `start_link/1`, naming the option and
+the venue's documented range, rather than failing later inside the limiter's arithmetic
+where the message names neither. Passing `nil` — what a forwarded
+`Application.get_env/2` lookup produces when nothing was configured — now reads as "you
+said nothing", the same as omitting the key, instead of being taken as a stated
+registration carrying a `nil` ceiling. `:interval_ms` on the fallback poll is validated the
+same way: a zero, negative or fractional value is refused at start rather than crashing on
+the first tick inside `Process.send_after/3`, in another process, as a restart loop.
+
+## 13. Making the fake fail on demand
+
+`DpExchange.Schwab.Fake` is wired to `DpExchange.Core.FakeInjection`, the same seam the
+other four venue packages expose. Until now this package was the only one without it.
+
+```elixir
+DpExchange.Core.FakeInjection.queue_failures(:schwab, [{:error, :timeout}])
+DpExchange.Schwab.Fake.get_price("AAPL", credentials: creds)  #=> {:error, :timeout}
+DpExchange.Schwab.Fake.get_price("AAPL", credentials: creds)  #=> {:ok, %Quote{}}
+
+# Every call for one symbol fails, indefinitely; every other symbol is untouched:
+DpExchange.Core.FakeInjection.fail_always(:schwab, "MSFT", {:refused, :not_listed})
+```
+
+**`bypass_credentials/1` matters more here than on any other venue.** This one has no
+anonymous surface at all, so without it there is no way to exercise dispatch or decode
+logic without building a credential map for every call:
+
+```elixir
+DpExchange.Core.FakeInjection.bypass_credentials(:schwab)
+DpExchange.Schwab.Fake.get_price("AAPL", [])  #=> {:ok, %Quote{}}, no credentials needed
+```
+
+Injection is process-scoped through `Core.Config`, so it is `async: true` safe and reaches
+only the calling process and `Task`s it spawns — not a separately-supervised `GenServer`.
+
+**What is not wired.** `subscribe/2`, `unsubscribe/2` and `update_symbols/2` take a list of
+symbols in one call, and whole-call injection cannot express "this one symbol in the batch
+fails, the rest succeed". `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` are
+local bookkeeping that always succeeds by construction. And not yet wired, stated here
+rather than left to be discovered: `get_option_chain/2`, `get_option_expirations/2`,
+`get_screener/2`, `get_transactions/2` and `get_rate_limit_status/2` — they gate credentials
+correctly but cannot yet be made to fail on demand.

@@ -707,12 +707,17 @@ defmodule DpExchange.Schwab do
   the last three by the venue, and the first because every Schwab account endpoint addresses
   by the encrypted hash `get_accounts/2` returns. See
   `DpExchange.Schwab.Rest.get_transactions/3`, including why there is no "all types".
+
+  A missing `opts[:account_hash]` is `{:error, {:missing_account_hash, :schwab}}`, the same
+  atom every other account endpoint here uses. It answered `{:account_hash_required,
+  :schwab}` until a cross-package audit found this function carrying its own spelling of a
+  condition the shared `account_hash/1` helper already names — two atoms for one condition,
+  so a consumer handling "you forgot the account hash" uniformly could not.
   """
   @impl true
   def get_transactions(credentials, opts) do
-    case Keyword.get(opts, :account_hash) do
-      hash when is_binary(hash) -> Rest.get_transactions(credentials, hash, opts)
-      _missing -> {:error, {:account_hash_required, :schwab}}
+    with {:ok, hash} <- account_hash(opts) do
+      Rest.get_transactions(credentials, hash, opts)
     end
   end
 

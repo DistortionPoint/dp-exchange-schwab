@@ -96,6 +96,29 @@ defmodule DpExchange.Schwab.FeedTest do
     feed
   end
 
+  describe ":interval_ms is validated at init, not at the first tick" do
+    # `interval_ms` reaches `Core.PollingFeed` and ends up in `Process.send_after/3`, which
+    # accepts neither a negative nor a fractional delay — but not until the first tick, in
+    # another process, long after `start_link/1` answered `{:ok, pid}`. Under this tree's
+    # `:one_for_one` strategy that is a restart loop rather than a refusal, and the crash
+    # names the timer, not the option. Refused at `init/1` instead.
+    test "a non-positive or fractional interval is refused at start" do
+      for bad <- [0, -1, 1.5, "1000"] do
+        assert_raise ArgumentError, ~r/interval_ms must be a positive integer/, fn ->
+          Feed.init(interval_ms: bad)
+        end
+      end
+    end
+
+    # An explicit `nil` is what a forwarded, never-configured option looks like, and
+    # `Core.Config.opt/3` is what turns it back into the default rather than passing the
+    # `nil` through to the timer.
+    test "an absent or explicitly nil interval takes the default" do
+      assert {:ok, _state, _continue} = Feed.init([])
+      assert {:ok, _state2, _continue2} = Feed.init(interval_ms: nil)
+    end
+  end
+
   describe "the route a consumer actually got" do
     test "an injected socket streams, and coverage says so only once something arrives" do
       feed = start_feed(socket: fake_socket())

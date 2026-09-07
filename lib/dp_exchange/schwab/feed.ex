@@ -339,6 +339,8 @@ defmodule DpExchange.Schwab.Feed do
     snapshot = Keyword.get(opts, :config_snapshot, %{})
     apply_config(snapshot)
 
+    validate_interval_ms!(Config.opt(opts, :interval_ms, @interval_ms))
+
     subscriber = Keyword.get(opts, :subscriber, self())
 
     state = %{
@@ -570,7 +572,7 @@ defmodule DpExchange.Schwab.Feed do
         # dark. "schwab-fallback-poll" makes the source unambiguous in the text alone.
         label: "schwab-fallback-poll",
         symbols: MapSet.to_list(state.wanted),
-        interval_ms: Keyword.get(state.opts, :interval_ms, @interval_ms),
+        interval_ms: Config.opt(state.opts, :interval_ms, @interval_ms),
         start_delay_ms: Keyword.get(state.opts, :start_delay_ms),
         sink: fn quote_struct -> send(subscriber, {:dp_exchange, :schwab, quote_struct}) end,
         on_refusal: fn symbol, reason ->
@@ -712,6 +714,30 @@ defmodule DpExchange.Schwab.Feed do
   # is what carries it across that boundary.
   defp apply_config(snapshot) do
     Enum.each(snapshot, fn {key, value} -> Config.put_override(key, value) end)
+  end
+
+  # Refused at `init/1` rather than discovered later, because the failure this prevents is
+  # asynchronous and reads as something else entirely.
+  #
+  # `interval_ms` was passed to `Core.PollingFeed.start_link/1` unchecked, and
+  # `PollingFeed` does not validate it either. A negative or fractional value therefore
+  # does NOT fail `start_link/1` — it returns `{:ok, pid}` — and crashes later, inside the
+  # poller, the first time `Process.send_after/3` is handed the delay. Under this tree's
+  # `:one_for_one` strategy a persistently bad option becomes a restart loop rather than a
+  # clear refusal at boot, which is the fail-open-then-crash-obscurely shape this family
+  # refuses. `DpExchange.Coinbase.Feed`'s `validate_shard_spacing_ms!/1` is the same guard
+  # for the same reason; this venue had none.
+  #
+  # `0` is refused here, unlike Coinbase's shard spacing where zero is a real if extreme
+  # choice: a poll interval of zero is not a fast poll, it is a process that reschedules
+  # itself with no delay and spends the venue's entire rate budget in one continuous burst.
+  defp validate_interval_ms!(value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_interval_ms!(value) do
+    raise ArgumentError,
+          "interval_ms must be a positive integer, got: #{inspect(value)}. " <>
+            "It is handed to Core.PollingFeed and reaches Process.send_after/3, which " <>
+            "would accept neither — but not until the first tick, in another process."
   end
 
   # A dead subscriber stops delivery. The venue must not accumulate events for a process

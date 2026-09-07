@@ -168,6 +168,32 @@ defmodule DpExchange.SchwabTest do
       limits = Supervisor.limits(order_limit_per_minute: 0)
       assert limits.schwab_orders.limit >= 1
     end
+
+    # An explicit `nil` is what a consumer forwarding `Application.get_env/2` produces when
+    # nothing was configured. `Keyword.has_key?/2` answers `true` for it and
+    # `Keyword.get/3` returns the `nil` rather than the default, so the old code read it as
+    # "the host stated a registration" AND carried `limit: nil` into the limiter's
+    # arithmetic. `Core.Config.opt/3` treats present-and-nil as absent, which is the whole
+    # reason it exists.
+    test "an explicit nil ceiling reads as silence, not as a registration" do
+      assert Supervisor.limits(order_limit_per_minute: nil).schwab_orders ==
+               Supervisor.limits([]).schwab_orders
+
+      assert Supervisor.limits(read_limit_per_minute: nil).default ==
+               Supervisor.limits([]).default
+    end
+
+    # Fails at start rather than deep inside the limiter's GCRA arithmetic, where the
+    # message names neither the option nor the caller that set it.
+    test "a ceiling that is not a non-negative integer is refused at start" do
+      assert_raise ArgumentError, ~r/order_limit_per_minute must be a non-negative integer/, fn ->
+        Supervisor.init(order_limit_per_minute: -1)
+      end
+
+      assert_raise ArgumentError, ~r/read_limit_per_minute must be a non-negative integer/, fn ->
+        Supervisor.init(read_limit_per_minute: "120")
+      end
+    end
   end
 
   describe "place_order/3, replace_order/4, cancel_order/3 — the order-write gate" do
@@ -549,9 +575,9 @@ defmodule DpExchange.SchwabTest do
 
   describe "the fake refuses what the real venue refuses" do
     test "market data needs credentials here too" do
-      assert Fake.get_price("AAPL") == {:refused, :missing_credentials}
-      assert Fake.get_symbols() == {:refused, :missing_credentials}
-      assert Fake.market_status() == {:refused, :missing_credentials}
+      assert Fake.get_price("AAPL") == {:error, {:missing_credentials, :schwab}}
+      assert Fake.get_symbols() == {:error, {:missing_credentials, :schwab}}
+      assert Fake.market_status() == {:error, {:missing_credentials, :schwab}}
     end
 
     test "a quote is stamped with a fixed instant, so assertions do not flap" do
@@ -684,7 +710,7 @@ defmodule DpExchange.SchwabTest do
                {:error, {:missing_account_hash, :schwab}}
 
       assert Fake.get_historical_prices("AAPL", "1d", []) ==
-               {:refused, :missing_credentials}
+               {:error, {:missing_credentials, :schwab}}
 
       assert "AAPL" in Fake.listed()
       assert :ok = Fake.subscribe([])
