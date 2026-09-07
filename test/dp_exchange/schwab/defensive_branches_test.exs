@@ -373,6 +373,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
           retry_attempts: 0
         )
 
+      :ok = Schwab.Feed.subscribe(feed, ["AAPL"])
+
       assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 3_000
       assert Schwab.Feed.coverage(feed) == %{"AAPL" => :internal_poll}
     end
@@ -382,7 +384,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     } do
       # Only the adapter can tell a delisted symbol from a network blip, so only the
       # adapter decides. An unlisted symbol comes back absent from the quotes map.
-      {:ok, _feed} =
+      {:ok, feed} =
         Schwab.Feed.start_link(
           name: :"refusal_feed_#{System.unique_integer([:positive])}",
           symbols: ["ZZZZ"],
@@ -394,6 +396,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
           plug: responding(%{}),
           retry_attempts: 0
         )
+
+      :ok = Schwab.Feed.subscribe(feed, ["ZZZZ"])
 
       assert_receive {:dp_exchange, :schwab, {:refused, "ZZZZ", :not_listed}}, 3_000
     end

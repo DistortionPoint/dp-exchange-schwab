@@ -128,8 +128,8 @@ defmodule DpExchange.Schwab.FeedTest do
     # `Core.Config.opt/3` is what turns it back into the default rather than passing the
     # `nil` through to the timer.
     test "an absent or explicitly nil interval takes the default" do
-      assert {:ok, _state, _continue} = Feed.init([])
-      assert {:ok, _state2, _continue2} = Feed.init(interval_ms: nil)
+      assert {:ok, _state} = Feed.init([])
+      assert {:ok, _state2} = Feed.init(interval_ms: nil)
     end
   end
 
@@ -154,6 +154,10 @@ defmodule DpExchange.Schwab.FeedTest do
       # would spend the session wondering where depth went.
       feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
 
+      # The route is established on the first ask, not at boot — see the moduledoc's "A
+      # consumer that never subscribes must not find a socket open" section.
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       assert_receive {:dp_exchange, :schwab,
                       %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
                      2_000
@@ -166,21 +170,69 @@ defmodule DpExchange.Schwab.FeedTest do
       # that connects to nothing while every status looks healthy.
       feed = start_feed(plug: responding(%{"accounts" => []}), retry_attempts: 0)
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 2_000
       assert details.reason =~ "no_streamer_info"
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
     test "credentials with no access token cannot bootstrap even when the call succeeds" do
-      _feed =
+      feed =
         start_feed(
           credentials: %{},
           plug: responding(@user_preference),
           retry_attempts: 0
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 2_000
       assert details.reason =~ "missing_credentials"
+    end
+  end
+
+  describe "nothing is dialled before the first subscribe" do
+    # The invariant the whole family's supervision rule rests on: a consumer that
+    # supervises this package and never asks for anything must not find a socket open,
+    # and must not have caused a single request to reach the venue either — see the
+    # moduledoc's "A consumer that never subscribes must not find a socket open" section.
+    # Nothing currently pinned this, which is exactly how it drifted.
+    test "starting the feed makes no venue call and establishes no route" do
+      test_pid = self()
+
+      # Any request reaching this plug is itself the failure — proven by raising rather
+      # than by a timing assertion (`Process.sleep/1` is forbidden here for exactly this
+      # reason: it cannot tell "will never happen" from "hasn't happened yet").
+      plug = fn _conn ->
+        send(test_pid, :unexpected_venue_call)
+        raise "no request should have reached the venue before subscribe/2"
+      end
+
+      feed = start_feed(plug: plug, retry_attempts: 0, symbols: ["AAPL"])
+
+      # `status/1` is a synchronous call — it only returns once every message queued
+      # ahead of it (including any `init/1`-time continue, were one still wired) has been
+      # processed, so this is a real fence, not a race against `Process.sleep/1`.
+      assert %{route: nil, delivering: 0, wanted: 1, last_error: nil} = Feed.status(feed)
+      assert Feed.coverage(feed) == %{}
+      assert Feed.coverage_by_kind(feed) == %{}
+      refute_received :unexpected_venue_call
+    end
+
+    test "subscribing is what actually dials, and only then" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, :venue_call)
+        Plug.Conn.resp(conn, 401, "no")
+      end
+
+      feed = start_feed(plug: plug, retry_attempts: 0)
+      refute_received :venue_call
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      assert_receive :venue_call, 2_000
     end
   end
 
@@ -288,6 +340,10 @@ defmodule DpExchange.Schwab.FeedTest do
     test "sends nothing when nothing is wanted" do
       socket = fake_socket()
       feed = start_feed(socket: socket)
+      # No symbols wanted — an empty `subscribe/2` is what puts this feed on the `:stream`
+      # route at all now that nothing does so on its own at boot; see the moduledoc's "A
+      # consumer that never subscribes must not find a socket open" section.
+      :ok = Feed.subscribe(feed, [])
 
       send(feed, :resubscribe)
       Feed.coverage(feed)
@@ -300,6 +356,7 @@ defmodule DpExchange.Schwab.FeedTest do
       feed =
         start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
 
       send(feed, :resubscribe)
@@ -470,6 +527,7 @@ defmodule DpExchange.Schwab.FeedTest do
           symbols: ["AAPL"]
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
       assert %{route: :internal_poll} = Feed.status(feed)
 
       new_credentials = Map.put(@credentials, :access_token, "fresh-token")
@@ -497,6 +555,8 @@ defmodule DpExchange.Schwab.FeedTest do
           symbols: ["AAPL"]
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
       assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
       assert %{route: :internal_poll} = Feed.status(feed)
@@ -519,6 +579,8 @@ defmodule DpExchange.Schwab.FeedTest do
           start_delay_ms: 0,
           symbols: ["AAPL"]
         )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
 
@@ -589,6 +651,7 @@ defmodule DpExchange.Schwab.FeedTest do
           symbols: ["AAPL"]
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
       :ok = Feed.subscribe_notices(feed, to: self())
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
@@ -617,6 +680,7 @@ defmodule DpExchange.Schwab.FeedTest do
           symbols: ["AAPL"]
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
       :ok = Feed.subscribe_notices(feed, to: self())
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
@@ -640,6 +704,7 @@ defmodule DpExchange.Schwab.FeedTest do
           symbols: ["AAPL"]
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
       :ok = Feed.subscribe_notices(feed, to: self())
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
@@ -822,6 +887,8 @@ defmodule DpExchange.Schwab.FeedTest do
           limiter: exhausted_limiter()
         )
 
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       # check/3 would refuse immediately and never retry inside this window (the next
       # tick is 60s away) — only acquire/3 (the default) delivers here at all. The
       # bootstrap's own `/userPreference` call shares this same limiter and opts, so it
@@ -843,6 +910,8 @@ defmodule DpExchange.Schwab.FeedTest do
           limiter: exhausted_limiter(),
           rate_limit_blocking: false
         )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       refute_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 1_500
       assert Process.alive?(feed)

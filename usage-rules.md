@@ -431,3 +431,30 @@ made afterward is gone. Nothing inside this package can replay those calls — i
 held onto the functions or the process that made them. If your consumer needs to survive
 a `Feed` restart unattended, monitor the `Feed` pid (or the `DpExchange.Schwab` pid it
 sits under) yourself and re-issue `subscribe/2` on `:DOWN`.
+
+## 15. Nothing is dialled until you subscribe
+
+Supervising this package — `{DpExchange.Schwab, opts}` in your own tree, or
+`DpExchange.Schwab.Supervisor.start_link/1` directly — starts a `Feed` that does **not**
+reach the venue on its own. No `GET /userPreference`, no Streamer `LOGIN`, no poll —
+until you call `subscribe/2` or `update_symbols/2` for the first time. Before that,
+`status/1` reports `route: nil`, and `coverage/1`/`coverage_by_kind/1` report `%{}`, the
+same honest "nothing has happened" answer this package already gives a symbol you
+subscribed and that has not delivered yet.
+
+This was not always true, and if you built against an earlier version it is worth
+knowing what changed. Before 2026-09-07 this package dialled the venue unconditionally
+at boot — `Feed.init/1` scheduled a continue that ran before any `subscribe/2` could
+reach it, so a tree that supervised this package and never subscribed anything still
+made a signed request and, on success, opened a live Streamer session, with no notice
+about it either way. Every other venue in this family defers dialling to the first ask;
+this one did not, until now. **If your consumer relied on data already arriving the
+instant your supervision tree came up — with no `subscribe/2` call of your own — that
+behaviour is gone.** Call `subscribe/2` explicitly, the same as you already do for every
+other venue.
+
+One consequence worth naming: if the Streamer cannot bootstrap, the `Notice{kind:
+:degraded}` telling you so now fires on your first `subscribe/2` rather than at boot.
+That is later than before for a consumer that does subscribe, and irrelevant for one
+that never does — a feed nothing has asked anything of has no route to be degraded
+about.

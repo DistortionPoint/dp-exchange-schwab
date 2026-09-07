@@ -33,6 +33,58 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **This was the one venue in the family that dialled the Streamer at boot, before any
+  `subscribe/2` — a family-wide rule violation found by a 2026-09-07 cross-package
+  audit.** `CLAUDE.md` states it plainly: "A library does not start itself… A consumer
+  who has not asked for a venue must not find a socket open." `Feed.init/1` ended with
+  `{:ok, state, {:continue, :connect}}`, and `handle_continue(:connect, state)` called
+  `ensure_route/1` immediately — a signed `GET /userPreference` and, on success, a live
+  Streamer `LOGIN`, for a tree that had never subscribed a single symbol.
+  `dp_exchange_coinbase`, `dp_exchange_gemini`, `dp_exchange_webull` and
+  `dp_exchange_robinhood` were all checked and all four already deferred dialling to
+  `subscribe/2` or a first tick; this package did not. Reproduced directly: a feed
+  started with a `:plug` that raises on any request, never subscribed, made no request —
+  before the fix, the same setup logged a real `GET
+  https://api.schwabapi.com/trader/v1/userPreference` from `start_link/1` alone.
+
+  The eager dial was incidental, not load-bearing: `ensure_route/1` was already
+  reachable from `handle_call({:subscribe, …})` and `handle_call({:update_symbols, …})`,
+  both of which call it before replying, so every path a consumer actually uses to ask
+  for data already established the route on demand. `{:continue, :connect}` is now gone
+  from `init/1`; the route is established on the first `subscribe/2` or
+  `update_symbols/2`, exactly as it already was for a second and every later call.
+
+  This is also why `dp_exchange_core`'s conformance suite had to ship assertion 18
+  ("link safety") as a *static* check on compiled abstract code rather than the stronger
+  behavioural one — start the tree, kill a linked child, assert `Feed` survives — that
+  was designed first: starting this package's real tree was not reliably network-free.
+  This fix is what makes that stronger check safe to write for the whole family.
+
+  Fixing this surfaced a second, independent defect it had been masking:
+  `Feed.status/1`'s fallback clause hardcoded `route: :stream` in its reply, correct only
+  because `state.route` had always already been set by the time any `handle_call` could
+  run — no caller could previously observe the window between "started" and "routed".
+  Deferring the dial made that window real. `status/1` now reports `state.route` itself,
+  which reads `nil` before the first `subscribe/2` rather than a stream connection that
+  was never dialled.
+
+  **Behaviour change:** a consumer that supervises this package and never calls
+  `subscribe/2` no longer causes any request to reach the venue, and no longer opens a
+  Streamer session. If you relied on data already arriving the instant your supervision
+  tree came up, with no `subscribe/2` of your own, that no longer happens — call
+  `subscribe/2` explicitly, the same as every other venue in this family already
+  requires. Nothing changes for a consumer that does subscribe: the route is established
+  at that call exactly as it always was, and `Notice{kind: :degraded}` still fires at
+  that same moment if the Streamer cannot bootstrap — now on first `subscribe/2` rather
+  than at boot, which is the tradeoff this fix makes: a consumer that never subscribes
+  has no route to be degraded about in the first place.
+
+  Proven by `test/dp_exchange/schwab/feed_test.exs`, "nothing is dialled before the
+  first subscribe" — asserts no venue call and `status/1` reporting `route: nil` for a
+  feed that was started but never subscribed, and that `subscribe/2` is what actually
+  triggers the first request. `mix quality` clean, `mix test --cover` at 91.14%, and
+  `dp_exchange_core` bumped to 0.1.61 to run assertion 18.
+
 - **A reconnect meant silence until a consumer noticed, and a crashed socket or poller
   took the whole `Feed` down with it.** Two related supervision defects, found by a
   2026-09-07 cross-package audit:

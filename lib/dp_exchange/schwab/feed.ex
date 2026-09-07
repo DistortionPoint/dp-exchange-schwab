@@ -192,6 +192,66 @@ defmodule DpExchange.Schwab.Feed do
   delivering, not a partial set — reports a `:link_down` `Core.Notice`, and immediately
   calls `ensure_route/1` again: a fresh Streamer bootstrap if the credential still works,
   falling back to the poll the same way a first-ever bootstrap failure already does.
+
+  ## A consumer that never subscribes must not find a socket open — this venue was the one exception
+
+  The family's own rule, from `CLAUDE.md`, is explicit: **"A library does not start
+  itself… A consumer who has not asked for a venue must not find a socket open."** Until
+  now this module violated it, unconditionally: `init/1` ended with
+  `{:ok, state, {:continue, :connect}}`, and `handle_continue(:connect, state)` called
+  `ensure_route/1` immediately — before a single `subscribe/2` had ever been received. A
+  tree that supervised this package and never subscribed anything still got
+  `Rest.get_user_preference/2` (a signed request against the venue) and, on success, a
+  live Streamer `LOGIN`. Found 2026-09-07, the same cross-package audit that found four
+  of five venues missing `Process.flag(:trap_exit, true)` (see above) — this time the
+  finding ran the other way: `dp_exchange_coinbase`, `dp_exchange_gemini`,
+  `dp_exchange_webull` and `dp_exchange_robinhood` were all checked and all four already
+  deferred dialling to `subscribe/2` or a first tick. Schwab was the only venue that
+  dialled at boot.
+
+  **The eager dial was incidental, not load-bearing.** `ensure_route/1` was already
+  reachable from `handle_call({:subscribe, symbols, subscriber}, _from, state)` and
+  `handle_call({:update_symbols, symbols}, _from, state)`, both of which call it before
+  replying — every path a consumer actually uses to ask for data already established the
+  route on demand. The `{:continue, :connect}` bought nothing beyond making the dial
+  happen earlier, for every consumer, including the ones who supervise this package and
+  never subscribe at all — which is exactly the scenario `dp_exchange_core`'s own
+  conformance suite needs to exercise for assertion 18, "link safety" (start the tree,
+  kill a linked child, assert `Feed` survives). That behavioural check was designed
+  first and rejected specifically because starting this package's real, non-fake tree
+  was not reliably network-free — this section is the reason why, and removing the
+  eager dial is what makes the stronger check safe to write for the whole family. See
+  `dp_exchange_core`'s CHANGELOG, "Unreleased", assertion 18.
+
+  Removing `{:continue, :connect}` from `init/1` surfaced a second, independent defect
+  it had been masking: `handle_call(:status, _from, state)`'s fallback clause hardcoded
+  `route: :stream` in its reply. That was correct in every case anyone could previously
+  observe — `state.route` was always already `:stream` or `:poll` by the time any
+  `handle_call` could run, because `init/1`'s `{:continue, :connect}` is processed
+  before any queued call, so no caller could ever see `state` between "started" and
+  "routed". Deferring the dial makes that window real and observable: a consumer calling
+  `status/1` before its first `subscribe/2` would have been told `route: :stream` while
+  nothing had dialled anything — the family's signature defect, a plausible value with
+  the wrong meaning. The fix reports `state.route` itself rather than the literal, which
+  still reads `:stream` once a route is established (nothing observable changes there)
+  and reads `nil`, honestly, before one ever is.
+
+  **What a consumer sees differently:** nothing about this package's data or behaviour
+  changes once `subscribe/2` is called — the route is established at that first call
+  exactly as it always was, and the same `Notice{kind: :degraded}` fires at that moment
+  if the Streamer cannot bootstrap. What changes is a consumer that never subscribes at
+  all: it used to get a silent OAuth call and, on success, an open Streamer session it
+  never asked for and no notice about; now it gets neither. `status/1` reports
+  `route: nil`, and `coverage/1`/`coverage_by_kind/1` report `%{}` — the same honest
+  "nothing has happened" answer this module already gives for a subscribed symbol that
+  has not yet delivered, extended to the case where nothing was ever subscribed at all.
+  A consumer that supervises this package as part of a larger tree it does not intend to
+  use yet — the exact scenario the family's rule exists for — no longer pays for a
+  connection, an OAuth call, or a Streamer session it never asked for. A tradeoff this
+  is worth naming rather than hiding: if the Streamer is unreachable, the `:degraded`
+  notice now fires on first `subscribe/2` rather than at boot. "Later, on first use" is
+  how every other venue in this family already behaves, and a consumer that never
+  subscribes has no route to be degraded about in the first place.
   """
 
   use GenServer
@@ -434,12 +494,12 @@ defmodule DpExchange.Schwab.Feed do
       config_snapshot: snapshot
     }
 
-    {:ok, state, {:continue, :connect}}
-  end
-
-  @impl true
-  def handle_continue(:connect, state) do
-    {:noreply, ensure_route(state)}
+    # No `{:continue, :connect}` — this process dials nothing until the first
+    # `subscribe/2` or `update_symbols/2` call reaches `ensure_route/1` on its own. See
+    # the moduledoc's "A consumer that never subscribes must not find a socket open"
+    # section for why an eager dial here used to happen anyway, and what depended on it
+    # (nothing did).
+    {:ok, state}
   end
 
   @impl true
@@ -516,9 +576,14 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_call(:status, _from, state) do
+    # `state.route` itself, never a literal `:stream`. This clause is also the answer
+    # before the first `subscribe/2`/`update_symbols/2` — see the moduledoc's "A consumer
+    # that never subscribes must not find a socket open" section — where `state.route` is
+    # `nil` and reporting `:stream` here would be exactly the plausible-wrong-answer this
+    # family refuses: a route that was never dialled, claimed as the live one.
     {:reply,
      %{
-       route: :stream,
+       route: state.route,
        delivering: map_size(state.delivering),
        wanted: MapSet.size(state.wanted),
        last_error: state.last_error
@@ -593,12 +658,28 @@ defmodule DpExchange.Schwab.Feed do
 
   defp ensure_route(%{route: route} = state) when route in [:stream, :poll], do: state
 
+  # Deliberately does not call `apply_symbols/1` on the `:stream` branch itself — every
+  # caller of `ensure_route/1` does that on its own once the route is settled
+  # (`handle_call({:subscribe, …})`, `handle_call({:update_symbols, …})` and
+  # `isolate_crashed_route/2` all follow the same `state = ensure_route(state);
+  # apply_symbols(state)` shape). This function used to apply symbols itself here, which
+  # was harmless only by accident: `ensure_route/1` used to run for the first time from
+  # `init/1`'s own `{:continue, :connect}`, always with an empty `state.wanted`, so the
+  # internal apply was a no-op and the caller's own apply — the only one that ever sent
+  # anything — never doubled up. Once the dial moved to the first `subscribe/2` or
+  # `update_symbols/2` call (see the moduledoc's "A consumer that never subscribes must
+  # not find a socket open" section), `state.wanted` is no longer empty the first time
+  # this branch runs, and the caller's own `apply_symbols/1` call right after would have
+  # sent every symbol a second time — a real, observable `SUBS` duplicate, not merely a
+  # harmless idempotent re-send. `start_poller/1`'s own branch needs no equivalent
+  # change: it already seeds `PollingFeed` with `state.wanted` at start, which is not a
+  # second send, it is the only one — a caller's own `apply_symbols/1` on the `:poll`
+  # route calls `PollingFeed.update_symbols/2` with the identical set, a genuinely
+  # idempotent no-op rather than a duplicate frame.
   defp ensure_route(state) do
     case start_socket(state) do
       {:ok, socket} ->
-        state = %{state | socket: socket, route: :stream}
-        apply_symbols(state)
-        state
+        %{state | socket: socket, route: :stream}
 
       # `{:refused, …}` and `{:error, …}` are different answers everywhere else in this
       # package and here they are not: the Streamer is unreachable either way, and the
@@ -642,11 +723,15 @@ defmodule DpExchange.Schwab.Feed do
     # Tries the Streamer first and falls back to the poll on failure, exactly like a
     # first-ever bootstrap — a poller crash is not assumed to mean "restart the same
     # route," since the credential that made the Streamer unreachable earlier may have
-    # been fixed since (`update_credentials/2`) in the meantime. Both of `ensure_route/1`'s
-    # own branches already apply `state.wanted` to the fresh route themselves (the
-    # `:stream` clause calls `apply_symbols/1` directly; `start_poller/1` seeds
-    # `PollingFeed` with `state.wanted` at start) — nothing further to do here.
-    ensure_route(state)
+    # been fixed since (`update_credentials/2`) in the meantime. `apply_symbols/1` is
+    # called explicitly here — the same shape `handle_call({:subscribe, …})` and
+    # `handle_call({:update_symbols, …})` both use — because `ensure_route/1`'s own
+    # `:stream` branch no longer applies symbols internally; see that function's own
+    # comment for why. On the `:poll` branch this is a harmless idempotent re-send:
+    # `start_poller/1` already seeded `PollingFeed` with `state.wanted` at start.
+    state = ensure_route(state)
+    apply_symbols(state)
+    state
   end
 
   defp failure_reason({:error, reason}), do: reason

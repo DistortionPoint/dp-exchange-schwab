@@ -432,6 +432,10 @@ defmodule DpExchange.SchwabTest do
         end
       end)
 
+      # The route is established on the first ask, not at boot — see `Feed`'s moduledoc,
+      # "A consumer that never subscribes must not find a socket open".
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
       assert Schwab.subscribe_notices(feed: name, to: self()) == :ok
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
@@ -480,6 +484,10 @@ defmodule DpExchange.SchwabTest do
           :exit, _reason -> :ok
         end
       end)
+
+      # The route is established on the first ask, not at boot — see `Feed`'s moduledoc,
+      # "A consumer that never subscribes must not find a socket open".
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       new_credentials = Map.put(@creds, :access_token, "fresh-token")
       assert Schwab.update_credentials(new_credentials, feed: name) == :ok
