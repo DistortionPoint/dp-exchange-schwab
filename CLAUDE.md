@@ -9,20 +9,25 @@ Guidance for Claude Code working in this repository.
 3. **NEVER save working files, text/mds and tests to the root folder**
 4. ALWAYS organize files in appropriate subdirectories
 5. ALWAYS do CI Checks before COMMIT
-6. NEVER COMMIT OR PUSH without confirmation
-7. MANAGE YOUR CONTEXT
-8. ALL TESTS MUST PASS — 0 failures allowed
-9. ALL Credo issues must pass. Not just some, not just critical, ALL
-10. NEVER USE PERL or PYTHON
-11. NEVER USE the SYSTEM TMP. NEVER MEANS NEVER. DO NOT EVER DO THIS
-12. NEVER REWRITE SHARED GIT HISTORY — no force-push, no rewriting a branch that has
-    been pushed, no `git reset --hard` over work you did not create. Ordinary git IS
-    allowed and expected: `status`, `diff`, `log`, `add`, `commit`, `rebase` onto
-    `origin`, `push`. Rule 6 is the gate on commit and push, and it is the only gate.
-    This rule was previously written as "NEVER USE GIT", which was wrong: publishing is
-    a merge to `main`, so that reading made the package pipeline unrunnable and turned a
-    self-imposed rule into a fake blocker handed back to the architect.
-13. NEVER USE KILL/PKILL UNSCOPED, only scoped to your specific things. NEVER MEANS NEVER. DO NOT EVER DO THIS
+6. MANAGE YOUR CONTEXT
+7. ALL TESTS MUST PASS — 0 failures allowed
+8. ALL Credo issues must pass. Not just some, not just critical, ALL
+9. NEVER USE PERL or PYTHON
+10. NEVER USE the SYSTEM TMP. NEVER MEANS NEVER. DO NOT EVER DO THIS
+11. NEVER CORRUPT GIT HISTORY — use merge and rebase correctly to maintain it. No
+    force-push, no rewriting a branch that has been pushed, no `git reset --hard` over
+    work you did not create. Ordinary git IS allowed and expected: `status`, `diff`,
+    `log`, `add`, `commit`, `merge`, `rebase` onto `origin`, `push`.
+
+    Two earlier phrasings of this rule were wrong, and both are recorded so neither comes
+    back. "NEVER USE GIT" made the package pipeline unrunnable, because publishing here IS
+    a merge to `main`. And a "NEVER COMMIT OR PUSH without confirmation" rule — which came
+    from outside this project and should never have been in this list — stalled three
+    agents that had finished gated, passing work, on an unattended loop that exists
+    precisely because nobody is there to answer. Each turned a self-imposed rule into a
+    fake blocker handed back to the architect. **A rule that stops the work it governs is
+    not a safe rule; it is a broken one.**
+12. NEVER USE KILL/PKILL UNSCOPED, only scoped to your specific things. NEVER MEANS NEVER. DO NOT EVER DO THIS
 
 **THIS REPO IS PUBLIC.** Every commit is a public commit, and git history is not
 retractable. Verify `.gitignore` covers `.env*` (except `.env.sample`) and `.mcp.json`
