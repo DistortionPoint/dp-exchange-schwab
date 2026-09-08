@@ -33,6 +33,21 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **Two venue facts were correctly measured/documented but not cited against
+  `spec-facts.md`, the file CLAUDE.md names as canonical for checking a declared value.**
+  Found by a family-wide sweep for constants encoding an unverified venue claim (the
+  `@pairs_per_socket`/`@shard_spacing_ms` defect class in `dp_exchange_coinbase`). Neither
+  number was wrong — this closes a citation gap, not a value change:
+  (1) The 30-minute access-token lifetime, stated in prose in `Auth`'s and `Capabilities`'
+  moduledocs, is now cited to `documentation/accounts-and-trading-production.txt:74` (a new
+  §6 in `spec-facts.md`) — the 7-day refresh-token figure already had one. The code itself
+  never hardcoded 30 minutes as a literal (`refresh/2` reads `expires_in` from the venue's
+  own response), so nothing here changes runtime behaviour.
+  (2) `SymbolFormat.@option_length` (21) had a correct in-code explanation of its own
+  arithmetic (6 + 6 + 1 + 8) but no citation at all. Now cited to the venue's own
+  `RRRRRRYYMMDDsWWWWWddd` format string (`documentation/market-data-production.txt:798`,
+  new §1a in `spec-facts.md`), which matches the existing arithmetic exactly.
+
 - **A crash of `Feed` or `Socket` printed OAuth credentials — the refresh token and
   client secret included — in cleartext, in OTP's own crash report.** `Feed` held
   `state.credentials` for its entire lifetime AND a second, unwrapped copy inside

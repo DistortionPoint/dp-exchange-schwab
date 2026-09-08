@@ -49,6 +49,18 @@ defaults to *the previous business day's close*, not to now.
 `Candle` carries `open`, `high`, `low`, `close`, `volume`, `datetime` (int64 epoch ms) and
 `datetimeISO8601`. Volume is present, so unlike Robinhood this venue can populate it.
 
+## 1a. Option symbol format — `documentation/market-data-production.txt`, `documentation/accounts-and-trading-production.txt`
+
+> Schwab-standard option symbol format: RRRRRRYYMMDDsWWWWWddd
+
+— `market-data-production.txt:798`, where `R` is the space-filled underlying root, `YYMMDD`
+the expiration, `s` the C/P side, `WWWWW` the whole-dollar strike and `ddd` its decimal
+portion: 6 + 6 + 1 + 5 + 3 = **21 characters**, fixed-width. The plain-language version in
+`accounts-and-trading-production.txt:130` breaks the same string down as "Underlying Symbol
+(6 characters) | Expiration (6 characters) | Call/Put (1 character) | Strike Price
+(5+3=8 characters)" — same total, same boundaries, worked example `XYZ   210115C00050000`.
+`SymbolFormat.@option_length` (`lib/dp_exchange/schwab/symbol_format.ex`) is this number.
+
 ## 2. Order vocabulary — `components.schemas`
 
 Read verbatim from `openapi/accounts-and-trading-production.openapi.json`.
@@ -206,8 +218,21 @@ substitution this family exists to refuse. This is recorded so the next person w
 signed-in portal session checks the Trader API product's Documentation tab specifically,
 rather than assuming either the 2025-10-30 promise or a stray search result.
 
+## 6. OAuth token lifetimes — `documentation/accounts-and-trading-production.txt`
+
 `components.securitySchemes.oauth` in both specs: `type: oauth2`, `flows:
 authorizationCode`. Three-legged, with a user redirect through Schwab's login site.
+
+> An Access Token is valid for 30 minutes on the Trader API.
+
+— line 74, repeated verbatim at lines 55, 94, 98, 102, 116 and 120 (the last two inside the
+worked `Access Token Response` / `Refresh Token Response` JSON examples, as
+`"expires_in": 1800` with an inline `//Valid for 30 minutes` comment). `Auth`'s moduledoc
+(`lib/dp_exchange/schwab/auth.ex`) states this figure in prose but never hardcodes it as a
+literal in the code: `refresh/2` computes `expires_at` from the venue's own `expires_in` on
+each token response, so a change to this number on Schwab's side is read correctly without
+a code change here — this citation exists so the prose claim itself has a source, not
+because any arithmetic depends on it.
 
 From `documentation/accounts-and-trading-production.txt`: the refresh token expires after
 **7 days** or on password reset, after which the full flow must be restarted — the app

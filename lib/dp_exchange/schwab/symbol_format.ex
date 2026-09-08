@@ -61,6 +61,12 @@ defmodule DpExchange.Schwab.SymbolFormat do
 
   # Schwab option symbols are exactly 21 characters: 6 underlying, 6 yymmdd, 1 C/P,
   # 8 strike. The width is the identifier, which is why matching on it is safe.
+  #
+  # Documentation-derived, not measured: `RRRRRRYYMMDDsWWWWWddd` —
+  # docs/reference/schwab/documentation/market-data-production.txt:798 (6 root + 6 date +
+  # 1 side + 5 whole strike + 3 decimal strike = 21), matching the plain-language "6
+  # characters ... 6 characters ... 1 character ... 5+3=8 characters" breakdown at
+  # accounts-and-trading-production.txt:130. See spec-facts.md §1a.
   @option_length 21
 
   @behaviour DpExchange.Core.SymbolNormalizer
