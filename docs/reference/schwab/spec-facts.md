@@ -181,7 +181,30 @@ in each, `https://api.schwabapi.com/marketdata/v1` and `https://api.schwabapi.co
 touching real money, and the environment split that Gemini needed has nothing to point at
 here. If Schwab ships one, the shape is already known from Gemini and can be added.
 
-## 6. Authentication
+### This claim's own expiry date has passed, unconfirmed either way — checked 2026-09-08
+
+**"Later this year" was written against 2025**, in a document dated 2025-10-30. It is now
+2026-09-08 — the promised year has elapsed with no newer document in this repository to
+supersede it, and the portal itself cannot be re-fetched anonymously (`403`, confirmed
+again this date) to check whether a Trader API sandbox has since shipped.
+
+A web search for independent confirmation turned up nothing from Schwab itself, and one
+result worth naming because it is the shape of trap `negative-claims.md` already warns
+about on this exact venue: a GitHub project titled "Schwab-API-Sandbox... a **mock**
+server for the official Schwab API" — a third party's own local stand-in, not Schwab's
+infrastructure — alongside an unrelated third-party article's unsourced claim that "a
+sandbox environment with synthetic accounts and data is available," which cites no vendor
+page and could easily be describing that same mock, the portal's general (non-Trader-API)
+Sandbox concept already documented above, or nothing verifiable at all. Neither is Schwab's
+own word, and this package's `negative-claims.md` names this precise failure mode by
+name — a derived artefact restating a vendor is not the vendor.
+
+**Verdict: unresolved, not confirmed either way, and said so rather than defaulted.** The
+"no sandbox" declaration stands unchanged because there is no vendor-sourced evidence to
+change it on — flipping it on a mock server's GitHub description would be exactly the
+substitution this family exists to refuse. This is recorded so the next person with a
+signed-in portal session checks the Trader API product's Documentation tab specifically,
+rather than assuming either the 2025-10-30 promise or a stray search result.
 
 `components.securitySchemes.oauth` in both specs: `type: oauth2`, `flows:
 authorizationCode`. Three-legged, with a user redirect through Schwab's login site.
