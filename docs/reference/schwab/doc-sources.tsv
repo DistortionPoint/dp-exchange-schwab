@@ -1,0 +1,21 @@
+# Vendor documentation pages this package cites, and what each one DID when a person read
+# it. Checked by `script/check_doc_sources.sh`; see that script's header for why this is
+# status-and-destination rather than a content diff, and why a redirect is the signal.
+#
+# Columns, tab-separated:
+#   url  expect_status  expect_location  observed_on  class  note
+#
+# `expect_location` is `-` when the page does not redirect. It is never left blank: TAB is
+# IFS whitespace, so a run of tabs collapses into one delimiter and every later column
+# shifts silently.
+#
+# `class` is `auto` (a machine can verify this) or `manual` (it cannot — a human must
+# re-read it, and the row goes STALE past 180 days to force that).
+#
+# Do not edit a row to make the check pass. The row records what someone READ; rewriting
+# it to match a fetch nobody looked at turns this file into a rubber stamp.
+https://developer.schwab.com/	403	-	2026-08-28	manual	The portal root. Anonymous readers get 403; everything below needs a signed-in session. This venue is the family's proof that a monitor assuming public documentation covers zero percent of the venues that need it most — and that the ones behind a login are disproportionately the brokerages, where being wrong moves real money.
+https://developer.schwab.com/products	403	-	2026-08-28	manual	Product landscape, captured to `portal-product-landscape.md`.
+https://developer.schwab.com/products/trader-api--individual	403	-	2026-08-28	manual	The product this package implements. Its two OpenAPI documents are committed under `openapi/` because they are fetched at runtime from a gateway on a different origin — a saved page carries the outline and not the specification.
+https://developer.schwab.com/user-guides	403	-	2026-08-28	manual	The 17 User Guides committed under `user-guides/`, including the OAuth flow.
+https://developer.schwab.com/dashboard	403	-	2026-08-28	manual	App registration and key management. NOTE, and it constrains any re-capture: the portal's `api-specification` endpoint returns the signed-in account's live `appKey` and `appSecret` in the same JSON as the specification, because that endpoint also feeds the "Try it" console. Redact BEFORE storing, never after.

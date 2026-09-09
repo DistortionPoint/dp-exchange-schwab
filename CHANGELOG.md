@@ -31,6 +31,33 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`script/check_doc_sources.sh` and `docs/reference/schwab/doc-sources.tsv`** — a weekly,
+  non-blocking check that every vendor documentation page this package cites still resolves
+  the way it did when a person read it. It records status and redirect destination and does
+  **not** follow redirects or diff content: a permanent redirect is itself the change notice
+  (this family lost a streaming API to one, announced by nothing else), while content
+  diffing a rendered docs site would be red every week for reasons that are never the reason
+  we care about. Built after auditing what would have caught each way five vendors'
+  documentation turned out to be wrong — across that whole sample a *changelog* diff caught
+  nothing, and an *index* diff was the only mechanism that ever fired. It earned itself
+  immediately: on its first run in `dp_exchange_webull` it caught a cited page that 404s, and
+  pulling that thread found a rate ceiling five times too permissive against that venue's own
+  per-endpoint table. Scheduled Mondays 09:20 UTC via
+  `.github/workflows/doc-sources-check.yml`, never on push, never in the publish chain.
+  Documentation sites only — never a venue API, which tier 2's never-on-a-schedule rule
+  still forbids.
+
+  All five rows here are class `manual`, and this venue is why that class exists.
+  `developer.schwab.com` answers `403` to an anonymous reader, so no link check, index diff
+  or changelog diff reaches it — the specification is committed to this repository instead
+  and re-capture is a human signing in. Those rows are checked for *stability* (a `403` that
+  stops being a `403` is itself news) and then reported with their age, going STALE past 180
+  days to force the re-capture rather than let a claim quietly get old. The `dashboard` row
+  carries the warning that the portal returns the signed-in account's live `appKey` and
+  `appSecret` in the same JSON as the specification: redact before storing, never after.
+
 ### Fixed
 
 - **Two venue facts were correctly measured/documented but not cited against

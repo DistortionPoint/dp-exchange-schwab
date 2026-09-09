@@ -1,0 +1,28 @@
+name: Vendor doc sources check
+
+on:
+  schedule:
+    # Weekly, Monday 09:20 UTC — twenty minutes after the dependency-floor check, so the
+    # two weekly notices do not land in the same minute.
+    #
+    # Deliberately NOT push/pull_request, for the same reason floor-check.yml is not, plus
+    # one of its own: this job's result depends entirely on a THIRD PARTY's web server. A
+    # vendor deploying their docs site, rate-limiting a CI runner's IP, or simply being
+    # down makes this red through no fault of anything in this repository. A per-push,
+    # blocking job with that failure mode trains reviewers to ignore red, which this family
+    # has already paid for once.
+    - cron: '20 9 * * 1'
+  workflow_dispatch:
+
+# Never a required check and never in ci.yml's `publish` job's `needs:` chain. A red run
+# here must not block a merge or the release pipeline that runs on every merge to main.
+# It is a notice that a vendor moved something, addressed to a person.
+jobs:
+  doc-sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No setup-beam: this check is curl and shell. It reads no Elixir and compiles
+      # nothing, so it has no reason to spend a BEAM install.
+      - run: bash script/check_doc_sources.sh
