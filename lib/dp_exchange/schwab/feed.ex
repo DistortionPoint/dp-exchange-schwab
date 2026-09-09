@@ -430,7 +430,13 @@ defmodule DpExchange.Schwab.Feed do
 
   @doc "Child spec, so a consumer supervises this the same way it supervises any venue."
   @spec child_spec(keyword()) :: Supervisor.child_spec()
+  # `Credentials.wrap_opt/1` for the same reason the venue module's own `child_spec/1` does
+  # it (dp-exchange-core issue #29): whatever supervises this child stores these args and
+  # OTP prints them on any termination. Reached here on the documented path already wrapped
+  # — this covers a consumer that supervises the feed directly.
   def child_spec(opts) do
+    opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
+
     %{
       id: Keyword.get(opts, :name, __MODULE__),
       start: {__MODULE__, :start_link, [opts]},
@@ -549,7 +555,7 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(:coverage, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply, PollingFeed.coverage(poller), state}
+    {:reply, poller_read(state, fn -> PollingFeed.coverage(poller) end, %{}), state}
   end
 
   def handle_call(:coverage, _from, state) do
@@ -564,7 +570,8 @@ defmodule DpExchange.Schwab.Feed do
   # No `:candles` key is invented here; candles cannot arrive on this route at all.
   def handle_call(:coverage_by_kind, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply, %{quotes: PollingFeed.coverage(poller)}, state}
+    {:reply,
+     poller_read(state, fn -> %{quotes: PollingFeed.coverage(poller)} end, %{quotes: %{}}), state}
   end
 
   def handle_call(:coverage_by_kind, _from, state) do
@@ -580,7 +587,12 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(:status, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply, poller |> PollingFeed.status() |> Map.put(:route, :internal_poll), state}
+    {:reply,
+     poller_read(
+       state,
+       fn -> poller |> PollingFeed.status() |> Map.put(:route, :internal_poll) end,
+       unresponsive_status(state)
+     ), state}
   end
 
   def handle_call(:status, _from, state) do
@@ -965,6 +977,67 @@ defmodule DpExchange.Schwab.Feed do
   # DpCryptoManagement's issue #15). Resolving first, uniformly, fixes both: a dead pid
   # resolves to itself and `Process.alive?/1` filters it; an unregistered name resolves
   # to `nil` and is silently skipped, the same as a dead subscriber already was.
+  # A READ must never be able to kill the thing it reads.
+  #
+  # dp-exchange-core issue #28, reported against `dp_exchange_robinhood` and true here for
+  # the same reason: on the `:poll` route these three handlers delegate into `PollingFeed`
+  # with `GenServer.call/2`'s default five-second timeout, and that process could not answer
+  # while a fetch was in flight — `:fetch_timeout_ms` floors at 30 seconds. A `coverage/1`
+  # landing during an ordinary poll was therefore a guaranteed timeout, and the exit
+  # propagated out of `handle_call/3` and killed `Feed`, which restarts from static opts
+  # that never carry a consumer's later `subscribe/2`. A health check took the venue to
+  # zero and left it there, alive and idle, passing every liveness probe.
+  #
+  # `Core.PollingFeed` no longer blocks on its fetch, which removes that cause. This stays
+  # anyway: a poller mid-restart, wedged by something else, or gone is a condition this
+  # `Feed` must survive, and no fix inside `PollingFeed` can promise it always answers.
+  #
+  # The fallbacks say the least that is true. `c:DpExchange.Core.Venue.coverage/1` returns a
+  # map, so an error tuple is not sayable there, and an absent symbol already means
+  # `:not_covered` — while replying with a REMEMBERED coverage would assert arrivals nobody
+  # confirmed, the "nearby substitute where an error belongs" this family keeps paying for.
+  # The notice carries what an empty map cannot: **"we could not ask" is not "nothing
+  # arrived"**, and only the notice distinguishes them.
+  defp poller_read(state, read, fallback) do
+    read.()
+  catch
+    :exit, reason ->
+      notify_poller_unresponsive(state, reason)
+      fallback
+  end
+
+  # `status/1`'s fallback needs a shape, and every field in it is chosen to avoid claiming
+  # health we did not observe: `delivering: false` and an explicit `last_error` say plainly
+  # that this answer came from a poller that did not respond, rather than from a poll.
+  # `symbols` is the one figure that is still genuinely known — it is this `Feed`'s own
+  # wanted set, not the poller's.
+  defp unresponsive_status(state) do
+    %{
+      delivering: false,
+      symbols: MapSet.size(state.wanted),
+      covered: 0,
+      failures_since_ok: 0,
+      last_error: :poller_unresponsive,
+      route: :internal_poll
+    }
+  end
+
+  # The counterpart to this module's crashed-link notice: that one reports a poller that
+  # died, this one a poller that is alive and did not answer. Both would otherwise be the
+  # same silent gap in `coverage/1` with nothing explaining it.
+  defp notify_poller_unresponsive(state, reason) do
+    notice =
+      Notice.new(:link_down, :schwab,
+        severity: :warning,
+        message:
+          "poll did not answer a read (#{inspect(reason)}) — reporting no coverage for " <>
+            "this read only; the feed is still running",
+        details: %{reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
+  end
+
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn subscriber ->
       case resolve_subscriber(subscriber) do

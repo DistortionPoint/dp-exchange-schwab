@@ -562,6 +562,60 @@ defmodule DpExchange.Schwab.FeedTest do
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
+    test "an unresponsive poller cannot kill the Feed — reads degrade, the venue stays up" do
+      # dp-exchange-core issue #28, reported against dp_exchange_robinhood and true here for
+      # the same reason: on this route all three of `coverage/1`, `coverage_by_kind/1` and
+      # `status/1` delegate into `PollingFeed` with `GenServer.call/2`'s five-second default,
+      # into a process that could not answer while a fetch was in flight. The exit
+      # propagated out of `handle_call/3` and killed `Feed`, which restarts from static opts
+      # that never carry a consumer's later `subscribe/2`.
+      #
+      # The poller is swapped for a dead pid rather than suspended, so the exit is an
+      # immediate `:noproc` rather than a five-second timeout: same `catch :exit` path,
+      # deterministic, and it costs the suite nothing.
+      feed =
+        start_feed(
+          plug: fn conn ->
+            if String.contains?(conn.request_path, "userPreference") do
+              Plug.Conn.resp(conn, 401, "no")
+            else
+              Req.Test.json(conn, quote_body())
+            end
+          end,
+          retry_attempts: 0,
+          interval_ms: 50,
+          start_delay_ms: 0,
+          symbols: ["AAPL"]
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 500
+
+      :sys.replace_state(feed, fn state -> %{state | poller: dead} end)
+
+      # All three reads answer instead of exiting, and none of them invents coverage.
+      assert Feed.coverage(feed) == %{}
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}}
+
+      status = Feed.status(feed)
+      refute status.delivering
+      assert status.last_error == :poller_unresponsive
+      assert status.route == :internal_poll
+
+      assert Process.alive?(feed)
+
+      # An empty map alone is indistinguishable from a venue delivering nothing. The notice
+      # is what says "we could not ask", which is a different fact about the world.
+      assert_receive {:dp_exchange, :schwab, %{kind: :link_down} = notice}, 500
+      assert notice.severity == :warning
+      assert notice.message =~ "did not answer a read"
+    end
+
     test "coverage_by_kind on the poll route reports only :quotes, never :order_book" do
       # Depth structurally cannot arrive on this route — the poller only ever calls
       # `Rest.get_price/3` — so there must be no `:order_book` key at all, not an empty one.

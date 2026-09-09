@@ -65,4 +65,30 @@ defmodule DpExchange.Schwab.Credentials do
   @spec wrap_token(String.t()) :: t()
   def wrap_token(access_token) when is_binary(access_token),
     do: %__MODULE__{access_token: access_token}
+
+  @doc """
+  Wraps the `:credentials` entry of an options keyword list, IN PLACE and only when that
+  key is actually present.
+
+  This is what keeps a raw secret out of a **supervisor's stored child spec**, and it has
+  to be applied in `child_spec/1` — nowhere later is early enough. A supervisor holds the
+  `{module, :start_link, [opts]}` MFA it was handed, and OTP writes that argument list
+  through `inspect/1` into the `Start Call:` line of the report it logs whenever the child
+  terminates. Wrapping inside `start_link/1` or `init/1` does nothing for it: by then the
+  raw list has already been captured by the supervisor above.
+
+  dp-exchange-core issue #29 — a consumer found live API keys in cleartext in ordinary
+  application logs, produced by any child crash at all, and nearly pasted them into a
+  GitHub issue while reporting a different bug.
+  """
+  @spec wrap_opt(keyword()) :: keyword()
+  def wrap_opt(opts) do
+    case Keyword.fetch(opts, :credentials) do
+      {:ok, credentials} when is_map(credentials) ->
+        Keyword.put(opts, :credentials, wrap(credentials))
+
+      _absent_or_not_a_map ->
+        opts
+    end
+  end
 end

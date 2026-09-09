@@ -31,6 +31,51 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A read-only coverage call could kill the feed — dp-exchange-core issue #28.**
+  `handle_call` delegated straight into `Core.PollingFeed` with `GenServer.call/2`'s
+  five-second default, into a process that could not answer while a fetch was in flight —
+  `:fetch_timeout_ms` floors at **30 seconds**, so a coverage read landing during an
+  ordinary poll was not unlucky, it was a guaranteed timeout. The exit propagated out of
+  `handle_call/3` and killed `Feed`, which restarts from the static opts its supervisor
+  holds and never carries a consumer's later subscriptions. The reporting consumer watched
+  a live venue go **61 pairs to 0 and stay there**, with the process alive, idle, and
+  passing every liveness check. Asking whether the venue was healthy is what made it
+  unhealthy.
+
+  `Core.PollingFeed` no longer blocks on its fetch, which removes the cause. These reads
+  are guarded here regardless, and it is not belt-and-braces: a poller mid-restart, wedged
+  by something else, or simply gone is a condition this `Feed` has to survive, and no fix
+  inside `PollingFeed` can promise it always answers.
+
+  The fallback says the least that is true. `c:DpExchange.Core.Venue.coverage/1` returns a
+  map, so an error tuple is not sayable, and an absent symbol already means
+  `:not_covered` — while replying with a **remembered** coverage would assert arrivals
+  nobody confirmed, the "nearby substitute where an error belongs" this family keeps paying
+  for. A `:link_down` notice carries what an empty map cannot: **"we could not ask" is not
+  "nothing arrived"**, and only the notice distinguishes them.
+
+- **Credentials were written to the log in cleartext by any crash — dp-exchange-core issue
+  #29.** A supervisor stores the `{module, :start_link, [opts]}` MFA its child spec names,
+  and OTP writes that argument list through `inspect/1` into the `Start Call:` line of the
+  report it logs on **any** child termination. `:credentials` arrived as a plain map, so
+  every crash printed the live secret in full. It needs no unusual conditions, it lands in
+  ordinary application logs — the artifact most likely to be shipped to an aggregator or
+  attached to a bug report — and it defeats credential hygiene upstream of it: a consumer
+  can hold the key encrypted at rest and still have it written out in the clear. The
+  reporting consumer found live keys this way and nearly pasted them into a GitHub issue
+  while reporting a different bug.
+
+  `child_spec/1` now wraps `:credentials` with `DpExchange.Schwab.Credentials.wrap_opt/1`, and
+  **the placement is the fix**: wrapping in `start_link/1` or `init/1` does nothing,
+  because by then the supervisor above has already captured the raw list. `Feed.child_spec/1` does the same, for a consumer supervising the feed directly. Redacting the
+  value rather than setting the `:sensitive` process flag is deliberate — that flag
+  suppresses the whole report, including the stack trace that made the unrelated bug
+  diagnosable. This keeps the report and removes only the secret. `dp_exchange_core`'s
+  conformance suite gains **assertion 22** for exactly this, so it cannot come back here or
+  arrive in a new venue.
+
 ### Added
 
 - **`script/check_doc_sources.sh` and `docs/reference/schwab/doc-sources.tsv`** — a weekly,
