@@ -905,6 +905,25 @@ defmodule DpExchange.Schwab.FeedTest do
     # two tests exercise the real limiter — `state.config_snapshot` captures whichever
     # module is active in the test process at the moment `start_feed/1` calls
     # `Feed.start_link/1`, so the override has to happen first.
+
+    # The bootstrap path (`Rest.get_user_preference/2`) reaches `Core.HttpClient`, which fails
+    # closed with "Rate limiter unavailable" when no limiter is named — so a test that means
+    # to exercise the Streamer bootstrap must supply one, or it silently measures the
+    # fallback-to-poll path instead. Learned the hard way while proving the blocking bug:
+    # without this the plug was never reached at all.
+    defp permissive_limiter do
+      name = :"limiter_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        start_supervised(
+          {DefaultRateLimiter,
+           name: name, limits: %{schwab: %{limit: 1_000, per_ms: 1_000, burst: 1_000}}},
+          id: name
+        )
+
+      name
+    end
+
     defp exhausted_limiter do
       name = :"limiter_#{System.unique_integer([:positive])}"
 
@@ -1064,6 +1083,100 @@ defmodule DpExchange.Schwab.FeedTest do
       message ->
         send(parent, {:relayed, message})
         relay(parent)
+    end
+  end
+
+  describe "a read cannot be blocked by a subscribe establishing the route (core #28's class)" do
+    test "coverage/1 answers while a subscribe is still bootstrapping the Streamer" do
+      # Establishing the Streamer route means a signed `Rest.get_user_preference/2` round
+      # trip plus a WebSocket connect. That used to run INLINE in `handle_call/3`, so a
+      # subscribe blocked this GenServer for the whole of it — and with `Core.HttpClient`'s
+      # documented defaults (30_000 ms per attempt, 3 attempts) that window reaches about
+      # ninety seconds. `coverage/1` and `status/1` are plain `GenServer.call/2`s carrying
+      # the FIVE-second default, so a health check arriving during a subscribe did not wait,
+      # it exited — and a consumer calling it from their own `handle_call/3` died with it.
+      #
+      # That is dp-exchange-core issue #28's exact failure on a different venue and a
+      # different call. It was found by sweeping this family for the class the #30 reporter
+      # named — "work done in the process that owes a reply" — not by it failing in
+      # production a second time. This test failed before the fix, with `coverage/1` not
+      # answering inside 500 ms.
+      test_pid = self()
+
+      plug = fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          send(test_pid, :bootstrap_started)
+          # Stands in for a slow venue. The real budget is ~90s; 2s keeps the test quick
+          # while still being far longer than the 500ms this asserts a read answers within.
+          Process.sleep(2_000)
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          Req.Test.json(conn, quote_body())
+        end
+      end
+
+      feed =
+        start_feed(
+          plug: plug,
+          limiter: permissive_limiter(),
+          retry_attempts: 0,
+          start_delay_ms: 0,
+          interval_ms: 50
+        )
+
+      subscriber = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
+      assert_receive :bootstrap_started, 1_000
+
+      reader = Task.async(fn -> Feed.coverage(feed) end)
+      result = Task.yield(reader, 500) || Task.shutdown(reader, :brutal_kill)
+
+      assert match?({:ok, _}, result),
+             "coverage/1 did not answer within 500ms while a subscribe was establishing " <>
+               "the route — the Feed is blocked inside handle_call. got: #{inspect(result)}"
+
+      # The subscribe still gets its own answer once the route settles; deferring the reply
+      # must not mean losing it.
+      assert Task.await(subscriber, 5_000) in [:ok, {:error, :no_route}]
+      assert Process.alive?(feed)
+    end
+
+    test "two subscribes during one bootstrap share it, and both are answered" do
+      # `waiting` is a list precisely so this cannot become two Streamer connections for a
+      # consumer that called `subscribe/2` twice in quick succession. Both callers are owed
+      # a reply from the one bootstrap; dropping either would hang a caller until its
+      # `@call_timeout`.
+      test_pid = self()
+
+      plug = fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          send(test_pid, :bootstrap_started)
+          Process.sleep(500)
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          Req.Test.json(conn, quote_body())
+        end
+      end
+
+      feed =
+        start_feed(
+          plug: plug,
+          limiter: permissive_limiter(),
+          retry_attempts: 0,
+          start_delay_ms: 0,
+          interval_ms: 50
+        )
+
+      first = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
+      assert_receive :bootstrap_started, 1_000
+      second = Task.async(fn -> Feed.subscribe(feed, ["MSFT"]) end)
+
+      assert Task.await(first, 5_000) in [:ok, {:error, :no_route}]
+      assert Task.await(second, 5_000) in [:ok, {:error, :no_route}]
+
+      # Exactly one bootstrap ran: a second would have sent a second `:bootstrap_started`.
+      refute_receive :bootstrap_started, 300
+
+      assert Enum.sort(Feed.wanted(feed)) == ["AAPL", "MSFT"]
     end
   end
 end

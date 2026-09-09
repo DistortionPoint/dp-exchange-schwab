@@ -31,6 +31,40 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reads now carry `@call_timeout` explicitly, exactly as writes already did.** `coverage/1`,
+  `coverage_by_kind/1`, `status/1` and `wanted/1` took `GenServer.call/2`'s implicit five
+  seconds while every write named a generous one — the same asymmetry that turned a bounded
+  delay into a dead caller in issue #28. Second line of defence, never the fix: a read that
+  has to queue behind something should wait for it, not die of it.
+
+- **A subscribe blocked every read on this Feed for as long as the Streamer bootstrap took
+  — dp-exchange-core issue #28's failure, on this venue.** Establishing the stream route
+  means a signed `Rest.get_user_preference/2` round trip followed by a WebSocket connect,
+  and both ran **inline inside `handle_call/3`**. With `Core.HttpClient`'s documented
+  defaults (30_000 ms per attempt, 3 attempts) that window reaches roughly **ninety
+  seconds**, during which `coverage/1`, `coverage_by_kind/1`, `status/1` and `wanted/1`
+  queued behind it — and those were plain `GenServer.call/2`s on the five-second default,
+  so a health check arriving during a subscribe did not merely wait, it **exited**, taking
+  a consumer that reads it from its own `handle_call/3` with it.
+
+  **This was found by sweeping for the class rather than by it failing here.** The #30
+  reporter named the shape — "work done in the process that owes a reply" — while
+  describing something else, and this family has now paid for it three times (#16, #23,
+  #28). Proven before it was fixed: `coverage/1` did not answer inside 500 ms while a
+  subscribe was establishing the route.
+
+  The slow half now runs in a task and the caller's reply is deferred;
+  `dp_exchange_webull`'s `spawn_reconcile/3` reached this shape first and this is
+  deliberately the same pattern rather than a second invention. **The socket is still
+  opened by the Feed, not by the task** — `Socket.start_link/1` links to its caller, so
+  connecting inside the task would tie the venue's connection to a process that exits
+  moments later. The task fetches; the GenServer connects, bounded by
+  `@socket_connect_timeout_ms`. Two subscribes arriving during one bootstrap share it and
+  are both answered, which is why `waiting` is a list: starting a second bootstrap would
+  open a second Streamer connection for a consumer that merely called `subscribe/2` twice.
+
 ### Documentation
 
 - **`Credentials`' moduledoc now says that the redaction wrap lives in `child_spec/1`, and

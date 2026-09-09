@@ -323,10 +323,22 @@ defmodule DpExchange.Schwab.Feed do
   @doc """
   What has been asked for, which is not what `coverage/1` reports.
 
+  # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
+  #
+  # They used to take `GenServer.call/2`'s implicit five seconds, and that asymmetry is what
+  # turned a bounded delay into a dead caller in dp-exchange-core issue #28: `coverage/1` is
+  # the call a consumer's health check makes, so any moment this Feed was busy for longer
+  # than five seconds turned a health check into an EXIT — killing the consumer's own
+  # process when it read from inside its own `handle_call/3`. Asking whether the venue was
+  # healthy was what made it unhealthy.
+  #
+  # The blocking is fixed at its sources rather than papered over here; this is the second
+  # line of defence. A read that has to queue behind something should WAIT for it, never
+  # die of it.
   Reachable through the facade as `DpExchange.Schwab.wanted/1`.
   """
   @spec wanted(GenServer.server()) :: [String.t()]
-  def wanted(feed), do: GenServer.call(feed, :wanted)
+  def wanted(feed), do: GenServer.call(feed, :wanted, @call_timeout)
 
   @doc "Replace the delivered set."
   @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
@@ -346,7 +358,7 @@ defmodule DpExchange.Schwab.Feed do
   them.
   """
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll}
-  def coverage(feed), do: GenServer.call(feed, :coverage)
+  def coverage(feed), do: GenServer.call(feed, :coverage, @call_timeout)
 
   @doc """
   What is arriving, per symbol, split by **which kind** of data it is.
@@ -401,7 +413,7 @@ defmodule DpExchange.Schwab.Feed do
   @spec coverage_by_kind(GenServer.server()) :: %{
           DpExchange.Core.Capabilities.data_kind() => %{String.t() => :stream | :internal_poll}
         }
-  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
+  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind, @call_timeout)
 
   @doc """
   Whether the feed is delivering, on which route, and what it last failed on.
@@ -409,7 +421,7 @@ defmodule DpExchange.Schwab.Feed do
   Reachable through the facade as `DpExchange.Schwab.status/1`.
   """
   @spec status(GenServer.server()) :: map()
-  def status(feed), do: GenServer.call(feed, :status)
+  def status(feed), do: GenServer.call(feed, :status, @call_timeout)
 
   @doc "Register `opts[:to]` for this package's own notices."
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
@@ -489,6 +501,14 @@ defmodule DpExchange.Schwab.Feed do
           :rate_limit_blocking
         ])
         |> Keyword.put_new(:rate_limit_blocking, true),
+      # The in-flight Streamer bootstrap, or `nil`. `%{ref: reference(), waiting: [from]}`.
+      #
+      # The bootstrap's slow half — a signed `Rest.get_user_preference/2` round trip — runs
+      # in a task, and the callers waiting on it are parked here rather than blocking this
+      # GenServer. `waiting` is a list because two subscribes can arrive during one
+      # bootstrap and both are owed the same answer; it must never mean two bootstraps, or
+      # a consumer subscribing twice in quick succession opens two Streamer connections.
+      route_bootstrap: nil,
       subscriber: subscriber,
       subscribers: MapSet.new([subscriber]),
       notice_subscribers: MapSet.new(),
@@ -517,15 +537,14 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   @impl true
-  def handle_call({:subscribe, symbols, subscriber}, _from, state) do
+  def handle_call({:subscribe, symbols, subscriber}, from, state) do
     state = %{
       state
       | subscribers: MapSet.put(state.subscribers, subscriber),
         wanted: MapSet.union(state.wanted, MapSet.new(symbols))
     }
 
-    state = ensure_route(state)
-    {:reply, apply_symbols(state), state}
+    settle_route(state, from)
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
@@ -541,7 +560,7 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(:wanted, _from, state), do: {:reply, MapSet.to_list(state.wanted), state}
 
-  def handle_call({:update_symbols, symbols}, _from, state) do
+  def handle_call({:update_symbols, symbols}, from, state) do
     state = %{
       state
       | wanted: MapSet.new(symbols),
@@ -549,8 +568,7 @@ defmodule DpExchange.Schwab.Feed do
         kinds: Map.take(state.kinds, symbols)
     }
 
-    state = ensure_route(state)
-    {:reply, apply_symbols(state), state}
+    settle_route(state, from)
   end
 
   def handle_call(:coverage, _from, %{route: :poll, poller: poller} = state)
@@ -672,53 +690,140 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, isolate_crashed_route(state, reason)}
   end
 
+  # The Streamer bootstrap's HTTP half came back. Everything from here — building the
+  # socket, or falling back to the poll — is fast and stays in this process; see the
+  # routing section for why the socket must be opened here rather than in the task.
+  #
+  # Ordered ABOVE the catch-all below, and matched on the stored `ref` so a late reply from
+  # a superseded bootstrap cannot settle the current one.
+  def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, waiting: waiting}} = state) do
+    Process.demonitor(ref, [:flush])
+
+    state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
+    applied = apply_symbols(state)
+
+    # Every caller parked on this one bootstrap gets the same answer. Replying to a caller
+    # that has already timed out is a no-op, so no bookkeeping is needed for that case.
+    Enum.each(waiting, &GenServer.reply(&1, applied))
+
+    {:noreply, state}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- routing ------------------------------------------------------------
 
-  defp ensure_route(%{route: route} = state) when route in [:stream, :poll], do: state
+  # Establishing the Streamer route means a signed `Rest.get_user_preference/2` round trip
+  # followed by a WebSocket connect. That used to run INLINE inside `handle_call/3`, which
+  # made a subscribe block this GenServer for the whole of it — and with `Core.HttpClient`'s
+  # documented defaults (30_000 ms per attempt, 3 attempts) that window reaches roughly
+  # ninety seconds. Every read queued behind it: `coverage/1` and `status/1` are plain
+  # `GenServer.call/2`s carrying the **five-second** default, so a health check arriving
+  # during a subscribe did not merely wait, it EXITED — and a consumer calling it from
+  # their own `handle_call/3` died with it.
+  #
+  # That is dp-exchange-core issue #28's exact failure, which cost a consumer fourteen hours
+  # of a dead venue on `dp_exchange_robinhood`, reproduced here on a different venue and a
+  # different call. It was found by sweeping this family for the class the #30 reporter
+  # named — "work done in the process that owes a reply" — rather than by it failing again
+  # in production. Proven before it was fixed: `coverage/1` did not answer within 500 ms
+  # while a subscribe was establishing the route.
+  #
+  # So the slow half runs in a task and the caller's reply is DEFERRED. `dp_exchange_webull`
+  # reached the same shape first (`spawn_reconcile/3`), and this is deliberately the same
+  # pattern rather than a second invention.
+  #
+  # **The socket is still opened by this process, not by the task**, and that is not an
+  # oversight: `Socket.start_link/1` links to its caller, so opening it inside the task
+  # would tie the venue's connection to a process that exits moments later. The task fetches;
+  # this GenServer connects. The connect is bounded by `@socket_connect_timeout_ms` (3_000)
+  # and is the only part still on the mailbox.
 
-  # Deliberately does not call `apply_symbols/1` on the `:stream` branch itself — every
-  # caller of `ensure_route/1` does that on its own once the route is settled
-  # (`handle_call({:subscribe, …})`, `handle_call({:update_symbols, …})` and
-  # `isolate_crashed_route/2` all follow the same `state = ensure_route(state);
-  # apply_symbols(state)` shape). This function used to apply symbols itself here, which
-  # was harmless only by accident: `ensure_route/1` used to run for the first time from
-  # `init/1`'s own `{:continue, :connect}`, always with an empty `state.wanted`, so the
-  # internal apply was a no-op and the caller's own apply — the only one that ever sent
-  # anything — never doubled up. Once the dial moved to the first `subscribe/2` or
-  # `update_symbols/2` call (see the moduledoc's "A consumer that never subscribes must
-  # not find a socket open" section), `state.wanted` is no longer empty the first time
-  # this branch runs, and the caller's own `apply_symbols/1` call right after would have
-  # sent every symbol a second time — a real, observable `SUBS` duplicate, not merely a
-  # harmless idempotent re-send. `start_poller/1`'s own branch needs no equivalent
-  # change: it already seeds `PollingFeed` with `state.wanted` at start, which is not a
-  # second send, it is the only one — a caller's own `apply_symbols/1` on the `:poll`
-  # route calls `PollingFeed.update_symbols/2` with the identical set, a genuinely
-  # idempotent no-op rather than a duplicate frame.
-  defp ensure_route(state) do
-    case start_socket(state) do
-      {:ok, socket} ->
-        %{state | socket: socket, route: :stream}
+  # Already settled — answer now, with no bootstrap at all.
+  defp settle_route(%{route: route} = state, _from) when route in [:stream, :poll],
+    do: {:reply, apply_symbols(state), state}
 
-      # `{:refused, …}` and `{:error, …}` are different answers everywhere else in this
-      # package and here they are not: the Streamer is unreachable either way, and the
-      # remedy — poll, and say so — is the same. The reason travels into the notice, so a
-      # consumer can still tell a rejected credential from a network fault.
-      other ->
-        reason = failure_reason(other)
+  # A socket supplied at start IS the route already — the injection seam this package's own
+  # tests use, and the shape a consumer handing in its own connection takes. No bootstrap
+  # runs: `Rest.get_user_preference/2` exists only to discover a socket to open, and one is
+  # already open. This was previously `start_socket/1`'s own `when is_pid(socket)` clause;
+  # it is load-bearing and moved here with the rest of the routing.
+  defp settle_route(%{socket: socket} = state, _from) when is_pid(socket) do
+    state = %{state | route: :stream}
+    {:reply, apply_symbols(state), state}
+  end
 
-        # The Streamer could not be bootstrapped. Say so — a consumer reading only
-        # `coverage/1` would see `:internal_poll` and have no idea a socket was expected.
-        notify(
-          state,
-          Notice.new(:degraded, :schwab,
-            details: %{reason: inspect(reason), fallback: :internal_poll}
-          )
-        )
+  defp settle_route(state, from), do: {:noreply, start_route_bootstrap(state, [from])}
 
-        start_poller(%{state | last_error: reason})
+  # A bootstrap is already in flight: join its reply list. Starting a second one would open
+  # two Streamer connections for a consumer that merely called `subscribe/2` twice quickly.
+  defp start_route_bootstrap(%{route_bootstrap: %{waiting: waiting} = bootstrap} = state, more),
+    do: %{state | route_bootstrap: %{bootstrap | waiting: waiting ++ more}}
+
+  defp start_route_bootstrap(state, waiting) do
+    credentials = state.credentials
+    request_opts = state.request_opts
+
+    task = Task.async(fn -> fetch_user_preference(credentials, request_opts) end)
+
+    %{state | route_bootstrap: %{ref: task.ref, waiting: waiting}}
+  end
+
+  # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
+  # it can become an abnormal task exit, because `Task.async/1` links: an unconverted
+  # exception would reach this Feed as an `{:EXIT, ...}` it has no clause for, and the
+  # bootstrap's waiting callers would never be answered at all.
+  defp fetch_user_preference(credentials, request_opts) do
+    Rest.get_user_preference(credentials, request_opts)
+  rescue
+    exception -> {:error, {:exception, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp complete_route_bootstrap(state, {:ok, body}) do
+    case build_socket(state, body) do
+      {:ok, socket} -> %{state | socket: socket, route: :stream}
+      other -> fall_back_to_poll(state, failure_reason(other))
     end
+  end
+
+  defp complete_route_bootstrap(state, other),
+    do: fall_back_to_poll(state, failure_reason(other))
+
+  defp build_socket(state, body) do
+    with {:ok, info} <- StreamerInfo.from_user_preference(body),
+         {:ok, token} <- access_token(state.credentials) do
+      Socket.start_link(
+        Keyword.merge(
+          # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
+          # chooses deliberate defaults rather than inheriting websockex's, which do not
+          # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
+          Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
+          streamer_info: info,
+          access_token: token,
+          subscriber: self()
+        )
+      )
+    end
+  end
+
+  # `{:refused, …}` and `{:error, …}` are different answers everywhere else in this package
+  # and here they are not: the Streamer is unreachable either way, and the remedy — poll,
+  # and say so — is the same. The reason travels into the notice, so a consumer can still
+  # tell a rejected credential from a network fault.
+  #
+  # The Streamer could not be bootstrapped. Say so — a consumer reading only `coverage/1`
+  # would see `:internal_poll` and have no idea a socket was expected.
+  defp fall_back_to_poll(state, reason) do
+    notify(
+      state,
+      Notice.new(:degraded, :schwab,
+        details: %{reason: inspect(reason), fallback: :internal_poll}
+      )
+    )
+
+    start_poller(%{state | last_error: reason})
   end
 
   # See the moduledoc's "A crashed socket or poller used to be Feed's crash too" section
@@ -744,40 +849,23 @@ defmodule DpExchange.Schwab.Feed do
     # first-ever bootstrap — a poller crash is not assumed to mean "restart the same
     # route," since the credential that made the Streamer unreachable earlier may have
     # been fixed since (`update_credentials/2`) in the meantime. `apply_symbols/1` is
-    # called explicitly here — the same shape `handle_call({:subscribe, …})` and
+    # NO LONGER called explicitly here — see the replacement note just below. The old shape
+    # was `handle_call({:subscribe, …})` and
     # `handle_call({:update_symbols, …})` both use — because `ensure_route/1`'s own
     # `:stream` branch no longer applies symbols internally; see that function's own
     # comment for why. On the `:poll` branch this is a harmless idempotent re-send:
     # `start_poller/1` already seeded `PollingFeed` with `state.wanted` at start.
-    state = ensure_route(state)
-    apply_symbols(state)
-    state
+    # Nobody is waiting on a `GenServer.call/3` for a crash-triggered reconnect, so the
+    # bootstrap starts with an empty reply list. `apply_symbols/1` is no longer called here
+    # either: it runs in `handle_info({ref, result}, ...)` once the route is actually
+    # settled, which is the only moment it can do anything but return `{:error, :no_route}`.
+    start_route_bootstrap(state, [])
   end
 
   defp failure_reason({:error, reason}), do: reason
   defp failure_reason({:refused, reason}), do: {:refused, reason}
   # No third shape exists — dialyzer proves the two clauses above are total over what
-  # `start_socket/1` can return, and a catch-all here would be a branch no input reaches.
-
-  defp start_socket(%{socket: socket} = _state) when is_pid(socket), do: {:ok, socket}
-
-  defp start_socket(state) do
-    with {:ok, body} <- Rest.get_user_preference(state.credentials, state.request_opts),
-         {:ok, info} <- StreamerInfo.from_user_preference(body),
-         {:ok, token} <- access_token(state.credentials) do
-      Socket.start_link(
-        Keyword.merge(
-          # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
-          # chooses deliberate defaults rather than inheriting websockex's, which do not
-          # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
-          Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
-          streamer_info: info,
-          access_token: token,
-          subscriber: self()
-        )
-      )
-    end
-  end
+  # `build_socket/2` can return, and a catch-all here would be a branch no input reaches.
 
   defp access_token(%{access_token: token}) when is_binary(token), do: {:ok, token}
   defp access_token(_credentials), do: {:error, {:missing_credentials, :schwab}}
