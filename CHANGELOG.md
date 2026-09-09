@@ -31,6 +31,27 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`Credentials`' moduledoc now says that the redaction wrap lives in `child_spec/1`, and
+  that bypassing `child_spec/1` bypasses it.** Requested by the consumer who verified the
+  dp-exchange-core #29 fix and then went looking for their canary in their own supervisor's
+  state — and found it. Their supervision code builds the child spec itself
+  (`start: {__MODULE__, :start_feed, [module, opts, pairs]}`) for a legitimate reason: a
+  `Core.PollingFeed`-shaped facade defaults `subscriber` to `self()`, which resolves to the
+  *supervisor* when `start_link/1` is called from `init/1`, so a different delivery target
+  can only be set at `start_link` time. On that path `child_spec/1` never runs, their
+  supervisor stores the raw map, and OTP renders the live key on the next crash exactly as
+  before. **Upgrading does not fix it, because nothing from this package is on that path.**
+
+  No code change: `wrap/1` and `wrap_opt/1` were already public, which was all that path
+  needed. What was missing was anyone saying so — the natural assumption, "upgraded,
+  therefore redacted", is wrong there, and assertion 22 cannot see it because it asks about
+  `child_spec/1`'s own rendering. `dp_exchange_core`'s `usage-rules/auth.md` carries the
+  full version, including the reshaping case that bit them: a host mapping its own key
+  names into a venue's and returning a bare map re-introduces the leak in its own code,
+  downstream of anything a package can reach.
+
 ### Fixed
 
 - **A read-only coverage call could kill the feed — dp-exchange-core issue #28.**
