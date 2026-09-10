@@ -31,6 +31,24 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **A read time sits in a field the contract documents as the venue's own, and it is now
+  labelled where it happens.** `Core.Types.Quote` says `:timestamp` is "the venue's own…
+  never invented: a quote whose freshness we cannot state is a quote we must not return."
+  This package's decoder does not keep that rule on the path noted at the code, because the
+  venue publishes no time for those frames and the struct has a single `:timestamp` — unlike
+  `Core.Types.TopOfBook`, which carries `:venue_time` and `:observed_at` separately and can
+  therefore say "the venue did not date this".
+
+  **No behaviour changed.** The gap is in the shared contract, not only here, and closing it
+  means altering a published type that a live consumer decodes at every call site — 19 lib
+  files and 27 test files across six repositories. That is a written-plan decision by this
+  project's own rules, so it is
+  `dp_exchange_core`'s `docs/design/2026-09-09_venue-time-and-observed-time.md`, with three
+  options costed. What changed here is that a reader of the code is now told, rather than
+  finding out by trusting the type's documentation.
+
 ### Fixed
 
 - **Reads now carry `@call_timeout` explicitly, exactly as writes already did.** `coverage/1`,

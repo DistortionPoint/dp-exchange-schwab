@@ -46,6 +46,20 @@ defmodule DpExchange.Schwab.StreamerDecode do
        # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size` is
        # the trade's own, and it is the one a Quote's volume means.
        volume: decimal(Map.get(fields, :last_size)),
+       # **This is the frame's ARRIVAL time in a field `Core.Types.Quote` documents as the
+       # venue's own** — a known divergence, not an oversight. See that type's "Known
+       # divergence" section and `dp_exchange_core`'s
+       # `docs/design/2026-09-09_venue-time-and-observed-time.md`.
+       #
+       # `LEVELONE_*` frames carry no venue time in the fields this package reads, and
+       # `Quote` has a single `:timestamp` — so unlike `to_top_of_book/3` just below, which
+       # says the truth with `venue_time: nil` and `observed_at`, there is no field here in
+       # which to say "the venue did not date this".
+       #
+       # Note what the sibling decoder does and this one cannot: `to_order_book/2` reads the
+       # venue's `snapshot_time` and FAILS CLOSED when it is absent. The rule is keepable
+       # where the venue cooperates, which is why this is a contract gap rather than a
+       # decoding shortcut.
        timestamp: observed_at,
        provider: :schwab
      }}
