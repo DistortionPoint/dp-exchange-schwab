@@ -493,7 +493,7 @@ defmodule DpExchange.Schwab.StreamerTest do
 
       assert {:ok, %Types.OrderBook{} = book} = StreamerDecode.to_order_book(fields, "AAPL")
 
-      assert book.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
       assert book.symbol == "AAPL"
       assert book.provider == :schwab
     end

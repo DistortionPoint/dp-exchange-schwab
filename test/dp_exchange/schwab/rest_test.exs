@@ -60,7 +60,7 @@ defmodule DpExchange.Schwab.RestTest do
       assert Decimal.equal?(quote_struct.price, Decimal.from_float(227.5))
 
       assert Decimal.equal?(quote_struct.volume, Decimal.new(51_234_567))
-      assert quote_struct.timestamp.year == 2026
+      assert quote_struct.venue_time.year == 2026
       assert quote_struct.provider == :schwab
     end
 
@@ -171,7 +171,7 @@ defmodule DpExchange.Schwab.RestTest do
       assert quote_struct.symbol == "SWPPX"
       assert Decimal.equal?(quote_struct.price, Decimal.from_float(62.34))
       assert Decimal.equal?(quote_struct.volume, Decimal.new(184_223))
-      assert quote_struct.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert quote_struct.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
       assert quote_struct.provider == :schwab
     end
 

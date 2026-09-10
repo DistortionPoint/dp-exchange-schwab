@@ -82,14 +82,14 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       # Same instant; the millisecond parse carries {0, 3} precision and the second parse
       # {0, 0}, which is a difference in stated precision rather than in time.
-      assert DateTime.compare(from_seconds.timestamp, from_millis.timestamp) == :eq
+      assert DateTime.compare(from_seconds.venue_time, from_millis.venue_time) == :eq
     end
 
     test "an epoch delivered as a string is read" do
       body = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => "1787936147000"}}}
 
       assert {:ok, quote_struct} = Rest.get_price("AAPL", @creds, opts(responding(body)))
-      assert quote_struct.timestamp.year == 2026
+      assert quote_struct.venue_time.year == 2026
     end
 
     test "a timestamp of an unexpected type is an error, not a guess" do

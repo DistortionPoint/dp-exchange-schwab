@@ -607,7 +607,7 @@ defmodule DpExchange.SchwabTest do
     test "a quote is stamped with a fixed instant, so assertions do not flap" do
       assert {:ok, quote_struct} = Fake.get_price("AAPL", credentials: @creds)
 
-      assert quote_struct.timestamp == Fake.as_of()
+      assert quote_struct.venue_time == Fake.as_of()
       # The book moved to TopOfBook; the fake exposes it through get_top_of_book/2.
       assert {:ok, top} = Fake.get_top_of_book("AAPL", credentials: @creds)
       assert Decimal.lt?(top.bid, top.ask)

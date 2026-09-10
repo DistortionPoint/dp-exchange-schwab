@@ -131,7 +131,8 @@ defmodule DpExchange.Schwab.Fake do
          symbol: native,
          price: Decimal.new(price),
          volume: Decimal.new("1000000"),
-         timestamp: @as_of,
+         venue_time: @as_of,
+         observed_at: @as_of,
          provider: :schwab
        }}
     end

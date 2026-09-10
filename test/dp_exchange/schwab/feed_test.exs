@@ -999,7 +999,8 @@ defmodule DpExchange.Schwab.FeedTest do
     %Types.Quote{
       symbol: symbol,
       price: Decimal.new("100.5"),
-      timestamp: DateTime.utc_now(),
+      venue_time: DateTime.utc_now(),
+      observed_at: DateTime.utc_now(),
       provider: :schwab
     }
   end
@@ -1009,7 +1010,8 @@ defmodule DpExchange.Schwab.FeedTest do
       symbol: symbol,
       bids: [{Decimal.new("100.00"), Decimal.new("10")}],
       asks: [{Decimal.new("100.10"), Decimal.new("5")}],
-      timestamp: DateTime.utc_now(),
+      venue_time: DateTime.utc_now(),
+      observed_at: DateTime.utc_now(),
       sequence: nil,
       provider: :schwab
     }

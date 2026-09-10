@@ -31,6 +31,29 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`Core.Types.Quote` and `Core.Types.OrderBook` no longer carry `:timestamp`.** They carry
+  **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
+  **`:observed_at`** (when this package read it, always present). Requires
+  `dp_exchange_core ~> 0.2.1`; this package's own version takes a minor bump to signal it.
+
+  `:timestamp` was documented as the venue's own and "never invented", and two packages in
+  this family could not keep that promise, because the frames they decode carry no venue time
+  at all. With one field their only options were to lie or drop real data, and they lied.
+
+  **One path in this package was the reason.** `StreamerDecode.to_quote/3` — `LEVELONE_*`
+  frames — put the frame's arrival time in `:timestamp` because those frames carry no venue
+  time in the fields it reads. It now reports `venue_time: nil`, which is a different fact
+  from "quoted at 14:53:02" and one it could not previously state. `to_order_book/2` was
+  always the counter-example: it reads the venue's `snapshot_time` and fails closed without
+  it, and is unchanged.
+
+  The full reasoning, the three options weighed and the consumer's own argument for this one
+  are in `dp_exchange_core`'s
+  `docs/design/closed/2026-09-09_venue-time-and-observed-time.md`, announced and answered as
+  dp-exchange-core issue #31. `Trade`, `Fill`, `Balance` and `OrderBookDelta` are unchanged.
+
 ### Documentation
 
 - **A read time sits in a field the contract documents as the venue's own, and it is now

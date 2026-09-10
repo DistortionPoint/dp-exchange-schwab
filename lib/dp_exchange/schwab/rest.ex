@@ -255,7 +255,8 @@ defmodule DpExchange.Schwab.Rest do
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
          volume: decimal(row["totalVolume"]),
-         timestamp: timestamp,
+         venue_time: timestamp,
+         observed_at: DateTime.utc_now(),
          provider: :schwab
        }}
     end

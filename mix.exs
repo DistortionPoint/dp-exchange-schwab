@@ -6,7 +6,7 @@ defmodule DpExchangeSchwab.MixProject do
   # change is signalled. The bump script matches the attribute assignment below by its
   # exact literal form — do not reformat it, and do not repeat that form anywhere else
   # in this file, comments included, or the script will rewrite the wrong line.
-  @version "0.1.41"
+  @version "0.2.0"
   @source_url "https://github.com/DistortionPoint/dp-exchange-schwab"
 
   def project do
@@ -55,7 +55,7 @@ defmodule DpExchangeSchwab.MixProject do
       # Bumped to 0.1.50 for `PollingFeed.start_link/1`'s new `:on_notice` option — see
       # `start_poller/1` in `Feed` and its moduledoc for why the fallback poll needs it
       # (DpCryptoManagement's issue #21).
-      {:dp_exchange_core, "~> 0.1.50"},
+      {:dp_exchange_core, "~> 0.2.1"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.

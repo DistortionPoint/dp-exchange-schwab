@@ -437,7 +437,7 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert_received {:dp_exchange, :schwab, %Types.OrderBook{} = book}
       assert length(book.bids) == 1
-      assert book.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
     test "a service with no field map emits nothing rather than a wrong field" do
