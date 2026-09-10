@@ -35,6 +35,27 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`coverage/1` kept answering `:stream` for symbols a dropped link had been delivering.**
+  `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so the socket *process* survives a
+  transport drop and no `:EXIT` ever reaches `isolate_crashed_route/2` — the only path that
+  cleared `delivering`. Between a drop and a successful re-LOGIN plus resubscribe, coverage
+  reported symbols arriving from nowhere; and where the reconnect restored the socket while
+  the venue silently failed to restore a symbol, that symbol reported `:stream` indefinitely.
+  That is the 325-subscribed/174-delivering incident `coverage/1` exists to make visible.
+
+  `Socket` already acted on the same fact one level down, clearing `logged_in?` and its
+  `subscriptions` on disconnect because *"a socket that kept `logged_in?` would send
+  subscriptions the venue ignores and report a healthy feed that receives nothing"*. This is
+  the last piece of that: the feed's own record of what was arriving. A whole reset, for the
+  reason `isolate_crashed_route/2` gives — this feed has exactly one active route at a time,
+  so the link that dropped was the only thing delivering. `route` and `socket` are left
+  alone, because that socket is reconnecting rather than dead.
+
+  `dp_exchange_core` 0.2.5 writes the rule into `Core.Venue`'s `coverage/1` doc — observation
+  is scoped to the current transport session — and records why it cannot be carried by a
+  conformance assertion. All four streaming venues in the family had this wrong in the same
+  way and are fixed in the same batch.
+
 - **No published version was attributable to a changelog entry (dp-exchange-core issue
   #32).** Every entry in this repository's `CHANGELOG.md` sat under `## [Unreleased]` — in
   the **published tarball**, since `CHANGELOG.md` ships inside it — so a consumer could not

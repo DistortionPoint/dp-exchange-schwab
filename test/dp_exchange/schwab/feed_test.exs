@@ -314,6 +314,35 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert %{route: :internal_poll} = Feed.status(feed)
     end
+
+    test "a TRANSPORT drop clears coverage too, not only a route crash" do
+      # The test above kills the socket process. This one is the case that was missed:
+      # `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so a transport drop leaves
+      # the socket process ALIVE, no `:EXIT` reaches `isolate_crashed_route/2`, and until
+      # this the delivery records from the dead connection went on answering `:stream` —
+      # indefinitely, where the reconnect came back but the venue silently failed to restore
+      # a symbol. `Socket` already clears `logged_in?` and its `subscriptions` on the same
+      # event, for the same reason one level down.
+      feed = start_feed(socket: fake_socket())
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert Feed.coverage(feed) == %{"AAPL" => :stream}
+
+      send(feed, {:dp_exchange, :schwab, Notice.new(:link_down, :schwab)})
+
+      assert Feed.coverage(feed) == %{}
+      assert Feed.coverage_by_kind(feed) == %{}
+
+      # The route is untouched — that socket is reconnecting rather than dead, and clearing
+      # it here would make `ensure_route/1` dial a second one. Coverage refills as frames
+      # arrive after the re-LOGIN and resubscribe.
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert Feed.coverage(feed) == %{"AAPL" => :stream}
+      assert %{route: :stream} = Feed.status(feed)
+    end
   end
 
   describe "a reconnect resends the wanted set on its own — no consumer action needed" do

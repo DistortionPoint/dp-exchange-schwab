@@ -639,7 +639,31 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
 
+  # A TRANSPORT drop, not a route crash — and until this clause existed nothing here told
+  # them apart. `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so the socket
+  # process survives and no `:EXIT` ever reaches `isolate_crashed_route/2`, the only path
+  # that cleared `delivering`. Between a drop and a successful re-LOGIN plus resubscribe,
+  # `coverage/1` answered `:stream` for symbols arriving from nowhere; and where the
+  # reconnect restored the socket while the venue silently failed to restore a symbol, that
+  # symbol answered `:stream` indefinitely — the 325-subscribed/174-delivering shape
+  # `coverage/1` exists to make visible. See `Core.Venue`'s `coverage/1` doc: observation is
+  # scoped to the current transport session.
+  #
+  # `Socket` already acts on the same fact one level down, clearing `logged_in?` and its
+  # `subscriptions` because *"a socket that kept `logged_in?` would send subscriptions the
+  # venue ignores and report a healthy feed that receives nothing"*. This is the last piece
+  # of that: the feed's own record of what was arriving.
+  #
+  # A whole reset, for the reason `isolate_crashed_route/2` gives: this feed has exactly one
+  # active route at a time, so the link that just dropped was the only thing delivering.
+  # `route` and `socket` are left alone — that socket is reconnecting rather than dead, and
+  # clearing them here would make `ensure_route/1` dial a second one.
   @impl true
+  def handle_info({:dp_exchange, :schwab, %Notice{kind: :link_down} = notice}, state) do
+    fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
+    {:noreply, %{state | delivering: %{}, kinds: %{}}}
+  end
+
   def handle_info({:dp_exchange, :schwab, %Notice{} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
     {:noreply, state}
