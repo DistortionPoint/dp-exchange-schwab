@@ -34,6 +34,17 @@ expressible before, because there was no way to see which kind of time you had.
 `:timestamp`, because every one of them is built from a venue-supplied time and fails closed
 without it.
 
+
+**When is `venue_time` `nil` on this venue? On every streamed quote.** `LEVELONE_*` frames
+carry no venue time in the fields this package reads, so a `Quote` from `subscribe/2` always
+has `venue_time: nil` and a real `observed_at`. That is not a gap — it is the fact the split
+exists to state, and before 0.2.0 this package put the frame's arrival time in a field
+documented as the venue's own.
+
+The **book** is the opposite and always was: `to_order_book/2` reads the venue's
+`snapshot_time` and fails closed without it, so an `OrderBook` always carries a real
+`venue_time`. `get_price/3` over REST does too.
+
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
 

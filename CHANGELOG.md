@@ -31,6 +31,17 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` now answers the question a consumer actually has after 0.2.0: when is
+  `venue_time` `nil` here?** The migration note said what the fields mean; it did not say
+  what this venue does with them, which is the part a caller writes a branch for.
+
+  **On every streamed quote**, because `LEVELONE_*` frames carry no venue time in the fields
+  this package reads — the fact the split exists to state, and the one this package used to
+  hide behind the frame's arrival time. The book is the opposite and always was:
+  `to_order_book/2` reads `snapshot_time` and fails closed without it.
+
 ### Changed — BREAKING
 
 - **`Core.Types.Quote` and `Core.Types.OrderBook` no longer carry `:timestamp`.** They carry
