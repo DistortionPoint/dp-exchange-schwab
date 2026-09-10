@@ -128,6 +128,53 @@ jobs:
           sed -i "s/@version \"$current\"/@version \"$new_version\"/" mix.exs
           echo "VERSION=$new_version" >> "$GITHUB_ENV"
 
+      - name: Cut a changelog heading for this version
+        # dp-exchange-core issue #32: every entry in this repository's CHANGELOG sat under
+        # `## [Unreleased]`, in the **published tarball**, so no consumer could tell which
+        # version introduced a breaking change. This family signals a breaking change with a
+        # minor bump, and those changes are repeatedly a refusal tuple or struct gaining a
+        # field — invisible to the compiler and to a test that pins the old shape. The
+        # consumer's own upgrade procedure is "read CHANGELOG.md for `### Changed —
+        # BREAKING`, then grep for the old shape", and that needs version → change. Without
+        # it, `### Changed — BREAKING` says *that* the shape changed, never whether they
+        # already took it.
+        #
+        # **Before `mix hex.publish`, deliberately.** `CHANGELOG.md` ships inside the
+        # tarball (see `mix.exs`'s `files:`), so a heading cut after the upload would
+        # describe a tarball nobody can read.
+        #
+        # Idempotent, and by a guard rather than by hope: a first draft claimed the awk
+        # "inserts under the FIRST `## [Unreleased]` and stops, so a re-run cannot stack two
+        # headings", which was tested and is false — `[Unreleased]` survives the insert, so a
+        # second pass cuts a second heading for the same version. The grep below is what
+        # actually makes the claim true.
+        #
+        # An `[Unreleased]` with nothing under it yields an empty version section, which is
+        # honest: that release recorded no changes.
+        run: |
+          set -euo pipefail
+
+          if grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "Heading for $VERSION already present; nothing to cut."
+            exit 0
+          fi
+
+          today=$(date -u +%Y-%m-%d)
+
+          awk -v v="$VERSION" -v d="$today" '
+            !cut && /^## \[Unreleased\]$/ {
+              print
+              print ""
+              print "## [" v "] - " d
+              cut = 1
+              next
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.next
+
+          mv CHANGELOG.next CHANGELOG.md
+          echo "Cut heading for $VERSION."
+
       - name: Publish to Hex.pm
         # A failed `mix hex.publish` does NOT mean the release is absent from Hex.
         #
@@ -174,7 +221,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add mix.exs
+          git add mix.exs CHANGELOG.md
           git commit -m "Release v${{ env.VERSION }} [skip ci]"
           git tag "v${{ env.VERSION }}"
           git push origin main --tags

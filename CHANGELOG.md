@@ -31,6 +31,52 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **No published version was attributable to a changelog entry (dp-exchange-core issue
+  #32).** Every entry in this repository's `CHANGELOG.md` sat under `## [Unreleased]` — in
+  the **published tarball**, since `CHANGELOG.md` ships inside it — so a consumer could not
+  tell which version introduced a breaking change, or whether they had already taken one.
+
+  That mapping is load-bearing here rather than cosmetic. This family signals a breaking
+  change with a **minor bump**, and those changes are repeatedly a refusal tuple or struct
+  gaining a field: invisible to the compiler, and invisible to a test that pins the old
+  shape. The reporting consumer's written upgrade procedure is *"read `CHANGELOG.md` for a
+  `### Changed — BREAKING` section, then grep for every clause matching the old shape"* —
+  which needs version → change. Without it, `### Changed — BREAKING` says *that* the shape
+  changed and never whether they already have it.
+
+  They gave two incidents from the same three days, and the difference between them is the
+  whole argument: `dp_exchange_gemini` 0.1.42's refusal-shape change was found **after
+  shipping**, by reading a fix comment, while `dp_exchange_webull` 0.4.0's was caught
+  **before** — because that entry happened to name the version in its prose.
+
+  **Two halves, because fixing only one would have let it recur immediately:**
+
+  - **Going forward**, the release pipeline cuts a `## [x.y.z] - YYYY-MM-DD` heading itself,
+    in the publish job and **before `mix hex.publish`** — a heading added after the upload
+    would describe a tarball nobody can read.
+  - **Retroactively**, the accumulated block now sits under a `## [<version>] and earlier`
+    heading. Attributing each of ~1,600 lines to the exact release that carried it is
+    archaeology; this restores the one fact a consumer needs from it — that none of it is
+    pending — which is what the reporter suggested.
+
+  The issue measured five packages, from their `deps/`. `dp_exchange_schwab` has the same
+  defect and is not one of their dependencies, so it could not appear in their table: six
+  instances, all fixed here.
+
+
+## [0.2.4] and earlier - 2026-09-10
+
+**Everything below this line is published.** Entries were accumulated under
+`[Unreleased]` from the first release to `0.2.4`, so no reader could tell shipped work
+from pending — dp-exchange-core issue #32. Attributing each entry to the exact version
+that carried it would be archaeology across hundreds of releases; this heading restores
+the one fact a consumer actually needs from it, which is that none of it is pending.
+
+Releases from here on cut their own `## [x.y.z]` heading at publish time, so this is
+the last block that will ever need a range.
+
 ### Documentation
 
 - **`OPTIONS_BOOK` was recorded as the unblocked half of Schwab depth streaming. It is
