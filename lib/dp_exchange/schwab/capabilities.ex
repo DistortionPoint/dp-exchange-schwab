@@ -59,7 +59,17 @@ defmodule DpExchange.Schwab.Capabilities do
   given equity belongs on, and `ACCT_ACTIVITY`'s `message_data` is documented as JSON
   "whose shape depends on `message_type`" that the vendor does not publish. Guessing
   either — which book a symbol belongs on, or what an order-fill payload looks like — is
-  exactly the substitution this family exists to refuse. See
+  exactly the substitution this family exists to refuse.
+
+  **`OPTIONS_BOOK` is not the exception it looks like** (checked 2026-09-10). The routing
+  ambiguity above does not apply to it — one options book service, and `SymbolFormat.option?/1`
+  answers unambiguously — but two other things block it. The vendor documents no `keys`
+  format for the book services' option case: `LEVELONE_OPTIONS` states "Schwab-standard
+  option symbol format: RRRRRRYYMMDDsWWWWWddd", while the shared Book Common table gives only
+  "Symbols in upper case … e.g.: AAPL,TSLA,IBM". And `streamable` here is a flat
+  `[data_kind()]` with no asset-class dimension, so `:order_book` cannot be declared for
+  options without also claiming it for equities, where it is false. See
+
   `docs/design/ideas/schwab-depth-and-account-activity-streaming.md` for what closing
   either gap for real would need.
 

@@ -964,6 +964,19 @@ defmodule DpExchange.Schwab.Feed do
   # share field numbering** with `CHART_EQUITY` either, so routing a symbol to the wrong
   # service decodes every field against the wrong table and produces prices that are the
   # right shape — `StreamerFields.for_service/1` refuses that per-service, not per-symbol.
+  #
+  # **`OPTIONS_BOOK` looks like the easy exception and is not** (checked 2026-09-10; the
+  # design doc that first said so has been corrected). The routing ambiguity that blocks the
+  # equity books genuinely does not apply — one options book service, and
+  # `SymbolFormat.option?/1` already answers unambiguously — and the decoder is built and
+  # tested, since all three book services share `StreamerFields`' one `@book` table. What
+  # blocks it is that **the vendor does not document the key format the book services take
+  # for options**: `LEVELONE_OPTIONS` states "Schwab-standard option symbol format:
+  # RRRRRRYYMMDDsWWWWWddd", while the shared Book Common table says only "Symbols in upper
+  # case and separated by commas. e.g.: AAPL,TSLA,IBM". Sending an option symbol there means
+  # assuming the two match — the *new judgement* the paragraph above says this function does
+  # not make. A second, independent blocker: `capabilities/0` has no way to say "order book,
+  # options only", because `Core.Capabilities`' `streamable` is a flat `[data_kind()]`.
   defp services_for(symbol) do
     if SymbolFormat.option?(symbol) do
       ["LEVELONE_OPTIONS"]

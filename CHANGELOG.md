@@ -33,6 +33,40 @@ an acceptable changelog line.
 
 ### Documentation
 
+- **`OPTIONS_BOOK` was recorded as the unblocked half of Schwab depth streaming. It is
+  not** — corrected in `docs/design/ideas/schwab-depth-and-account-activity-streaming.md`,
+  in `Feed.services_for/1` and in `Capabilities`' moduledoc, all of which carried the claim.
+
+  That document said `OPTIONS_BOOK` "does not have this problem", meaning the
+  `NYSE_BOOK`/`NASDAQ_BOOK` routing ambiguity, and read as though the options half only
+  needed wiring. Checked against the vendor's own text, and it fails on something else
+  entirely — **twice**:
+
+  - **The vendor documents no `keys` format for the book services' option case.**
+    `LEVELONE_OPTIONS` states *"Schwab-standard option symbol format:
+    RRRRRRYYMMDDsWWWWWddd"*; the shared Book Common table covering all three book services
+    says only *"Symbols in upper case and separated by commas. e.g.: AAPL,TSLA,IBM"*, with
+    equity examples and no option format. Sending an option symbol there assumes the two
+    match — the *new judgement* `services_for/1`'s own comment says it does not make. That
+    comment is the standard this package holds itself to: `LEVELONE_EQUITIES` and
+    `CHART_EQUITY` share symbols only because their key formats are documented *identically*.
+  - **`capabilities/0` could not declare it honestly even if the format were known.**
+    `Core.Capabilities`' `streamable` is a flat `[data_kind()]` with no asset-class
+    dimension, so `:order_book` cannot be claimed for options without also claiming it for
+    equities, where it is false and blocked. Delivering option books *without* declaring
+    them would push a payload kind a consumer was never told to expect — the shape
+    conformance assertion 20 exists to catch. That half is a Core change, not a Schwab one,
+    and it is the same flat-list gap that blocks `dp_exchange_webull`'s per-asset-class
+    `historical_timeframes`.
+
+  **Nothing was wired and nothing changed behaviourally**, which is the point: the decode
+  side is complete and tested (all three book services share `StreamerFields`' one `@book`
+  table), so this looked like a small win right up until the vendor's text was read. A
+  design document recording a part as unblocked when it is not is worse than one that says
+  nothing — it is a trap for whoever picks it up next.
+
+### Documentation
+
 - **`usage-rules.md` now answers the question a consumer actually has after 0.2.0: when is
   `venue_time` `nil` here?** The migration note said what the fields mean; it did not say
   what this venue does with them, which is the part a caller writes a branch for.
