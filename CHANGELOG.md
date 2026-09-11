@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-09-11
+
 ### Changed
 
 - **`dp_exchange_core` floor raised to `~> 0.3.1`.** Core 0.3.0 deleted
