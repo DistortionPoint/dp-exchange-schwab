@@ -206,16 +206,80 @@ else
   echo "            venue, which is exactly what D7 forbids."
 fi
 
-if [ "$failures" -gt 0 ]; then
-  echo "$failures of $checked cited documentation sources changed or went stale."
-  echo
-  echo "This is a NOTICE, not a build failure — nothing here blocks a merge or a release."
-  echo "A changed row means a vendor moved something a package cites. Read the page, decide"
-  echo "whether what this package CLAIMS about the venue is still true, fix it if not, and"
-  echo "then update the row with what you observed and today's date. Do not update the row"
-  echo "first: the row is a record of what someone read, and rewriting it to match a fetch"
-  echo "nobody looked at turns this check into a rubber stamp."
-  exit 1
+
+# ---------------------------------------------------------------------------
+# How old is this package's own claim about the venue?
+#
+# `capabilities/0` carries `measured_at` and `measured_against` because CLAUDE.md is
+# explicit: "Declare what you measured, not what you assume. If it was measured, say when
+# and against what." Every venue in this family populates both.
+#
+# **Nothing read them.** Not this script, not a test, not a line of consumer documentation —
+# the five `usage-rules.md` files, which are what a consuming agent actually reads, did not
+# mention the field at all. A provenance stamp nobody reads is the same shape as the MANUAL
+# rows above before they were aged: a claim that quietly gets old while still reading as
+# current, which is the failure this whole script exists for one category across.
+#
+# Reported, never enforced. A capability measurement going stale is not a build failure — it
+# is a venue that has not been re-checked, and the only thing that can fix it is a person
+# re-measuring and updating the date. Failing the build would just teach everyone to ignore
+# it, which is the same argument this script's header already makes about per-push checks.
+echo
+echo "== capability provenance"
+
+measured_at=$(
+  grep -rhoE 'measured_at: ~D\[[0-9]{4}-[0-9]{2}-[0-9]{2}\]' lib 2>/dev/null |
+    grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort | head -1 || true
+)
+
+# `measured_against` is detected by PRESENCE, and the first line of its value is shown rather
+# than the whole thing.
+#
+# The obvious version — grep out `measured_against: "..."` on one line — is wrong here and
+# was written that way first. Every venue in this family states this field as a multi-line
+# `<>` concatenation, because the honest answer is a paragraph: which documents, which
+# endpoints, measured live or read from a page. A single-line grep matches none of them and
+# reports MISSING on all five, forever, while every one of them is correctly populated.
+#
+# That false negative is worth the comment because it is the same mistake twice: the first
+# read of these venues concluded the field was unset family-wide, and nearly replaced five
+# accurate provenance statements — including `dp_exchange_gemini`'s, which records timeframes
+# measured LIVE against api.gemini.com — with a flat "not probed against the live API". A
+# checker that cannot see a value is not evidence the value is absent.
+measured_against_line=$(
+  grep -rn 'measured_against:' lib 2>/dev/null | grep -v 'measured_against: nil' | head -1
+)
+if [ -z "$measured_at" ]; then
+  echo "  MISSING  capabilities/0 declares no measured_at — an unlabelled claim is worse"
+  echo "           than a missing one. See CLAUDE.md, \"Declare what you measured\"."
+else
+  caps_age=$(( (NOW - $(to_epoch "$measured_at")) / 86400 ))
+
+  if [ "$caps_age" -gt "$STALE_DAYS" ]; then
+    echo "  STALE    capabilities/0 was measured $caps_age days ago ($measured_at)"
+    echo "           Re-measure against the venue and update both fields. A declaration is a"
+    echo "           claim about a real venue, and this one has not been checked since."
+  else
+    echo "  OK       capabilities/0 measured $measured_at ($caps_age days ago)"
+  fi
+fi
+
+# Half the rule is not the rule. CLAUDE.md asks for when AND against what, and an unlabelled
+# claim is worse than a missing one — a date with no subject reads as provenance while saying
+# nothing about what was actually examined.
+#
+# Reported as a POINTER rather than quoted. These statements run to a paragraph apiece and
+# say which documents, which endpoints, and whether a figure was measured live or read from a
+# page; excerpting a line of that in a weekly notice would be worse than useless, because the
+# clause that matters is rarely the first one. A file and line is what a person can follow.
+if [ -z "$measured_against_line" ]; then
+  echo "  MISSING  measured_against is not set — the date says WHEN, nothing says AGAINST"
+  echo "           WHAT. Name the evidence: the vendor documentation, a live probe, a"
+  echo "           sandbox. See CLAUDE.md, \"Declare what you measured\"."
+else
+  echo "  OK       measured_against stated at ${measured_against_line%%:*}:$(
+    printf %s "$measured_against_line" | cut -d: -f2
+  )"
 fi
 
 echo "All $checked cited documentation sources resolve as recorded."

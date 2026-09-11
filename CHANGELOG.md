@@ -31,6 +31,49 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`script/check_doc_sources.sh` now reports the age and provenance of this package's own
+  capability claims.** `capabilities/0` carries `measured_at` and `measured_against` because
+  CLAUDE.md is explicit — *"Declare what you measured, not what you assume. If it was
+  measured, say when and against what."* Both were populated and **nothing read them**: not
+  the weekly checker, not a test, not a line of consumer documentation.
+
+  That is the same shape as the `MANUAL` documentation rows before they were aged — a claim
+  that quietly gets old while still reading as current. The check reports the age against the
+  same `STALE_DAYS` threshold, and reports a missing `measured_against` as its own finding,
+  because half the rule is not the rule.
+
+  Reported, never enforced. A stale measurement is not a build failure; it is a venue nobody
+  has re-checked, and only a person re-measuring can fix it.
+
+- **`usage-rules.md` tells consumers those fields exist and what to do with them.** They ship
+  inside the Hex tarball and are what a consuming agent reads, and none of the five mentioned
+  provenance at all. The distinction worth acting on is not the date but
+  `measured_against`: a figure measured live against the venue's API and one read off a
+  documentation page and never probed are different kinds of claim, and this package's
+  declarations contain both.
+
+### Fixed
+
+- **The first version of that check would have reported `MISSING` on every venue, forever.**
+  It grepped for `measured_against: "…"` on one line. Every venue in this family states the
+  field as a multi-line `<>` concatenation, because the honest answer is a paragraph — which
+  documents, which endpoints, measured live or read from a page. A single-line grep matches
+  none of them.
+
+  Recorded rather than quietly corrected, because the same mistake was made twice in the same
+  hour: the reading that produced the check also concluded `measured_against` was unset
+  across the whole family, and came within one commit of replacing five accurate provenance
+  statements — including this one's — with a flat "not probed against the live API". For
+  `dp_exchange_gemini` that would have been **false**: its statement records timeframes and
+  candle windows measured *live* against `api.gemini.com`. A checker that cannot see a value
+  is not evidence the value is absent.
+
+  The field is now detected by presence and reported as a `file:line` pointer rather than
+  quoted. These statements run to a paragraph each and the clause that matters is rarely the
+  first one, so an excerpt in a weekly notice would mislead more than it informs.
+
 ## [0.2.13] - 2026-09-11
 
 ### Fixed

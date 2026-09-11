@@ -581,6 +581,32 @@ Four things to know before you build on them:
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
 part of a URL that can carry a token.
 
+## Every capability claim is dated, and says what it was measured against
+
+`capabilities/0` carries two provenance fields, and they are there to be read:
+
+```elixir
+caps = DpExchange.Schwab.capabilities()
+caps.measured_at       # ~D[...] — when someone last checked
+caps.measured_against  # what they checked: which documents, which endpoints, live or not
+```
+
+**`measured_against` is the one that matters when you are deciding how much to trust a
+claim.** It distinguishes a figure measured live against the venue's API from one read off a
+documentation page and never probed — and this package's own declarations contain both
+kinds, stated per claim rather than as one blanket sentence.
+
+A claim read from documentation is not worse, it is *different*: it is what the vendor says
+it will do, which is the right basis for a ceiling you must not exceed and a weaker basis for
+behaviour you are about to depend on. If your decision turns on the difference, read the
+field rather than assuming.
+
+`measured_at` going stale is a real thing that happens — venues change, and a declaration is
+a claim about a real venue. `script/check_doc_sources.sh` reports the age on its weekly run
+so it does not quietly get old, but nothing forces it: if you are relying on a capability in
+a way you cannot afford to have wrong, check the date and, where it matters, verify against
+the venue yourself.
+
 ## 15. Nothing is dialled until you subscribe
 
 Supervising this package — `{DpExchange.Schwab, opts}` in your own tree, or
