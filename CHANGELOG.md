@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-09-11
+
 ### Fixed
 
 - **The reconnect backoff crashed during a long storm — the one thing it existed to
