@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-09-11
+
 ### Added
 
 - **`check_doc_sources.sh` now checks whether its own manifest is COMPLETE.** Everything it
