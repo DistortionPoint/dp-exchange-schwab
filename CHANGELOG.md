@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-11
+
 ### Added
 
 - **Back-pressure: a slow subscriber no longer gets an unbounded mailbox.** `Core.Venue`'s
