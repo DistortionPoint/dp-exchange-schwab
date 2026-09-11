@@ -31,6 +31,26 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`subscribe_notices/2` could kill the caller for asking during trouble.** It was the one
+  public call in `Feed` left on `GenServer.call/2`'s five-second default timeout. Every
+  sibling call — `subscribe/3`, `unsubscribe/2`, `update_symbols/2`, `coverage/1` — is given
+  `@call_timeout`, which is this package's own statement of how long the feed may
+  legitimately take to answer on a busy mailbox.
+
+  A consumer registers for notices at start-up, which is precisely when that mailbox is
+  deepest: the transport is coming up, symbols are being resolved, and the handler itself may
+  replay a notice to the newly-registered subscriber. A `GenServer.call/3` timeout exits in
+  the **caller**, not in the feed — so the channel a host uses to hear that something is
+  wrong was the one call that could take the host's calling process down for asking under
+  exactly the conditions it exists to report.
+
+  Now uses `@call_timeout` like every other call. The test blocks the feed's own process for
+  six seconds — past the old default, nowhere near the new timeout — and asserts both that
+  the call succeeds and that it genuinely queued behind the block, so it fails on the
+  unfixed code rather than passing for free.
+
 ## [0.2.15] - 2026-09-11
 
 ### Fixed
