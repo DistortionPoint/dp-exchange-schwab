@@ -31,11 +31,22 @@ What still stands: none of it is measured against the live API, for want of a cr
 | Check | Result |
 |---|---|
 | `GET https://api.schwabapi.com/marketdata/v1/quotes` | **401** — the endpoint exists and requires authentication |
-| `https://developer.schwab.com/…/specifications/…` | **403** — the documentation is private, as expected |
+| Any `developer.schwab.com` specification page | **403** — the documentation is private, as expected |
 | A public OpenAPI document | none found |
 
 The `401` is worth stating: it confirms the base URL and path shape from the capture are
 right, without a credential and without guessing.
+
+The second row used to name an **elided** URL, with ellipsis characters standing in for the
+parts nobody recorded. It read as a citation and was not one: nobody can follow it, and no
+checker can verify it. The specific pages are in `doc-sources.tsv`, which is where a URL
+belongs; this row now describes the class of page instead of pretending to name one.
+
+Found by `script/check_doc_sources.sh`'s manifest-coverage check, which flagged it as a
+cited source absent from the manifest — correctly, since an unfollowable URL can never be in
+one. The elided form is deliberately not quoted back here: repeating it in the explanation
+would leave the same unfollowable string in the file and keep the check red forever, which
+is what the first attempt at this paragraph did.
 
 **Sandbox: answered, and the answer is no.** The saved pages mentioned no sandbox because
 the sandbox text lives on the *Documentation* tab, which the page capture did not carry.

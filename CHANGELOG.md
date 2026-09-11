@@ -31,6 +31,49 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`check_doc_sources.sh` now checks whether its own manifest is COMPLETE.** Everything it
+  did before verified the sources that were listed; nothing verified that the list covered
+  what this package's `docs/reference/` actually cites. A checker whose coverage nobody
+  audits reports "all sources resolve" while saying nothing about the sources it was never
+  told about.
+
+  The gap was real: `dp_exchange_gemini` cited 22 distinct URLs and listed 12, leaving two
+  genuine vendor documentation pages — the WebSocket streams introduction that
+  `websocket-api-replacement.md` names as its source, and one of the four API specifications
+  `endpoint-inventory.md` diffs — unchecked by anything.
+
+  Two classes, reported separately, because only one can be judged mechanically:
+
+  **UNLISTED** — cited on a host the manifest already names as documentation. Same vendor,
+  same docs site, different page: near-certainly a source that belongs in the manifest.
+
+  **UNKNOWN** — cited on a host the manifest does not name at all. Deliberately **not**
+  assumed to be documentation, because most are not: `api.gemini.com`,
+  `api.sandbox.webull.com` and `api.schwabapi.com` are venue APIs, and adding one here would
+  put a live venue into a **weekly scheduled fetch**. D7 is explicit that a venue seeing a
+  package poll it on a timer will rate-limit or block. These are listed for a person to
+  classify and never auto-added.
+
+  Non-blocking, like the rest of the script: it prints and does not change the exit code. An
+  unlisted page is a gap in evidence, not a broken build.
+
+- **An "elided" URL in `endpoint-inventory.md` read as a citation and was not one.** It gave
+  a `developer.schwab.com` address with ellipsis characters standing in for the parts nobody
+  recorded — unfollowable by a reader and unverifiable by any checker. The row now describes
+  the class of page instead of pretending to name one; the specific pages are in
+  `doc-sources.tsv`, which is where a URL belongs.
+
+  Found by the coverage check above, which flagged it as a cited source absent from the
+
+- **Both of this package's scheduled checkers were run by hand for the first time, and they
+  pass.** Neither had ever executed: they are scheduled weekly for Monday and landed on a
+  Tuesday, so no cron had come around. A checker nobody has watched run is a checker nobody
+  has proved works — and running these found the manifest-coverage gap above, which is not
+  the defect either of them was written to catch.
+
+  No vendor drift: every cited documentation source resolves exactly as recorded.
 ## [0.2.10] - 2026-09-11
 
 ### Changed

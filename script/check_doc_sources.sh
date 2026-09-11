@@ -131,6 +131,81 @@ for manifest in "${MANIFESTS[@]}"; do
 done
 
 echo
+
+# ---------------------------------------------------------------------------
+# Is the manifest COMPLETE? Everything above verifies what is listed; nothing
+# verified that the list covers what this package's reference docs actually cite.
+#
+# That gap was real and this check is what found it: `dp_exchange_gemini` cited 22 distinct
+# URLs across `docs/reference/` and listed 12, so two genuine documentation pages —
+# `specs/openapi/prediction-markets.yaml` and `websocket/introduction` — were never checked
+# by anything. A checker whose coverage nobody verifies reports "all sources resolve" while
+# saying nothing about the sources it was never told about.
+#
+# Two classes, reported separately, because only one of them can be judged mechanically:
+#
+#   UNLISTED — cited on a host the manifest ALREADY names as documentation. Same vendor,
+#              same docs site, different page. Near-certainly a documentation source that
+#              belongs in the manifest.
+#
+#   UNKNOWN  — cited on a host the manifest does not name at all. Deliberately NOT assumed
+#              to be documentation, because most of them are not: `api.gemini.com`,
+#              `exchange.gemini.com`, `api.sandbox.webull.com` are API hosts, and adding one
+#              to this manifest would put a venue's live API into a WEEKLY SCHEDULED FETCH.
+#              D7 is explicit that a venue seeing a package poll it on a timer will
+#              rate-limit or block, and that tier-2 traffic is for a human choosing to run
+#              it. So these are listed for a person to classify, never auto-added.
+#
+# Non-blocking like the rest of this script: it prints and does not change the exit code.
+# An unlisted page is a gap in evidence, not a broken build.
+echo
+echo "== manifest coverage"
+
+doc_hosts=$(
+  awk -F'\t' 'NR > 1 && $1 ~ /^http/ { print $1 }' docs/reference/*/doc-sources.tsv 2>/dev/null |
+    sed -E 's#^https?://([^/]+).*#\1#' | sort -u
+)
+
+listed_urls=$(
+  awk -F'\t' 'NR > 1 && $1 ~ /^http/ { print $1 }' docs/reference/*/doc-sources.tsv 2>/dev/null |
+    sort -u
+)
+
+# `[^ )"'\''`,>]` stops at the punctuation that ends a URL in prose and in Markdown links.
+# Trailing `.`/`,`/`)` are stripped after, since a URL at the end of a sentence keeps one.
+cited_urls=$(
+  cat docs/reference/*/*.md 2>/dev/null |
+    grep -ohE 'https?://[^ )"'\''`,>]+' | sed 's/[.,)]*$//' | sort -u
+)
+
+unlisted=0
+unknown=0
+
+for url in $cited_urls; do
+  if printf '%s\n' "$listed_urls" | grep -qxF "$url"; then continue; fi
+
+  host=$(printf '%s' "$url" | sed -E 's#^https?://([^/]+).*#\1#')
+
+  if printf '%s\n' "$doc_hosts" | grep -qxF "$host"; then
+    echo "  UNLISTED cited in docs/reference, absent from the manifest   $url"
+    unlisted=$((unlisted + 1))
+  else
+    echo "  UNKNOWN  cited on a host the manifest does not name          $url"
+    unknown=$((unknown + 1))
+  fi
+done
+
+if [ "$unlisted" -eq 0 ] && [ "$unknown" -eq 0 ]; then
+  echo "  Every URL cited in docs/reference is accounted for."
+else
+  echo
+  echo "  $unlisted unlisted, $unknown on unknown hosts. Neither fails this run."
+  echo "  UNLISTED: read the page, then add a row recording what it did and the date."
+  echo "  UNKNOWN:  classify it. A documentation page gets a row; a venue API host gets"
+  echo "            NONE — putting one here would schedule a weekly fetch against a live"
+  echo "            venue, which is exactly what D7 forbids."
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures of $checked cited documentation sources changed or went stale."
   echo
