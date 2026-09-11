@@ -72,7 +72,7 @@ defmodule DpExchangeSchwab.MixProject do
       # before this line was written, per the lesson recorded below: a floor is only correct
       # once it has been RESOLVED, never once it has been reasoned about.
       #
-      {:dp_exchange_core, "~> 0.3.1"},
+      {:dp_exchange_core, "~> 0.3.3"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.
