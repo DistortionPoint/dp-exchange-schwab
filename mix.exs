@@ -64,7 +64,15 @@ defmodule DpExchangeSchwab.MixProject do
       # keeps applying: a floor is only correct once it has been RESOLVED and compiled
       # against, never once it has been reasoned about.
       #
-      {:dp_exchange_core, "~> 0.2.8"},
+      # `0.3.1` is a MINOR bump, and the signal is deliberate: Core 0.3.0 deleted
+      # `Core.DataProvider` and `Core.FeedBehaviour`, two contracts with zero implementers.
+      # Nothing in this package referenced either, so there is no code change here — the
+      # floor moves because a pin of `~> 0.2.8` would not resolve 0.3.x, which is the pin
+      # doing its job rather than a problem to route around. Resolved and compiled against
+      # before this line was written, per the lesson recorded below: a floor is only correct
+      # once it has been RESOLVED, never once it has been reasoned about.
+      #
+      {:dp_exchange_core, "~> 0.3.1"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.

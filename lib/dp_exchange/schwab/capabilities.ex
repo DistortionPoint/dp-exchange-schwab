@@ -115,7 +115,7 @@ defmodule DpExchange.Schwab.Capabilities do
   #                             no list-everything projection. See the facade.
   #
 
-  # `list_instruments/1`      — an optional DataProvider callback returning richer
+  # `list_instruments/1`      — an optional `Core.Venue` callback returning richer
   #                             `Instrument` values. `get_symbols/1` already covers the
   #                             searchable surface, and the extra fields are not
   #                             checkable without a credential.
