@@ -31,6 +31,36 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`"NaN"` and `"Inf"` from a venue became real `Decimal` prices and flowed through
+  untouched.** Every numeric field in this package funnels through a `decimal/1` helper whose
+  binary clause uses `Decimal.parse/1` and requires the whole string be consumed — the
+  family's established idiom, and the fix for a venue sending the literal `"null"` in a price
+  field. **That guard is not sufficient on its own.** `"NaN"`, `"Inf"` and `"-Inf"` all parse
+  *fully*, and case-insensitively: `"-nan"`, `"inf"` and `"Infinity"` too. Each one arrived as
+  a well-formed `Decimal` and was admitted as a price.
+
+  That is worse than the raise the parse replaced, because it fails a long way from the
+  cause. Measured:
+
+  - `Decimal.add(nan, 1)` is `NaN` — it poisons a consumer's arithmetic **silently**.
+  - `Decimal.compare(nan, _)` **raises** `invalid_operation: operation on NaN` — in the
+    consumer's own process, with a message naming `Decimal` rather than the venue that sent
+    it, and a stacktrace pointing nowhere near this package.
+  - An `Infinity` is quieter still: it never raises and compares greater than everything, so
+    it silently wins every "is this the best price" test a consumer makes.
+
+  **Found where it was fixed, not where it applied.** `dp_exchange_webull` hit this and
+  guarded both of its own copies; the other four venues guarded **none at all — this one had 2**. Every
+  copy in the family now rejects a non-finite value the same way it rejects an unparsable
+  one — as absent, which is what a price that is not a number actually is.
+
+  Tested per venue at the decode seam, and the tests were verified against the *unguarded*
+  helper first: eight of ten fail without the check. They cover the lowercase and mixed
+  spellings too, since a guard matching only the canonical `"NaN"` would let `"inf"` straight
+  through.
+
 ## [0.2.14] - 2026-09-11
 
 ### Added

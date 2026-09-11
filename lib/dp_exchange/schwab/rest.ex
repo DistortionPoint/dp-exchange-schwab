@@ -1629,10 +1629,28 @@ defmodule DpExchange.Schwab.Rest do
   # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
   # the whole string be consumed (`{d, ""}`), is what `streamer_decode.ex` and
   # `chain_strike/1` in this same file already do; every copy of this helper now matches.
+  # `Decimal.parse/1` requiring the whole string be consumed is NOT a sufficient guard on
+  # its own, which is the half this copy was missing. "NaN", "Inf" and "-Inf" all parse
+  # fully and case-insensitively — `"-nan"` and `"inf"` too — so each arrived here as a
+  # perfectly well-formed `Decimal` and flowed onward as a real price.
+  #
+  # That is worse than the raise this parse replaced, and it fails a long way from the
+  # cause. Measured: `Decimal.add(nan, 1)` is NaN, so it poisons a consumer's arithmetic
+  # silently; `Decimal.compare(nan, _)` RAISES `invalid_operation: operation on NaN`, in
+  # the consumer's own process, with a message naming Decimal rather than the venue that
+  # sent it. An Infinity is quieter still — it compares greater than everything and never
+  # raises at all.
+  #
+  # `dp_exchange_webull` found this and guarded both of its own copies; the other four
+  # venues guarded none of their nine. Fixed where it was found, not where it applied —
+  # which is why this comment is in each of them now rather than one of them.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} -> parsed
-      _unparsable -> nil
+      {parsed, ""} ->
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+
+      _unparsable ->
+        nil
     end
   end
 
