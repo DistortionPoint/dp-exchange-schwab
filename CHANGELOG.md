@@ -31,6 +31,23 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI runs `mix test --cover --warnings-as-errors`.** `mix compile --warnings-as-errors`
+  already covered `lib/`, but test files are compiled by `mix test`, which had no such flag
+  — so a compile warning in a test file was permanent and green. Together the two now mean
+  no warning survives anywhere in the build.
+
+  The argument is not tidiness. A handful of permanent warnings is exactly the noise a
+  genuinely wrong one hides behind. The gap was found by running
+  `script/check_dependency_floor.sh` by hand — a checker scheduled weekly that had never
+  once executed, because it landed on a Tuesday and its cron is Monday — and reading what
+  scrolled past. `dp_exchange_core` 0.3.2 fixes five such warnings in the shared conformance
+  suite, two of which were real defects that made every venue package noisy.
+
+  Verified by injecting an unused function into a test file and confirming the run aborts: a
+  gate nobody has watched fail is a gate nobody has proved.
+
 ## [0.2.9] - 2026-09-11
 
 ### Changed
