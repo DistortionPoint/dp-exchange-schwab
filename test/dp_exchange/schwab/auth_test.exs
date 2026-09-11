@@ -284,8 +284,23 @@ defmodule DpExchange.Schwab.AuthTest do
       assert Auth.refresh(%{}) == {:error, {:missing_credentials, :schwab}}
     end
 
-    test "a non-JSON success body is an unreadable response" do
+    test "a non-JSON success body names the decode failure, not an unexpected shape" do
+      # Both are errors, so this was never a wrong answer — only an imprecise one. It
+      # reported "the token response had a shape I did not expect" for a body that was not a
+      # token response at all and could not have come from Schwab: a `200 text/html` is what
+      # a captive portal or a CDN maintenance page answers. A host reading this to decide
+      # whether a person must log in again is owed the difference.
       plug = fn conn -> Plug.Conn.resp(conn, 200, "not json at all") end
+
+      assert Auth.refresh(@creds, plug: plug, retry_attempts: 0) ==
+               {:error, {:undecodable_response, :schwab}}
+    end
+
+    test "a JSON success body with no access token is still an unexpected shape" do
+      # The other side of the split, and why the shape error still exists. This body decoded
+      # perfectly; it simply carries no token, so there is nothing to merge into the
+      # credentials. `merge_tokens/3`'s fallback is what refuses it.
+      plug = fn conn -> Req.Test.json(conn, %{"token_type" => "Bearer"}) end
 
       assert Auth.refresh(@creds, plug: plug, retry_attempts: 0) ==
                {:error, :unexpected_response_shape}

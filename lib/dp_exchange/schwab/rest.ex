@@ -1461,7 +1461,7 @@ defmodule DpExchange.Schwab.Rest do
 
       case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
         {:ok, %{status: status, body: response}} when status in 200..299 ->
-          {:ok, decode(response)}
+          decoded_body(response)
 
         {:ok, %{status: status, body: response}} when status in [400, 401, 403, 404] ->
           {:refused, refusal(status, response)}
@@ -1525,7 +1525,7 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, headers} <- Auth.headers(credentials, opts) do
       case HttpClient.request(:get, url, headers, nil, request_opts(opts)) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
-          {:ok, decode(body)}
+          decoded_body(body)
 
         # Permanent for the request as sent. A 401 is the credential rather than the
         # request, and `Auth.credential_failure?/1` is what a caller checks to decide
@@ -1597,7 +1597,7 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   defp refusal(status, body) do
-    case decode(body) do
+    case refusal_body(body) do
       %{"errors" => [%{"detail" => detail} | _rest]} -> {:venue_error, status, detail}
       %{"error_description" => detail} when is_binary(detail) -> {:venue_error, status, detail}
       %{"message" => detail} when is_binary(detail) -> {:venue_error, status, detail}
@@ -1605,20 +1605,49 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp decode(body) when is_binary(body) do
+  # A 2xx body this package cannot decode is NOT an empty object.
+  #
+  # This used to collapse an unparseable body to `%{}` and hand it on as success. The list
+  # half of that was already found and fixed once — see the note that used to sit on the
+  # `is_map or is_list` clause: "an account list that is empty because the parser dropped it
+  # looks exactly like a credential with no linked accounts". The same sentence is true of
+  # every other reader here and was left standing for them. `%{}` flows into the account,
+  # order and quote readers and comes out as a well-formed struct with each field `nil`,
+  # returned as `{:ok, value}`.
+  #
+  # The realistic source is not malformed JSON from Schwab. It is a `200` that never reached
+  # Schwab — an interstitial, a captive portal, or a CDN maintenance page, all of which
+  # answer `200 text/html`.
+  #
+  # Refuse instead, for every shape rather than for lists alone. `refusal_body/1` below
+  # stays lenient on purpose, for a body read for a different reason. The endpoints whose
+  # 2xx body is legitimately empty — a placed or replaced order, which answers `201` with
+  # the id in `Location`, and a cancel, which answers with nothing — never come through
+  # here; they read the header or return `:ok` directly.
+  defp decoded_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:undecodable_response, :schwab}}
+    end
+  end
+
+  defp decoded_body(body) when is_map(body) or is_list(body), do: {:ok, body}
+  defp decoded_body(_other), do: {:error, {:undecodable_response, :schwab}}
+
+  # Deliberately lenient, unlike `decoded_body/1`. A refusal's body is read for a
+  # human-readable reason and "there wasn't one in it" is an honest answer — the refusal
+  # itself is already established by the status code, so collapsing an unparseable body to
+  # `%{}` here loses nothing and `{:venue_error, status}` remains true. On a 2xx body the
+  # identical collapse invents a success, which is the whole difference.
+  defp refusal_body(body) when is_binary(body) do
     case Jason.decode(body) do
       {:ok, decoded} -> decoded
       {:error, _reason} -> %{}
     end
   end
 
-  # A JSON array decodes to a list, and several endpoints here return one —
-  # `/accounts/accountNumbers` and both order listings. Falling through to `%{}` made
-  # those come back silently empty rather than loudly wrong, which is the worse failure
-  # of the two: an account list that is empty because the parser dropped it looks exactly
-  # like a credential with no linked accounts.
-  defp decode(body) when is_map(body) or is_list(body), do: body
-  defp decode(_other), do: %{}
+  defp refusal_body(body) when is_map(body) or is_list(body), do: body
+  defp refusal_body(_other), do: %{}
 
   defp decimal(nil), do: nil
   defp decimal(""), do: nil

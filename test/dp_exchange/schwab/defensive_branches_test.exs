@@ -275,12 +275,34 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert Decimal.equal?(quote_struct.price, Decimal.from_float(1.5))
     end
 
-    test "an empty body reads as the symbol not being returned" do
-      plug = fn conn -> Plug.Conn.resp(conn, 200, "") end
+    test "a JSON object with the symbol absent is the symbol not being returned" do
+      # This is what the venue actually answers for a symbol it does not carry: a `200`
+      # whose object simply has no key for it. An absent symbol is a refusal rather than an
+      # error — retrying changes nothing.
+      plug = fn conn -> Plug.Conn.resp(conn, 200, "{}") end
 
-      #  is what an unparseable body decodes to, and an absent symbol is a refusal
-      # rather than an error: retrying changes nothing.
       assert {:refused, :not_listed} = Rest.get_price("AAPL", @creds, opts(plug))
+    end
+
+    test "an undecodable body is a decode failure, NOT a claim that the symbol is unlisted" do
+      # This test used to send a zero-byte body and assert `{:refused, :not_listed}`, and
+      # its own comment gave the reason: "`%{}` is what an unparseable body decodes to". It
+      # was asserting the substitution rather than the venue.
+      #
+      # That made every unreadable `200` a statement about the venue's listings. An
+      # interstitial, a captive portal or a CDN maintenance page — each of which answers
+      # `200 text/html` — came back as "Schwab does not carry AAPL", a refusal, permanent,
+      # not worth retrying. It is the family's own failure mode exactly: every value stays
+      # plausible and only the meaning is wrong.
+      #
+      # The venue's real "not listed" answer is the test above and still works, because `{}`
+      # decodes fine. Only bodies that do not decode at all changed.
+      for body <- ["", "<html>maintenance</html>"] do
+        plug = fn conn -> Plug.Conn.resp(conn, 200, body) end
+
+        assert {:error, {:undecodable_response, :schwab}} =
+                 Rest.get_price("AAPL", @creds, opts(plug))
+      end
     end
 
     test "an empty-string numeric field is nil, not zero" do

@@ -218,10 +218,11 @@ defmodule DpExchange.Schwab.Auth do
 
     case HttpClient.request(:post, token_url(opts), headers, body, request_opts(opts)) do
       {:ok, %{status: status, body: response}} when status in 200..299 ->
-        merge_tokens(credentials, decode(response), opts)
+        with {:ok, decoded} <- decoded_body(response),
+             do: merge_tokens(credentials, decoded, opts)
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-        {:refused, {:reauthorization_required, status, detail(decode(response))}}
+        {:refused, {:reauthorization_required, status, detail(refusal_body(response))}}
 
       {:ok, %{status: status, body: response}} ->
         {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
@@ -311,13 +312,36 @@ defmodule DpExchange.Schwab.Auth do
   defp detail(%{"error" => error}) when is_binary(error), do: error
   defp detail(_other), do: nil
 
-  defp decode(body) when is_binary(body) do
+  # A 2xx token response this package cannot decode is NOT an empty object.
+  #
+  # `merge_tokens/3` already refuses `%{}` — its fallback clause returns
+  # `{:error, :unexpected_response_shape}` — so this collapse was caught here rather than
+  # acted on, which is why it is the least severe of the family's copies. It still named the
+  # wrong fact: a `200 text/html` from a captive portal or a CDN maintenance page is not a
+  # token response of an unexpected shape, it is a response that never came from Schwab, and
+  # a host reading the error to decide whether a person must log in again deserves to be
+  # told which.
+  defp decoded_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:undecodable_response, :schwab}}
+    end
+  end
+
+  defp decoded_body(body) when is_map(body), do: {:ok, body}
+  defp decoded_body(_other), do: {:error, {:undecodable_response, :schwab}}
+
+  # Deliberately lenient, unlike `decoded_body/1`. A refusal's body is read for a
+  # human-readable detail and "there wasn't one in it" is an honest answer — the refusal is
+  # already established by the status code, and `{:reauthorization_required, status, nil}`
+  # remains true. On a 2xx body the identical collapse invents a success.
+  defp refusal_body(body) when is_binary(body) do
     case Jason.decode(body) do
       {:ok, decoded} -> decoded
       {:error, _reason} -> %{}
     end
   end
 
-  defp decode(body) when is_map(body), do: body
-  defp decode(_other), do: %{}
+  defp refusal_body(body) when is_map(body), do: body
+  defp refusal_body(_other), do: %{}
 end

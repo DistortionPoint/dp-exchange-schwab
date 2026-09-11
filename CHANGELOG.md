@@ -35,6 +35,31 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **A `200` this package could not decode became an empty object, and then an empty
+  everything.** `decode/1` collapsed any unparseable body to `%{}` in both `Rest` and `Auth`.
+  `%{}` is a map, so it passed straight through the account, order and quote readers and came
+  out as a well-formed struct with every field `nil`, returned as `{:ok, value}`.
+
+  **Half of this was already found and fixed once, for lists only.** The note on the
+  `is_map or is_list` clause says it exactly: "an account list that is empty because the
+  parser dropped it looks exactly like a credential with no linked accounts." The same
+  sentence was true of every other reader and was left standing for them — a fix applied
+  where it was found rather than where it applied.
+
+  **`get_price/3` turned an unreadable body into a claim about the venue's listings.** An
+  undecodable `200` became `%{}`, `%{}` has no key for the symbol, and a missing key means
+  `{:refused, :not_listed}` — permanent, not worth retrying. So an interstitial, a captive
+  portal or a CDN maintenance page, each of which answers `200 text/html`, came back as
+  "Schwab does not carry AAPL". The venue's real "not listed" answer is a `200` whose JSON
+  object simply omits the symbol; that decodes fine and is unchanged.
+
+  Success bodies now refuse with `{:error, {:undecodable_response, :schwab}}`, for every
+  shape rather than for lists alone. The endpoints whose `2xx` body is legitimately empty —
+  a placed or replaced order, which answers `201` with the id in `Location`, and a cancel,
+  which answers with nothing — never came through the decoder and are unaffected. `Auth.refresh/2`
+  now names a decode failure rather than reporting `:unexpected_response_shape` for a body
+  that was not a token response at all. Refusal bodies keep the lenient decode on purpose.
+
 - **`"NaN"` and `"Inf"` from a venue became real `Decimal` prices and flowed through
   untouched.** Every numeric field in this package funnels through a `decimal/1` helper whose
   binary clause uses `Decimal.parse/1` and requires the whole string be consumed — the
