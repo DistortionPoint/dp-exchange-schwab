@@ -280,6 +280,27 @@ defmodule DpExchange.Schwab.SocketTest do
       assert Socket.reconnect_delay_ms(10) == 30_000
       assert Socket.reconnect_delay_ms(100) == 30_000
     end
+
+    test "the cap holds at a failure count that used to overflow the arithmetic" do
+      # The test above existed and picked 10 and 100 — both comfortably inside the float
+      # range, so neither reached the defect. `min(base * round(:math.pow(2, n - 1)), max)`
+      # raises `ArithmeticError` once `n - 1` passes 1023: clamping the RESULT does not help
+      # when the raise happens while computing the argument to `min/2`.
+      #
+      # It is this function's own scenario, not a contrived one. The moduledoc says a
+      # `LOGIN_DENIED` keeps severing the connection "for exactly as long as this process
+      # keeps presenting the same access token", and only a host calling `Auth.refresh/2`
+      # changes that. At the 30-second cap, 1025 rejections is about 8.5 hours — a token
+      # that expired overnight with nobody on hand to refresh it. So the backoff written to
+      # survive a storm crashed during a long one, inside `handle_disconnect/2`, where it
+      # reads as this socket's fault rather than the credential's.
+      for failures <- [1_024, 1_025, 5_000, 100_000] do
+        delay = Socket.reconnect_delay_ms(failures)
+
+        assert delay == 30_000, "#{failures} consecutive failures"
+        assert is_integer(delay)
+      end
+    end
   end
 
   describe "update_access_token/2 — a refreshed token reaches a live socket" do

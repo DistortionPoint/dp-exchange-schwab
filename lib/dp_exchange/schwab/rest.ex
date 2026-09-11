@@ -1292,6 +1292,25 @@ defmodule DpExchange.Schwab.Rest do
       {:ok,
        [
          %DpExchange.Core.Types.Balance{
+           # An assumption, stated as one. **The venue publishes no currency field** — not
+           # on `SecuritiesAccount`, not on `MarginBalance` or `CashBalance`, not anywhere
+           # in the balances payload. Verified against the vendor's own OpenAPI document,
+           # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`,
+           # 2026-09-11: the string `"currency"` does not occur in it at all, and the only
+           # `Currency` schema is an `assetType` enum for a position's instrument, which is
+           # a different question from what the account is denominated in.
+           #
+           # So this is the one hardcoded currency on a real decode path anywhere in this
+           # family — every other literal like it is in a `Fake`. It rests on the Trader API
+           # being US-domiciled brokerage accounts, which is a documented fact about the
+           # product and not a field this package read. CLAUDE.md's rule is what makes the
+           # difference matter: "Declare what you measured, not what you assume... An
+           # unlabelled number is worse than a missing one." It was unlabelled.
+           #
+           # What would falsify it: the vendor adding a currency field to the account or
+           # balances schema, or Schwab serving a non-USD-denominated account through this
+           # API. `script/check_doc_sources.sh` re-reads the spec, so the first would show
+           # up as a schema change rather than as silently wrong balances.
            currency: "USD",
            balance: decimal(total),
            available_balance: decimal(available(account["type"], current)),

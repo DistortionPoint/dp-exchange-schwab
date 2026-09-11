@@ -31,6 +31,45 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The reconnect backoff crashed during a long storm — the one thing it existed to
+  survive.** `reconnect_delay_ms/1` computed `min(base * round(:math.pow(2, failures - 1)),
+  max)`, and `:math.pow/2` raises `ArithmeticError` once the exponent passes 1023, because
+  the float range ends at ~1.8e308. Clamping the *result* does not help: the raise happens
+  while computing the argument to `min/2`.
+
+  This is the function's own stated scenario, not a contrived one. Its moduledoc says a
+  `LOGIN_DENIED` "means the venue will keep severing the connection for exactly as long as
+  this process keeps presenting the same access token", and only a host calling
+  `Auth.refresh/2` changes that. At the 30-second cap, the 1025th consecutive rejection is
+  about 8.5 hours in — an access token that expired overnight with nobody on hand to refresh
+  it, which is precisely what the backoff is for. The crash then landed inside
+  `handle_disconnect/2`, reading as this socket's fault rather than the credential's.
+
+  The existing cap test asserted 10 and 100 failures, both comfortably inside the float
+  range, so neither reached it. Now `Bitwise.bsl/2` with the exponent clamped before the
+  shift, and a test at 1024, 1025, 5000 and 100000.
+
+  Found while giving `dp_exchange_coinbase`, `dp_exchange_gemini` and `dp_exchange_webull`
+  the reconnect backoff they had none of — this package's was the family's only one, so its
+  arithmetic was what got copied, and one test for a large attempt number caught it in all
+  four at once.
+
+- **`get_balances/3`'s `currency: "USD"` was an assumption with nothing saying so.** The
+  venue publishes no currency field: verified against the vendor's own OpenAPI document,
+  `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`, 2026-09-11 —
+  the string `"currency"` does not occur in it at all, and the only `Currency` schema is an
+  `assetType` enum for a position's instrument, a different question from what the account
+  is denominated in.
+
+  The value is almost certainly right, resting on the Trader API being US-domiciled
+  brokerage accounts. That is a documented fact about the product and not a field this
+  package read, and CLAUDE.md is explicit about the difference — "Declare what you measured,
+  not what you assume... An unlabelled number is worse than a missing one." It is now
+  labelled, with what would falsify it. This is the only hardcoded currency on a real decode
+  path anywhere in the family; every other literal like it is in a `Fake`.
+
 ## [0.2.17] - 2026-09-11
 
 ### Fixed

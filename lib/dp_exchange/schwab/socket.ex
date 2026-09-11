@@ -189,11 +189,39 @@ defmodule DpExchange.Schwab.Socket do
   access token — and reconnecting at full speed against a credential that cannot work is
   the reconnect storm this function exists to prevent.
   """
+  # Integer shifting, not `:math.pow/2`, and the exponent is clamped BEFORE the shift.
+  #
+  # `:math.pow(2, n)` is float arithmetic and raises `ArithmeticError` once `n` passes 1023,
+  # because the float range ends at ~1.8e308. Clamping the RESULT — which is what
+  # `min(base * pow, max)` did — does not help: the raise happens while computing the
+  # argument to `min/2`. So this function crashed during exactly the storm it was written to
+  # survive, at roughly the 1025th consecutive rejection.
+  #
+  # That is not hypothetical here, it is this function's own stated scenario. The moduledoc
+  # says a `LOGIN_DENIED` "means the venue will keep severing the connection for exactly as
+  # long as this process keeps presenting the same access token", and only a host calling
+  # `Auth.refresh/2` can change that. At the 30-second cap, 1025 rejections is about 8.5
+  # hours — an access token that expired overnight with nobody on hand to refresh it, which
+  # is precisely the case this backoff exists for. The crash then lands inside
+  # `handle_disconnect/2`, reading as this socket's fault rather than the credential's.
+  #
+  # Found while giving the other three WebSocket venues the backoff they had none of: the
+  # arithmetic was copied there, and writing a test for a large attempt number caught it in
+  # all four at once.
+  #
+  # `Bitwise.bsl/2` has no such ceiling and is exact. The clamp exists only so the
+  # intermediate cannot grow without bound — the cap is already reached at exponent 5
+  # (`2^5 * @base_reconnect_delay_ms` exceeds `@max_reconnect_delay_ms`), so every clamped
+  # value produces the identical answer the unclamped one would have.
+  @max_backoff_exponent 30
+
   @spec reconnect_delay_ms(non_neg_integer()) :: non_neg_integer()
   def reconnect_delay_ms(0), do: 0
 
   def reconnect_delay_ms(failures) when is_integer(failures) and failures > 0 do
-    min(@base_reconnect_delay_ms * round(:math.pow(2, failures - 1)), @max_reconnect_delay_ms)
+    exponent = min(failures - 1, @max_backoff_exponent)
+
+    min(@base_reconnect_delay_ms * Bitwise.bsl(1, exponent), @max_reconnect_delay_ms)
   end
 
   # --- callbacks ----------------------------------------------------------
