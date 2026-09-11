@@ -538,6 +538,49 @@ nothing else, or hand the payload straight to a queue or an ETS table and do the
 elsewhere. The bound is not a tuning knob for throughput; it is the line past which this
 package stops writing into memory you are not reading.
 
+## Telemetry: attach one handler, see every venue
+
+This package emits the `:telemetry` events `DpExchange.Core.Telemetry` documents. Attach to
+the names, not to anything venue-specific:
+
+```elixir
+:telemetry.attach_many(
+  "dp-exchange-metrics",
+  DpExchange.Core.Telemetry.event_prefixes(),
+  &MyApp.Metrics.handle/4,
+  nil
+)
+```
+
+`:provider` in the metadata is how you tell venues apart — one handler covers the whole
+family.
+
+**These names were documented long before anything emitted them.** If you attached a handler
+before this version and saw nothing, that was not your venue being quiet:
+`:telemetry.attach/4` against a name nobody emits succeeds, so an empty panel was
+indistinguishable from no traffic. Every one of them fires now.
+
+Four things to know before you build on them:
+
+- **Telemetry is the metrics channel; `Core.Notice` is the action channel.** Telemetry is
+  aggregate and lossy by design. Alarm on notices. Graph telemetry. Alarming on a gauge
+  documented as droppable is how a missed sample becomes a page at 3am.
+- **`:stop` fires for every outcome**, success or error. That is deliberate: a latency panel
+  built on successes alone shows a venue getting *faster* exactly as it starts failing,
+  because the slow calls are the ones dropping out of the sample. `:exception` is a separate
+  event from a `:stop` carrying an error — an error result is the venue answering badly, an
+  exception is this package failing to ask.
+- **`retry_after_ms` is always milliseconds**, including where the venue's own header is in
+  seconds. A panel summing a mixture of the two is wrong by a factor of a thousand without
+  ever looking wrong.
+- **`:bytes` may be absent from `[:dp_exchange, :link, :event]`**, and absent is not zero. A
+  polling route has no frame, so there is no byte count that means what a socket's does.
+  Treat a missing `:bytes` as "this route cannot measure that", not as no data.
+
+`:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
+metadata reaches logs, aggregators and third-party exporters, and the query string is the one
+part of a URL that can carry a token.
+
 ## 15. Nothing is dialled until you subscribe
 
 Supervising this package — `{DpExchange.Schwab, opts}` in your own tree, or

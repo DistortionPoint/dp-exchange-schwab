@@ -61,7 +61,7 @@ defmodule DpExchange.Schwab.Socket do
 
   use WebSockex
 
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Notice, Telemetry}
   alias DpExchange.Schwab.{Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
 
   require Logger
@@ -225,16 +225,27 @@ defmodule DpExchange.Schwab.Socket do
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :schwab, details: %{reason: inspect(reason)}))
+    Telemetry.link_down(:schwab, inspect(reason))
 
     # See the moduledoc's "A rejected LOGIN is not a network blip" section. `websockex`
     # reconnects immediately with no delay of its own, and a socket presenting an access
     # token the venue will never accept would otherwise hammer the Streamer at full connect
     # speed, forever. Zero consecutive failures waits zero, so an ordinary network blip
     # after a healthy session still reconnects at once.
-    case reconnect_delay_ms(state.login_failures) do
-      0 -> :ok
-      delay -> Process.sleep(delay)
-    end
+    delay = reconnect_delay_ms(state.login_failures)
+
+    # This venue is the ONLY one in the family that emits `link_reconnect_attempt`, and the
+    # reason is that it is the only one with a real attempt counter. `login_failures` is
+    # consecutive rejected logins, reset to zero the moment one succeeds, so the number here
+    # means something: a consumer watching this event sees the backoff climbing and can tell
+    # a socket that cannot get back from one that flapped once. The other four reconnect
+    # immediately and keep no counter — they would have to report `attempt: 1` every time,
+    # which renders a reconnect loop as an endless series of first attempts. An invented
+    # counter is exactly the plausible-wrong-value this family keeps writing rules against,
+    # so they emit `:link, :down` and nothing else.
+    Telemetry.link_reconnect_attempt(:schwab, state.login_failures + 1, delay)
+
+    if delay > 0, do: Process.sleep(delay)
 
     # The venue's session is gone. A socket that kept `logged_in?` would send subscriptions
     # the venue ignores and report a healthy feed that receives nothing.
@@ -280,6 +291,13 @@ defmodule DpExchange.Schwab.Socket do
 
   @impl true
   def handle_frame({:text, raw}, state) do
+    # Emitted BEFORE the decode, and counted whether or not it parses — the question this
+    # event answers is "is the venue sending", and a frame this package could not read is
+    # still a frame the venue sent. Counting only what parsed would make a decoder bug here
+    # look like a silent venue, which on this venue is especially costly: delivering nothing
+    # overnight is the NORMAL state, so a real outage and a quiet market already look alike.
+    Telemetry.link_event(:schwab, :frame, byte_size(raw))
+
     case Jason.decode(raw) do
       {:ok, frame} -> handle_decoded(frame, state)
       # A frame this package cannot parse is dropped rather than crashing the socket: one
@@ -303,6 +321,18 @@ defmodule DpExchange.Schwab.Socket do
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
     if StreamerProtocol.succeeded?(response) do
       notify(state, Notice.new(:link_up, :schwab))
+
+      # Here and not in `handle_connect/2`, for the reason that callback already gives: the
+      # WebSocket being up is the transport, and the LINK is the venue accepting the LOGIN.
+      # Emitting on connect would report a live venue for a socket the Streamer is ignoring
+      # — the transport-vs-link confusion `Core.Telemetry`'s "Why the category is `:link` and
+      # not `:ws`" section exists to prevent.
+      #
+      # The metrics channel alongside the notice channel, never instead of it: a
+      # `Core.Notice` is a condition a consumer must ACT on, telemetry is aggregate and
+      # lossy by design.
+      Telemetry.link_up(:schwab)
+
       # Reset the streak. A success proves the access token this process currently holds
       # works, so the next disconnect — whatever causes it — is presumed innocent again.
       %{state | logged_in?: true, login_failures: 0}

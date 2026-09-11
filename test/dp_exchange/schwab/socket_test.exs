@@ -517,4 +517,100 @@ defmodule DpExchange.Schwab.SocketTest do
       assert Enum.sort(Keyword.keys(opts)) == [:socket_connect_timeout, :socket_recv_timeout]
     end
   end
+
+  describe "the link reports itself on the metrics channel too" do
+    # `Core.Telemetry` documented `[:dp_exchange, :link, …]` as events "every venue package
+    # emits" and nothing in the family emitted any of them, for as long as the spec existed.
+    # `:telemetry.attach/4` against a name nobody emits SUCCEEDS, so a consumer's dashboard
+    # showed an empty panel — which reads as a venue with no traffic, not as an unimplemented
+    # spec. These tests attach real handlers: one that only called an emitter and checked it
+    # returned `:ok` would pass just as happily against the version that emitted nothing.
+    setup do
+      test_pid = self()
+      handler_id = "link-telemetry-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:dp_exchange, :link, :up],
+          [:dp_exchange, :link, :down],
+          [:dp_exchange, :link, :event],
+          [:dp_exchange, :link, :reconnect_attempt]
+        ],
+        fn event, measurements, metadata, _config ->
+          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
+          # one also receives every other concurrently-running test's events.
+          if metadata.provider == :schwab do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      :ok
+    end
+
+    test "link up waits for the LOGIN response, not the WebSocket" do
+      # The transport being up is not the link on this venue: the Streamer ignores every
+      # command until LOGIN succeeds, so a socket reporting the link up on connect would
+      # show a healthy venue for a session that receives nothing.
+      assert {:ok, _state} = Socket.handle_connect(%{}, state())
+      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+
+      response = %{
+        "response" => [
+          %{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => 0}}
+        ]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(response), state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}
+    end
+
+    test "disconnecting emits link down and a reconnect attempt carrying the real backoff" do
+      # This is the ONLY venue in the family that emits `link_reconnect_attempt`, because it
+      # is the only one with a real attempt counter: `login_failures` is consecutive rejected
+      # logins, reset the moment one succeeds. The other four reconnect immediately with no
+      # counter and would have to report `attempt: 1` every time, rendering a reconnect loop
+      # as an endless series of first attempts.
+      #
+      # Two consecutive failures already behind it, so the attempt number and the delay are
+      # both non-trivial — a test starting from zero would pass against an implementation
+      # that hardcoded either.
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed}, state(%{login_failures: 2}))
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, down_metadata}
+      assert is_binary(down_metadata.reason)
+      assert down_metadata.reason =~ "closed"
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :reconnect_attempt], %{count: 1},
+                      metadata}
+
+      assert metadata.attempt == 3
+      # The backoff this socket is about to sleep, not a constant. 1s base doubling per
+      # consecutive failure, so two prior failures is 2s — asserted as the exact number
+      # rather than "greater than zero", which is what caught this test's own first
+      # guess of 4s. Reported BEFORE the sleep, so a consumer sees the wait starting
+      # rather than learning about it once it is over.
+      assert metadata.delay_ms == 2_000
+    end
+
+    test "every frame is a link event, counted with its wire size" do
+      payload = Jason.encode!(%{"notify" => [%{"heartbeat" => "1"}]})
+      assert {:ok, _state} = Socket.handle_frame({:text, payload}, state())
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], measurements, metadata}
+      assert measurements.bytes == byte_size(payload)
+      assert metadata.type == :frame
+    end
+
+    test "a frame that does NOT parse is still counted — the venue still sent it" do
+      # On this venue especially: delivering nothing overnight is the NORMAL state, so a real
+      # outage and a quiet market already look alike. A decoder bug must not join them.
+      assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}
+    end
+  end
 end

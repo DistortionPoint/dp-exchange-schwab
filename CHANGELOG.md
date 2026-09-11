@@ -31,6 +31,55 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **This package now emits the `[:dp_exchange, :link, …]` telemetry the contract has
+  documented since it was written.** `Core.Telemetry` said these are the events "every venue
+  package emits"; there was not one `:telemetry.execute/3` call anywhere in the family for
+  as long as the spec existed. `:telemetry.attach/4` against a name nobody emits **succeeds**
+  — so a consumer wired a dashboard to it, got no error, and saw an empty panel, which reads
+  as a venue with no traffic rather than as an unimplemented spec.
+
+  `:link, :up` and `:link, :down` on the connection transitions, and `:link, :event` per
+  frame with its wire size. The request and rate-limit events come free with
+  `dp_exchange_core` 0.2.8, since every venue's REST goes through `Core.HttpClient` and every
+  metered call through `Core.DefaultRateLimiter`.
+
+  **The metrics channel is alongside the notice channel, never instead of it.** A
+  `Core.Notice` is a condition a consumer must ACT on; telemetry is aggregate and lossy by
+  design. A consumer that alarmed on a telemetry gauge would be acting on a channel
+  documented as droppable, and one that graphed notices would be graphing something it is
+  meant to handle.
+
+  Two details worth stating, because both are places a plausible-looking number would have
+  been wrong:
+
+  A frame is counted **whether or not it parses**. The question the event answers is "is the
+  venue sending", and a frame this package could not read is still a frame the venue sent —
+  counting only what parsed would make a decoder bug here look like a silent venue.
+
+  **This is the only package in the family that emits `:link, :reconnect_attempt`**, because
+  it is the only one with a real attempt counter. `login_failures` is consecutive rejected
+  logins, reset the moment one succeeds, so a consumer watching this event sees the backoff
+  climbing and can tell a socket that cannot get back from one that flapped once. The delay
+  is reported BEFORE the sleep, so the wait is visible as it starts rather than once it is
+  over. The other four reconnect immediately with no counter and would have to report
+  `attempt: 1` every time, rendering a reconnect loop as an endless series of first
+  attempts — worse than no event, so they emit none.
+
+  `:link, :up` fires on the **LOGIN response**, not on connect. The Streamer ignores every
+  command until login succeeds, so a socket reporting the link up on connect would show a
+  healthy venue for a session that receives nothing.
+
+### Changed
+
+- **`dp_exchange_core` floor raised to `~> 0.2.8`**, which is where `Core.Telemetry`'s
+  emitter functions live. A venue calling `:telemetry.execute/3` directly would be naming
+  events by hand in five places — five chances to write `:link_up` instead of
+  `[:dp_exchange, :link, :up]`, with the drift invisible, since a wrong name emits
+  successfully and simply never reaches a handler — and would be using a transitive
+  dependency it never declared.
+
 ## [0.2.7] - 2026-09-11
 
 ### Added
