@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-09-11
+
 ### Fixed
 
 - **A Streamer bootstrap that never answered stranded every `subscribe/2` caller, for the
