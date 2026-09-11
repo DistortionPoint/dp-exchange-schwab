@@ -810,6 +810,126 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
+  describe "the Streamer bootstrap cannot wedge every subscribe/2 caller" do
+    # `start_route_bootstrap/2`'s "already in flight" clause makes every later `subscribe/2`
+    # JOIN the waiting list of the bootstrap in progress, and the only clause that used to
+    # clear `route_bootstrap` was the `{ref, result}` reply. So a bootstrap task that never
+    # answers meant no `subscribe/2` ever returned again: each caller blocked until its own
+    # `GenServer.call` timeout and then EXITED, taking the calling process with it, for the
+    # life of the feed.
+    #
+    # Verified to wedge before the fix by driving both paths directly — a killed task left
+    # `route_bootstrap` holding the dead ref, a second subscribe joined it, and neither
+    # caller was ever replied to.
+
+    test "a killed bootstrap task answers every waiting caller instead of stranding them" do
+      # `fetch_user_preference/2` converts a raise or an `exit` inside the task into an
+      # ordinary error result, and its comment says that stops waiting callers from never
+      # being answered. It does — for those two. A kill is untrappable, so neither runs.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:bootstrapping, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed = start_feed(plug: plug, limiter: permissive_limiter())
+
+      spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
+      assert_receive {:bootstrapping, task_pid}, 3_000
+
+      Process.exit(task_pid, :kill)
+
+      # The caller gets an answer rather than hanging to its own call timeout, and the
+      # answer is this venue's documented degraded mode.
+      assert_receive {:subscribed, _result}, 3_000
+      assert :sys.get_state(feed).route_bootstrap == nil
+      assert :sys.get_state(feed).route == :poll
+      assert Process.alive?(feed)
+    end
+
+    test "a bootstrap that never returns is timed out, not waited on forever" do
+      # The other half, and the one no `:DOWN` can catch: the task is perfectly alive, it
+      # just never answers.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:bootstrapping, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          plug: plug,
+          limiter: permissive_limiter(),
+          route_bootstrap_timeout_ms: 100
+        )
+
+      spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
+      assert_receive {:bootstrapping, task_pid}, 3_000
+
+      assert_receive {:subscribed, _result}, 3_000
+      assert :sys.get_state(feed).route_bootstrap == nil
+
+      # The timed-out task is actually gone, not left running behind the feed's back.
+      # Polled rather than slept: a fixed sleep here is a bet on how fast the VM reaps a
+      # killed process, which is exactly the kind of guess this suite avoids elsewhere.
+      refute_eventually_alive(task_pid)
+      assert Process.alive?(feed)
+    end
+
+    test "a SECOND subscriber parked on a wedged bootstrap is answered too" do
+      # The one that made this the worst wedge in the package: the waiting list is what every
+      # later caller joins, so stranding it strands all of them, not just the first.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:bootstrapping, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          plug: plug,
+          limiter: permissive_limiter(),
+          route_bootstrap_timeout_ms: 300
+        )
+
+      spawn(fn -> send(test_pid, {:first, Feed.subscribe(feed, ["AAPL"])}) end)
+      assert_receive {:bootstrapping, _task_pid}, 3_000
+
+      spawn(fn -> send(test_pid, {:second, Feed.subscribe(feed, ["MSFT"])}) end)
+
+      assert_receive {:first, _r1}, 3_000
+      assert_receive {:second, _r2}, 3_000
+      assert Process.alive?(feed)
+    end
+
+    test "a timer left over from a bootstrap that already settled is ignored" do
+      # The timeout is armed per attempt and matched on the stored ref, so one arriving for a
+      # bootstrap that has since completed must not tear down whatever is running now.
+      feed = start_feed(socket: fake_socket())
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      send(feed, {:route_bootstrap_timeout, make_ref()})
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+      assert :sys.get_state(feed).route_bootstrap == nil
+    end
+
+    defp refute_eventually_alive(pid, waited \\ 0) do
+      cond do
+        not Process.alive?(pid) -> :ok
+        waited >= 2_000 -> flunk("#{inspect(pid)} was still alive after 2000ms")
+        true -> Process.sleep(10) && refute_eventually_alive(pid, waited + 10)
+      end
+    end
+  end
+
   describe "a dead subscriber is dropped, not walked forever" do
     # `Core.Fanout.resolve/1` already skipped a dead subscriber at send time, so no EVENTS
     # accumulated — but nothing removed the pid, so a supervised consumer that restarts left

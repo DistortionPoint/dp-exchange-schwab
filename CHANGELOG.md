@@ -31,6 +31,43 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Streamer bootstrap that never answered stranded every `subscribe/2` caller, for the
+  life of the feed.** `start_route_bootstrap/2`'s "already in flight" clause makes every
+  later `subscribe/2` **join the waiting list** of the bootstrap in progress, and the only
+  clause that cleared `route_bootstrap` was the `{ref, result}` reply. So a bootstrap task
+  that died or hung meant no `subscribe/2` ever returned again: each caller blocked until its
+  own `GenServer.call` timeout and then **exited, taking the calling process with it**.
+
+  Verified by driving it rather than reasoning about it: killing the task left
+  `route_bootstrap` holding the dead ref, a second `subscribe/2` joined it — two callers
+  waiting — and neither was ever replied to.
+
+  Two ways in, both now closed:
+
+  **A task killed from outside.** `fetch_user_preference/2` converts a raise or an `exit`
+  inside the task into an ordinary error result, and its comment says that stops "the
+  bootstrap's waiting callers" from never being answered. It does — for those two.
+  `Process.exit(pid, :kill)` is untrappable, so neither runs. A `:DOWN` matched on the stored
+  ref now settles the bootstrap as a failure.
+
+  **A task that simply never returns.** No `:DOWN` can catch this one: the process is
+  perfectly alive, it just never answers. `@route_bootstrap_timeout_ms` now bounds it, kills
+  the task and settles. **95 seconds, derived rather than picked**: `Core.HttpClient`'s
+  documented defaults are 30 s per attempt over 3 attempts, which this module's own routing
+  comment already works out as roughly ninety. Anything shorter would fire while a
+  legitimately slow request was still inside its own retry budget and turn a recoverable call
+  into a fall-back to the poll route.
+
+  Both settle through `complete_route_bootstrap/2`'s ordinary failure path, so waiting callers
+  get the same answer any other bootstrap failure gives them — a fall back to the poll route,
+  this venue's documented degraded mode — rather than a new path that could drift from it.
+
+  Found by sweeping the family for the shape of a defect fixed in `dp_exchange_coinbase`
+  0.3.12 the same day. This one is worse: Coinbase's wedge silently disabled symbol aliasing,
+  where this one blocks the facade's own `subscribe/2`.
+
 ## [0.2.12] - 2026-09-11
 
 ### Fixed

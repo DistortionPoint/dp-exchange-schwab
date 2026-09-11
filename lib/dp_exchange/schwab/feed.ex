@@ -269,6 +269,21 @@ defmodule DpExchange.Schwab.Feed do
   # an unsubscribe and a subscribe, so a call can wait out two windows; the third is
   # headroom, because a `GenServer.call` timing out first would surface a slow socket as a
   # caller-side exit rather than as an error the caller can retry.
+  # How long the Streamer bootstrap may run before this feed stops waiting for it.
+  #
+  # Without a bound, a `Rest.get_user_preference/2` that never returns wedges this feed
+  # permanently: `route_bootstrap` stays set, every later `subscribe/2` joins its waiting
+  # list, and no caller is ever replied to — each one blocks until its own `GenServer.call`
+  # timeout and then exits, taking the calling process with it.
+  #
+  # 95 seconds, and the number is derived rather than picked: `Core.HttpClient`'s documented
+  # defaults are 30_000 ms per attempt over 3 attempts, which this module's own routing
+  # comment already works out as "roughly ninety seconds". A shorter timeout would fire while
+  # a legitimately slow request was still inside its own retry budget and turn a recoverable
+  # call into a fall-back to the poll route. This is the outer bound for a request that has
+  # stopped answering entirely, not a second, tighter deadline on a healthy one.
+  @route_bootstrap_timeout_ms 95_000
+
   @call_timeout 15_000
 
   # Re-issues `state.wanted` on the `:stream` route on this cadence, unconditionally — see
@@ -509,6 +524,10 @@ defmodule DpExchange.Schwab.Feed do
       # bootstrap and both are owed the same answer; it must never mean two bootstraps, or
       # a consumer subscribing twice in quick succession opens two Streamer connections.
       route_bootstrap: nil,
+      # See `@route_bootstrap_timeout_ms`. Overridable so a test proving the timeout fires
+      # need not wait out ninety-five real seconds.
+      route_bootstrap_timeout_ms:
+        Keyword.get(opts, :route_bootstrap_timeout_ms) || @route_bootstrap_timeout_ms,
       subscriber: subscriber,
       subscribers: MapSet.new([subscriber]),
       notice_subscribers: MapSet.new(),
@@ -676,6 +695,55 @@ defmodule DpExchange.Schwab.Feed do
   # active route at a time, so the link that just dropped was the only thing delivering.
   # `route` and `socket` are left alone — that socket is reconnecting rather than dead, and
   # clearing them here would make `ensure_route/1` dial a second one.
+  # The bootstrap task died or ran past its budget without answering. **Ordered above the
+  # subscriber `:DOWN` clause, which would otherwise swallow it**, and matched on the stored
+  # `ref` so only this feed's own in-flight bootstrap reaches it.
+  #
+  # Left unhandled, this is the worst wedge in the package. `start_route_bootstrap/2`'s
+  # "already in flight" clause makes every later `subscribe/2` **join the waiting list** of a
+  # bootstrap that will never complete, and the only clause that clears `route_bootstrap` is
+  # the `{ref, result}` reply above. So a killed or hung task means no `subscribe/2` ever
+  # returns again: each caller blocks until its own `GenServer.call` timeout and then EXITS,
+  # taking the calling process down with it, for the life of this feed.
+  #
+  # Measured, not reasoned about: killing the task left `route_bootstrap` holding the dead
+  # ref, a second `subscribe/2` joined it (two callers waiting), and neither ever received a
+  # reply.
+  #
+  # `fetch_user_preference/2` converts a raise or an `exit` inside the task into an ordinary
+  # error result, and its comment says that stops "the bootstrap's waiting callers" from
+  # never being answered. It does — for those two. `Process.exit(pid, :kill)` is untrappable,
+  # so no `rescue` or `catch` runs, and a task that simply never returns produces no message
+  # at all. These two clauses are the rest of that guarantee.
+  #
+  # Routed through `complete_route_bootstrap/2`'s ordinary failure path rather than a new
+  # one, so the waiting callers get the same answer they would for any other bootstrap
+  # failure: a fall back to the poll route, which is this venue's documented degraded mode.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{route_bootstrap: %{ref: ref}} = state
+      ) do
+    settle_failed_bootstrap(state, {:error, {:bootstrap_task_down, reason}})
+  end
+
+  # A bootstrap that is still alive but has stopped answering. No `:DOWN` can catch this one
+  # — the process is perfectly healthy, it just never returns — and only a timer tells it
+  # apart from one about to succeed. The pid is killed directly rather than through
+  # `Task.shutdown/2`, which wants a `%Task{}` this feed never kept; `:flush` on the
+  # demonitor stops the resulting `:DOWN` being counted as a second, separate failure.
+  def handle_info(
+        {:route_bootstrap_timeout, ref},
+        %{route_bootstrap: %{ref: ref, pid: pid}} = state
+      ) do
+    Process.exit(pid, :kill)
+    Process.demonitor(ref, [:flush])
+
+    settle_failed_bootstrap(
+      state,
+      {:error, {:bootstrap_timeout, state.route_bootstrap_timeout_ms}}
+    )
+  end
+
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
   #
   # Without this, nothing ever removed a subscriber pid: `Core.Fanout.resolve/1` skips a dead
@@ -781,6 +849,19 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_info(_other, state), do: {:noreply, state}
 
+  # Shared by both wedge clauses above. Identical to the `{ref, result}` reply path's own
+  # tail — clear the bootstrap, complete it, apply the symbol set, answer everyone parked on
+  # it — because a bootstrap that failed by dying is not a different KIND of failure from one
+  # that failed by answering `{:error, _}`, and giving it its own path is how the two drift.
+  defp settle_failed_bootstrap(%{route_bootstrap: %{waiting: waiting}} = state, result) do
+    state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
+    applied = apply_symbols(state)
+
+    Enum.each(waiting, &GenServer.reply(&1, applied))
+
+    {:noreply, state}
+  end
+
   # --- routing ------------------------------------------------------------
 
   # Establishing the Streamer route means a signed `Rest.get_user_preference/2` round trip
@@ -836,7 +917,13 @@ defmodule DpExchange.Schwab.Feed do
 
     task = Task.async(fn -> fetch_user_preference(credentials, request_opts) end)
 
-    %{state | route_bootstrap: %{ref: task.ref, waiting: waiting}}
+    Process.send_after(
+      self(),
+      {:route_bootstrap_timeout, task.ref},
+      state.route_bootstrap_timeout_ms
+    )
+
+    %{state | route_bootstrap: %{ref: task.ref, pid: task.pid, waiting: waiting}}
   end
 
   # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
