@@ -31,6 +31,42 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **Back-pressure: a slow subscriber no longer gets an unbounded mailbox.** `Core.Venue`'s
+  `subscribe/2` doc promised this from the day the contract was written, and no venue in
+  this family implemented any of it — every one fanned out with a bare `send/2` and had
+  never looked at a subscriber's mailbox. A consumer that stalled accumulated a mailbox
+  until the node died, with no notice, no log line, and `coverage/1` reporting perfect
+  health throughout, because the feed genuinely was delivering.
+
+  Past a bound (default 10,000 queued messages, `:max_queue_len` at start) this feed stops
+  sending to that subscriber and emits a `:degraded` notice naming it, the queue length and
+  the bound — and a second `severity: :info` notice when it catches up. The pair brackets
+  exactly the window a consumer has to reconcile from the pull endpoints.
+
+  Implemented in `dp_exchange_core` 0.2.6 as `Core.Fanout`, shared rather than written five
+  times. Three properties worth stating, because they are what make dropping acceptable at
+  all: another subscriber that is keeping up is unaffected; `coverage/1` does not change,
+  because it reports what the *venue* delivered to this package and not what this package
+  forwarded; and **notices are never subject to the bound**, since the notice saying a
+  subscriber is being dropped must not be the first casualty of that same subscriber being
+  dropped.
+
+  See `usage-rules.md`, "A slow subscriber gets dropped, and told".
+
+### Changed
+
+- **`dp_exchange_core` floor raised to `~> 0.2.6`, and this one is hard.** `Feed` calls
+  `Core.Fanout.max_queue_len!/2` at `init/1` and `Core.Fanout.deliver/4` on every payload.
+  Against a lower Core this package does not misbehave, it fails to compile — which is the
+  good outcome.
+
+- **The pid-or-registered-name subscriber resolution moved to `Core.Fanout.resolve/1`.** All
+  five venues had written it identically since DpCryptoManagement's issue #15; the data path
+  and the notice path now share one definition, so they cannot drift into disagreeing about
+  what counts as a reachable subscriber.
+
 ## [0.2.6] - 2026-09-10
 
 ## [0.2.5] - 2026-09-10

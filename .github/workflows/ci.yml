@@ -149,13 +149,41 @@ jobs:
         # second pass cuts a second heading for the same version. The grep below is what
         # actually makes the claim true.
         #
-        # An `[Unreleased]` with nothing under it yields an empty version section, which is
-        # honest: that release recorded no changes.
+        # An `[Unreleased]` with NOTHING under it gets no heading at all, and this is the
+        # part that had to be corrected. It used to cut one anyway, on the reasoning that an
+        # empty version section is "honest: that release recorded no changes". The reasoning
+        # was fine and the consequence was not — that empty heading sits directly under
+        # `## [Unreleased]`, which is the exact line any concurrent branch adds its own entry
+        # to, so git's three-way merge has two plausible places to put that entry and no way
+        # to know that only one of them means what the author intended. It picked wrong three
+        # times: `dp_exchange_webull` twice and this repository once, where `## [0.2.5]` was
+        # published empty while the change it shipped sat under `## [0.2.4]` — a version that
+        # went to Hex before that change existed. Every occurrence had to be unpicked by
+        # hand, and every one of them was a changelog claiming a version introduced something
+        # it did not, which is precisely the defect issue #32 cut these headings to fix.
+        #
+        # Skipping the cut costs nothing real: a release that recorded no changes now has no
+        # heading, which says the same thing by saying less, and whatever lands next gets the
+        # heading of the version that actually ships it. A version with no heading is not a
+        # gap in the record — `git log` and the Hex release list both still have it.
         run: |
           set -euo pipefail
 
           if grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
             echo "Heading for $VERSION already present; nothing to cut."
+            exit 0
+          fi
+
+          # Is there anything under `## [Unreleased]` at all? The first non-blank line after
+          # it decides: another `## [` heading (or end of file) means the section is empty.
+          unreleased_body=$(awk '
+            /^## \[Unreleased\]$/ { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside && NF { print; exit }
+          ' CHANGELOG.md)
+
+          if [ -z "$unreleased_body" ]; then
+            echo "## [Unreleased] is empty — no heading cut for $VERSION. See this step's comment."
             exit 0
           fi
 

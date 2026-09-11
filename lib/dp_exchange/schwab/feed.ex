@@ -256,7 +256,7 @@ defmodule DpExchange.Schwab.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Config, Notice, PollingFeed}
+  alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.{Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
@@ -512,6 +512,13 @@ defmodule DpExchange.Schwab.Feed do
       subscriber: subscriber,
       subscribers: MapSet.new([subscriber]),
       notice_subscribers: MapSet.new(),
+      # Back-pressure, per `Core.Venue`'s `subscribe/2` doc and implemented by
+      # `Core.Fanout`: `dropping` is the set of subscribers currently over their mailbox
+      # bound, carried across calls so a stalled consumer produces one `:degraded` notice
+      # when delivery to it stops and one when it resumes — never one per dropped message,
+      # which would arrive at the rate of the stream it already cannot keep up with.
+      dropping: MapSet.new(),
+      max_queue_len: Fanout.max_queue_len!(opts, :schwab),
       wanted: MapSet.new(Keyword.get(opts, :symbols, [])),
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
@@ -670,13 +677,16 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_info({:dp_exchange, :schwab, {:refused, _symbol, _reason}} = message, state) do
-    fan_out(state.subscribers, message)
-    {:noreply, state}
+    {:noreply, deliver(state, message)}
   end
 
+  # `record_delivery/2` runs whether or not the payload reached anybody. `coverage/1`
+  # reports what the VENUE delivered to this package, not what this package forwarded — a
+  # symbol whose frames are being dropped for a stalled consumer is still arriving, and
+  # reporting it as `:not_covered` would blame the venue for a consumer's own backlog.
   def handle_info({:dp_exchange, :schwab, value} = message, state) do
-    fan_out(state.subscribers, message)
-    {:noreply, record_delivery(state, value)}
+    state = state |> deliver(message) |> record_delivery(value)
+    {:noreply, state}
   end
 
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
@@ -1163,20 +1173,43 @@ defmodule DpExchange.Schwab.Feed do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
   end
 
+  # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
+  # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
+  # notice, and reported again when it catches up.
+  #
+  # Notices keep going through `fan_out/2` unbounded, and must: the notice saying a
+  # subscriber is being dropped cannot be the first casualty of that same subscriber being
+  # dropped.
+  defp deliver(state, message) do
+    {_sent, dropping, transitions} =
+      Fanout.deliver(state.subscribers, message, state.dropping,
+        max_queue_len: state.max_queue_len
+      )
+
+    # `notify/2`, not `fan_out(state.notice_subscribers, ...)` — this venue is the one whose
+    # notices go to `notice_subscribers` UNION `subscribers`, and `notice_subscribers` starts
+    # EMPTY here while the data pid arrives as `subscriber:`. Routing the drop notice the way
+    # the other four venues route theirs would have hidden it from the only process that
+    # normally exists: the consumer being dropped. Caught by a test that counted three
+    # messages where four were expected, which is the whole reason that count is asserted
+    # exactly rather than as "fewer than we sent".
+    Enum.each(transitions, fn transition ->
+      notify(state, Fanout.notice_for(transition, :schwab, state.max_queue_len))
+    end)
+
+    %{state | dropping: dropping}
+  end
+
+  # The UNBOUNDED path — notices only. See `deliver/2` above for why the data stream does
+  # not come through here and why notices deliberately still do.
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn subscriber ->
-      case resolve_subscriber(subscriber) do
+      case Fanout.resolve(subscriber) do
         pid when is_pid(pid) -> send(pid, message)
         nil -> :ok
       end
     end)
   end
-
-  defp resolve_subscriber(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: pid
-  end
-
-  defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
 
   defp notify(state, notice) do
     fan_out(

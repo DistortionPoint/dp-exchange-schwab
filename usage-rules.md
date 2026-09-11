@@ -488,6 +488,56 @@ held onto the functions or the process that made them. If your consumer needs to
 a `Feed` restart unattended, monitor the `Feed` pid (or the `DpExchange.Schwab` pid it
 sits under) yourself and re-issue `subscribe/2` on `:DOWN`.
 
+## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
+
+If your process falls far enough behind that its mailbox reaches **10,000 queued
+messages**, this package stops sending it events and emits a `Core.Notice`:
+
+```elixir
+%Core.Notice{
+  kind: :degraded,
+  severity: :warning,
+  message: "subscriber #PID<0.123.0> is 10000 messages behind, past the 10000 bound — ...",
+  details: %{subscriber: "#PID<0.123.0>", queue_len: 10_000, bound: 10_000, dropping: :newest}
+}
+```
+
+and a second one, `severity: :info`, when you catch up. **Those two notices bracket exactly
+the window you have to reconcile** from the pull endpoints — that is what the pair is for,
+and why the recovery notice exists at all rather than just the alarm.
+
+Three things are worth knowing about the shape of this:
+
+- **The newest is dropped, not the oldest.** A sender cannot remove a message from your
+  mailbox; only you can. So what happens is that nothing further is added while you are over
+  the bound. It is also the better trade: a quote that arrives while you are ten thousand
+  messages behind is stale by the time you would read it, and the frames it would have
+  displaced are no fresher.
+- **Only you are affected.** Another subscriber keeping up keeps receiving everything. One
+  slow consumer is never allowed to become an outage for the others.
+- **`coverage/1` does not change.** It reports what the *venue* delivered to this package,
+  not what this package forwarded to you. A symbol whose frames are being dropped for your
+  backlog is still arriving, and reporting it as `:not_covered` would point you at the venue
+  when the backlog is yours.
+
+Notices themselves are never dropped, whatever your queue looks like — the notice telling
+you that you are being dropped must not be the first casualty of it.
+
+Raise or lower the bound at start:
+
+```elixir
+{DpExchange.Schwab, max_queue_len: 50_000}
+```
+
+Any positive integer. It must be an integer — a string or a float raises at `init/1` rather
+than quietly falling back to the default, because a back-pressure setting you believe you
+configured and did not is worse than not having configured one.
+
+**If you are seeing these notices, the fix is on your side.** Consume in a process that does
+nothing else, or hand the payload straight to a queue or an ETS table and do the work
+elsewhere. The bound is not a tuning knob for throughput; it is the line past which this
+package stops writing into memory you are not reading.
+
 ## 15. Nothing is dialled until you subscribe
 
 Supervising this package — `{DpExchange.Schwab, opts}` in your own tree, or
