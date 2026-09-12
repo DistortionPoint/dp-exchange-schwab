@@ -30,6 +30,8 @@ which venue, what was run against it, and when. "Marked proven" with no evidence
 an acceptable changelog line.
 
 ## [Unreleased]
+
+## [0.2.23] - 2026-09-12
 ### Changed
 
 - **`usage-rules.md` documents the error shapes this package started returning this week.**
