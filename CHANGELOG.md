@@ -30,6 +30,8 @@ which venue, what was run against it, and when. "Marked proven" with no evidence
 an acceptable changelog line.
 
 ## [Unreleased]
+
+## [0.2.24] - 2026-09-12
 ### Fixed
 
 - **A streamed chart bar could carry a `nil` price.** `StreamerDecode.to_candle/3` built
