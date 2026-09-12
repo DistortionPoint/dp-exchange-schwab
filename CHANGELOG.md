@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-09-12
+
 ### Fixed
 
 - **This package was passing fake-driven conformance assertions that never ran.** Several
