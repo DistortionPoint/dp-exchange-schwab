@@ -102,22 +102,62 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   `timeframe` is the caller's, because the venue's chart services stream one width and do
   not name it in the frame.
+
+  ## The four prices are required, and on this service that is the venue's own rule
+
+  `Core.Types.Candle` enforces `:open`, `:high`, `:low` and `:close`, and its `new/1` refuses
+  a `nil` in any of them. This function builds the struct literally, so that check never ran
+  here, and the four went through bare `decimal/1` — which answers `nil` for an absent,
+  empty, unparseable, NaN or Infinity value. A bar with a `nil` `open` would sit in a series
+  looking like every other bar.
+
+  **A `CHART_*` frame cannot legitimately omit them.** The vendor's own Streamer table
+  (`docs/reference/schwab/documentation/market-data-production.html`) gives `CHART_EQUITY`
+  and `CHART_FUTURES` the delivery type **All Sequence** — *"All data is streamed to the
+  client and includes a sequence number"* — as against **Change**, *"Only fields that clients
+  are interested in, and have changed, are streamed"*. So a missing price here is a decode
+  fault, not a partial update, and refusing is the honest answer.
+
+  That distinction is why `to_top_of_book/3` above still carries a `nil` bid or ask: the
+  `LEVELONE_*` services ARE Change delivery, a frame there genuinely omits what did not move,
+  and `Types.TopOfBook` permits `nil` for exactly that reason. Same package, opposite answer,
+  because the venue says something different about each service.
+
+  `Rest.to_candle/3` — the REST arm of the same type — already guarded all four. This was the
+  copy that did not.
+
+  `volume` stays unguarded: it is not an enforced key on `Candle`, and a frame that did not
+  state a volume has not stated one.
   """
   @spec to_candle(map(), String.t(), String.t()) :: {:ok, Candle.t()} | {:error, term()}
   def to_candle(fields, symbol, timeframe) do
-    with {:ok, opened_at} <- chart_time(Map.get(fields, :chart_time)) do
+    with {:ok, opened_at} <- chart_time(Map.get(fields, :chart_time)),
+         {:ok, open} <- required_decimal(Map.get(fields, :open), :open),
+         {:ok, high} <- required_decimal(Map.get(fields, :high), :high),
+         {:ok, low} <- required_decimal(Map.get(fields, :low), :low),
+         {:ok, close} <- required_decimal(Map.get(fields, :close), :close) do
       {:ok,
        %Candle{
          symbol: symbol,
          timeframe: timeframe,
          opened_at: opened_at,
-         open: decimal(Map.get(fields, :open)),
-         high: decimal(Map.get(fields, :high)),
-         low: decimal(Map.get(fields, :low)),
-         close: decimal(Map.get(fields, :close)),
+         open: open,
+         high: high,
+         low: low,
+         close: close,
          volume: decimal(Map.get(fields, :volume)),
          provider: :schwab
        }}
+    end
+  end
+
+  # The same shape as `Rest`'s own copy. A `nil` out of `decimal/1` means "absent, empty,
+  # unparseable, or a NaN/Infinity this package refuses", and whether that may be carried
+  # forward depends on the field; this is how a field says it may not.
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
     end
   end
 

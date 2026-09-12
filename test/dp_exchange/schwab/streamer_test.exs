@@ -469,6 +469,41 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert Decimal.equal?(candle.low, Decimal.new("9.5"))
       assert Decimal.equal?(candle.close, Decimal.new("10.5"))
     end
+
+    test "a bar missing one of the four prices is refused, not built with a nil in it" do
+      # `Types.Candle` enforces all four and its `new/1` refuses a `nil` in any of them, but
+      # this decoder builds the struct literally, so that check never ran here. A bar with a
+      # `nil` `open` sat in the series looking like every other bar.
+      #
+      # **The venue says such a frame cannot happen.** Its own Streamer table gives
+      # `CHART_EQUITY` and `CHART_FUTURES` the delivery type "All Sequence" — *"All data is
+      # streamed to the client"* — as against "Change", *"Only fields that clients are
+      # interested in, and have changed, are streamed"*. A missing price here is a decode
+      # fault, not a partial update.
+      base = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
+
+      for field <- [:open, :high, :low, :close] do
+        assert {:error, {:invalid_decimal, ^field, nil}} =
+                 StreamerDecode.to_candle(Map.delete(base, field), "AAPL", "1m"),
+               "a chart frame missing #{field} must be refused"
+      end
+    end
+
+    test "a NaN price is refused like an absent one" do
+      base = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
+
+      assert {:error, {:invalid_decimal, :high, "NaN"}} =
+               StreamerDecode.to_candle(%{base | high: "NaN"}, "AAPL", "1m")
+    end
+
+    test "volume is NOT required — an unstated volume is not a broken bar" do
+      # `volume` is not an enforced key on `Candle`, and the guard above must not tighten
+      # into it: a frame that did not state a volume has not stated one.
+      fields = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
+
+      assert {:ok, candle} = StreamerDecode.to_candle(fields, "AAPL", "1m")
+      assert candle.volume == nil
+    end
   end
 
   describe "the three book services" do

@@ -30,7 +30,29 @@ which venue, what was run against it, and when. "Marked proven" with no evidence
 an acceptable changelog line.
 
 ## [Unreleased]
+### Fixed
 
+- **A streamed chart bar could carry a `nil` price.** `StreamerDecode.to_candle/3` built
+  `%Core.Types.Candle{}` literally and put the four prices through bare `decimal/1`, which
+  answers `nil` for an absent, empty, unparseable, NaN or Infinity value. `Candle` enforces
+  all four and its `new/1` refuses a `nil` in any of them, but nothing here called `new/1`, so
+  a bar with a `nil` `open` sat in the series looking like every other bar.
+
+  **The venue's own documentation says such a frame cannot happen**, which is what makes
+  refusing correct rather than merely strict. Its Streamer table gives `CHART_EQUITY` and
+  `CHART_FUTURES` the delivery type **All Sequence** — *"All data is streamed to the client
+  and includes a sequence number"* — as against **Change**, *"Only fields that clients are
+  interested in, and have changed, are streamed"*. A missing price on a `CHART_*` frame is a
+  decode fault, not a partial update.
+
+  That distinction is why `to_top_of_book/3` still carries a `nil` bid or ask and was left
+  alone: `LEVELONE_*` **is** Change delivery, a frame there genuinely omits what did not move,
+  and `Types.TopOfBook` permits `nil` for exactly that reason. Same package, opposite answer,
+  because the venue says something different about each service — now asserted in both
+  directions so a later tightening cannot be copied from one onto the other.
+
+  `Rest.to_candle/3`, the REST arm of the same type, already guarded all four. This was the
+  copy that did not.
 ## [0.2.23] - 2026-09-12
 ### Changed
 
