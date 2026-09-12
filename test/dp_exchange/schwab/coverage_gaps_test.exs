@@ -427,6 +427,32 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert {:ok, []} = Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
     end
 
+    test "a row the venue did not attribute to an instrument REFUSES, it is not skipped" do
+      # The distinction this decoder now draws. A flat row (above) is dropped: the venue lists
+      # a closed position and `Position` has no way to say "flat", so omitting it is honest.
+      # A row with no symbol is a different thing — `Core.Types.Position` enforces `:symbol`
+      # and `new/1` refuses a `nil` there, but this builds the struct literally so that check
+      # never ran and `instrument["symbol"]` came through by key.
+      #
+      # Dropping it would read as "you hold none of that instrument", which is a claim; the
+      # truth is that this response could not be read.
+      for instrument <- [%{}, %{"symbol" => nil}, %{"symbol" => ""}] do
+        body = [
+          %{
+            "securitiesAccount" => %{
+              "positions" => [
+                %{"instrument" => instrument, "longQuantity" => 100.0, "shortQuantity" => 0.0}
+              ]
+            }
+          }
+        ]
+
+        assert {:error, {:missing_required_field, :symbol}} =
+                 Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0),
+               "instrument #{inspect(instrument)} must be refused"
+      end
+    end
+
     test "an account with no positions block yields none rather than raising" do
       body = [%{"securitiesAccount" => %{"accountNumber" => "1"}}]
       assert {:ok, []} = Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)

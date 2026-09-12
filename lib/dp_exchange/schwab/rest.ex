@@ -997,7 +997,26 @@ defmodule DpExchange.Schwab.Rest do
   def get_positions(credentials, opts) do
     with {:ok, accounts} <-
            get_account_summaries(credentials, Keyword.put(opts, :fields, "positions")) do
-      {:ok, accounts |> Enum.flat_map(&account_positions/1) |> Enum.reject(&is_nil/1)}
+      accounts |> Enum.flat_map(&account_positions/1) |> collect_positions()
+    end
+  end
+
+  # `nil` rows are DROPPED and error rows REFUSE the whole reply, and the difference is the
+  # point. A `nil` comes from `position_side/2` finding neither a long nor a short leg — a
+  # flat position, which `Position` has no way to represent and which the venue is entitled to
+  # list. An error comes from a row this package could not read at all, and a position list
+  # with an entry silently missing reads as "you hold none of that instrument": a different
+  # and more dangerous claim than "this response could not be read".
+  defp collect_positions(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn
+      nil, acc -> {:cont, acc}
+      {:error, _reason} = error, _acc -> {:halt, error}
+      position, {:ok, acc} -> {:cont, {:ok, [position | acc]}}
+    end)
+    |> case do
+      {:ok, positions} -> {:ok, Enum.reverse(positions)}
+      error -> error
     end
   end
 
@@ -1016,23 +1035,48 @@ defmodule DpExchange.Schwab.Rest do
       nil ->
         nil
 
+      # `position_side/2` already guarantees a non-nil `:side` and `:quantity` here — it
+      # answers `nil` when neither leg carries a positive quantity, and that row is dropped
+      # above rather than built. The drop is correct: a row with no long and no short leg is a
+      # flat position, not an unreadable one, and `Position` has no way to say "flat".
+      #
+      # `:symbol` had no such guard. `Core.Types.Position` enforces it and `new/1` refuses a
+      # `nil` there, but this builds the struct literally — as everywhere in this family — so
+      # `instrument["symbol"]` came through by key. A position naming no instrument cannot be
+      # sized, closed or reconciled by anyone, and unlike a side or a size there is no "the
+      # venue declined to say" reading of it. An unattributable row is an ERROR rather than a
+      # drop — see `collect_positions/1` for why those two are not the same answer.
       {side, quantity} ->
-        %Position{
-          symbol: instrument["symbol"],
-          side: side,
-          quantity: quantity,
-          instrument_type: position_instrument(instrument["assetType"]),
-          average_cost: decimal(row["averagePrice"]),
-          mark_price: nil,
-          notional_value: decimal(row["marketValue"]),
-          realised_pnl: decimal(row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]),
-          unrealised_pnl: decimal(row["currentDayProfitLoss"]),
-          liquidation_price: nil,
-          leverage: nil,
-          venue_time: nil,
-          provider: :schwab
-        }
+        build_position(row, instrument, side, quantity)
     end
+  end
+
+  defp build_position(_row, %{"symbol" => symbol}, _side, _quantity)
+       when not is_binary(symbol) or symbol == "" do
+    {:error, {:missing_required_field, :symbol}}
+  end
+
+  defp build_position(_row, instrument, _side, _quantity)
+       when not is_map_key(instrument, "symbol") do
+    {:error, {:missing_required_field, :symbol}}
+  end
+
+  defp build_position(row, instrument, side, quantity) do
+    %Position{
+      symbol: instrument["symbol"],
+      side: side,
+      quantity: quantity,
+      instrument_type: position_instrument(instrument["assetType"]),
+      average_cost: decimal(row["averagePrice"]),
+      mark_price: nil,
+      notional_value: decimal(row["marketValue"]),
+      realised_pnl: decimal(row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]),
+      unrealised_pnl: decimal(row["currentDayProfitLoss"]),
+      liquidation_price: nil,
+      leverage: nil,
+      venue_time: nil,
+      provider: :schwab
+    }
   end
 
   # Two fields, not one signed number. A row with both zero is a closed position the venue

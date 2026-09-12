@@ -31,7 +31,28 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A position row the venue did not attribute to an instrument was reported as a position.**
+  `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but this
+  decoder builds the struct literally — as every decoder in this family does — so that check
+  never ran and the symbol came through by key. A position naming no instrument cannot be
+  sized, closed or reconciled by anyone: it is not a weaker claim about what is held, it is
+  not a claim at all, and it sat in a list of real positions looking like one.
+
+  One unattributable row now refuses the whole reply rather than being dropped. A position
+  list with an entry silently missing reads as "you hold none of that instrument", which is a
+  different and more dangerous claim than "this response could not be read".
+
+- **A reconnect-timing test failed under load while the behaviour was correct.** It asserted
+  the attempt-1 path returns in under 500ms, which is stricter than the claim needs — the
+  claim is "no backoff was applied", and the smallest backoff is a full second, so any time
+  under one proves it. Measured against that boundary now. Same shape as the rate-limiter
+  bucket race and `Core.PollingFeed`'s poll-interval waits: a timing assertion that holds
+  when the machine is quiet and inverts when it is not.
+
 ## [0.2.24] - 2026-09-12
+
 ### Fixed
 
 - **A streamed chart bar could carry a `nil` price.** `StreamerDecode.to_candle/3` built
@@ -603,7 +624,6 @@ an acceptable changelog line.
   The issue measured five packages, from their `deps/`. `dp_exchange_schwab` has the same
   defect and is not one of their dependencies, so it could not appear in their table: six
   instances, all fixed here.
-
 
 ## [0.2.4] and earlier - 2026-09-10
 
@@ -1774,7 +1794,6 @@ none of these had a facade entry point to remove:
   no payment method, transfer, allowlist or network list — nor an FX, notional-valuation or
   custody endpoint. `get_transactions/2` *reports* money that moved and is served.
 
-
 - **`DpExchange.Schwab.Socket` — the Streamer connected.** `websockex` is now a dependency;
   `mix.exs` said to add it "when it is implemented, and not before", and it is.
 
@@ -1803,7 +1822,6 @@ none of these had a facade entry point to remove:
   a heartbeat is not data; and a malformed frame is dropped rather than taking down a live
   feed.
 
-
 - **The two screeners and `ACCT_ACTIVITY`.** Fourteen of the fifteen services now have field
   maps; `ADMIN` has none because it is the login/logout channel and carries no market data,
   and that gap is asserted rather than left to be noticed.
@@ -1821,7 +1839,6 @@ none of these had a facade entry point to remove:
   `message_data` is left as the venue sent it. Its shape depends on `message_type` and the
   vendor publishes no schema per type in this document; decoding it on a guess would turn an
   unknown activity into a wrongly-shaped known one.
-
 
 - **The three book services — `NYSE_BOOK`, `NASDAQ_BOOK`, `OPTIONS_BOOK` — with an
   `OrderBook` decoder.** These are the depth services this package declared `:unsupported`
@@ -1841,7 +1858,6 @@ none of these had a facade entry point to remove:
   a lit book and is named here rather than left silent. `sequence` is `nil`: the Streamer
   publishes none on a book frame, so a caller cannot use one to detect a dropped update.
 
-
 - **Field maps for the four `LEVELONE_*` services, and they disagree with each other more
   than expected.** Transcribed from the vendor's numbered tables, 2026-09-01:
 
@@ -1857,7 +1873,6 @@ none of these had a facade entry point to remove:
 
   This is what the per-service design was for, and the transcription confirmed it rather
   than the other way round.
-
 
 - **The Streamer's protocol, bootstrap and decoders — the API this package spent a year
   saying the venue did not have.**
@@ -1907,7 +1922,6 @@ none of these had a facade entry point to remove:
   `get_trade_volume/2` is absent from the Accounts and Trading specification: the account
   reports transactions, not an aggregated volume series.
 
-
 - **Core 0.1.21's three new callbacks are declared, each read from the specification.**
   `/accounts/{accountNumber}/previewOrder` prices an order that does not exist yet and
   there is no `previewReplaceOrder`, so `preview_replace/4` has no endpoint — replacing is
@@ -1921,6 +1935,7 @@ none of these had a facade entry point to remove:
   fifteen services; absence here is read, not assumed.
 
 ### Fixed
+
 - **This package no longer claims Schwab has no streaming API.** It does: a WebSocket
   **Streamer** with 15 services, including `NYSE_BOOK`, `NASDAQ_BOOK` and `OPTIONS_BOOK` for
   depth and `ACCT_ACTIVITY` for order and fill events. It is documented in the prose beside

@@ -253,7 +253,15 @@ defmodule DpExchange.Schwab.SocketTest do
       {elapsed_us, {:reconnect, _cleared}} =
         :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, before) end)
 
-      assert elapsed_us < 100_000
+      # Measured against the smallest possible BACKOFF — `@base_reconnect_delay_ms`, one
+      # second at the first rejection — rather than an arbitrary budget. The claim is "no
+      # backoff was applied", and any time under a second proves it.
+      #
+      # This asserted `< 100_000`µs, which is stricter than the claim needs, and it failed
+      # under a loaded full-suite run while the behaviour was correct. Same shape as the
+      # rate-limiter bucket race and `Core.PollingFeed`'s poll-interval waits: a timing
+      # assertion that holds when the machine is quiet and inverts when it is not.
+      assert elapsed_us < 1_000_000
     end
 
     test "login_failures survives a disconnect, so a subsequent LOGIN_DENIED keeps counting" do
