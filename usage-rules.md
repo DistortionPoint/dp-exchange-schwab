@@ -633,3 +633,24 @@ One consequence worth naming: if the Streamer cannot bootstrap, the `Notice{kind
 That is later than before for a consumer that does subscribe, and irrelevant for one
 that never does — a feed nothing has asked anything of has no route to be degraded
 about.
+
+## Error shapes that mean "do not act on this answer"
+
+Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
+A consumer matching only `{:ok, _}` needs no change; one that enumerates error reasons
+should know them.
+
+`{:error, {:undecodable_response, :schwab}}` — the venue answered `2xx` with a body this
+package could not decode. The realistic cause is not malformed JSON from the venue; it is a
+`2xx` that never reached the venue, such as a captive portal or a CDN maintenance page
+answering `200 text/html`. **Worth retrying**: nothing about the request was wrong. This
+package used to substitute an empty object for such a body, which then decoded into a
+well-formed value with every field `nil` and was returned as success.
+
+
+**On `get_price/3` this replaced a false statement about the venue's listings.** An
+undecodable body became an empty object, an empty object has no key for the symbol, and a
+missing key means `{:refused, :not_listed}` — permanent, not worth retrying. So a maintenance
+page came back as "Schwab does not carry AAPL". `{:refused, :not_listed}` still means exactly
+what it says; it is now only ever reached from a `2xx` whose JSON object genuinely omits the
+symbol, which is the venue's own way of saying so.
