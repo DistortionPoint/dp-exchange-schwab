@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mix.lock` moved to `dp_exchange_core` 0.3.10.** It carries two conformance-suite
+  consolidations and two test-isolation fixes in Core's own suite; for this package the
+  effect is that every fake call the contract suite makes now builds its arguments through
+  one builder, so this venue's `endpoint_opts` and `endpoint_symbols` reach all of them
+  rather than only the call sites that happened to be wired. `mix.lock` is committed and CI
+  honours it, so the pin allowing the newer Core was never the same thing as running it.
+
 ## [0.2.21] - 2026-09-12
 
 ### Fixed
