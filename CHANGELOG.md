@@ -31,6 +31,24 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **This package was passing fake-driven conformance assertions that never ran.** Several
+  assertions in `Core.AdapterContract` call an active endpoint through this venue's fake,
+  and every account-scoped one was refused for the missing account before it reached the
+  behaviour under test. The suite took that refusal as a legitimate answer and skipped —
+  green, and proving nothing.
+
+  Caught by deliberately breaking this package's fake against Core's new assertion 24
+  (a `Balance` must name the asset it is a balance of): the suite stayed green. It was never
+  confined to 24 — **assertion 17, the credential gate, had been passing for the wrong
+  reason**, getting its expected failure from the absent account rather than from the
+  stripped credential it exists to test.
+
+  The contract test now declares `endpoint_opts:`, Core 0.3.7's new option, naming the
+  option each of this venue's own endpoints needs. Verified the way the gap was found: with
+  the fake broken on purpose, the suite now fails.
+
 ## [0.2.18] - 2026-09-11
 
 ### Fixed

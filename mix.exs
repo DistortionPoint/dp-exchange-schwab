@@ -72,7 +72,15 @@ defmodule DpExchangeSchwab.MixProject do
       # before this line was written, per the lesson recorded below: a floor is only correct
       # once it has been RESOLVED, never once it has been reasoned about.
       #
-      {:dp_exchange_core, "~> 0.3.3"},
+      #
+      # `0.3.7` is the floor because this package's contract test passes `endpoint_opts:` to
+      # `Core.AdapterContract`, and that option does not exist before it. An older Core does
+      # not fail — it ignores the option, which is worse: the fake-driven assertions go back
+      # to calling this venue's account-scoped endpoints with no account, getting refused
+      # before they reach the behaviour under test, and skipping. Green, and proving nothing.
+      # That is the exact false pass the option was added to remove, so the floor is what
+      # keeps it removed. Resolved and compiled against before this line was written.
+      {:dp_exchange_core, "~> 0.3.7"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.
