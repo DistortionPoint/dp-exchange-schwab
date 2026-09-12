@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mix.lock` moved to `dp_exchange_core` 0.3.8, so assertion 24's refusal check runs
+  here.** 0.3.8 stops that assertion accepting a refusal from an endpoint `capabilities/0`
+  declares active — the clause that let three packages pass an assertion which never
+  executed on them. The pin already allowed the new Core, but `mix.lock` is committed and CI
+  runs `mix deps.get`, which honours it: "the pin allows it" and "CI resolves it" are
+  different statements and only the second one decides what actually runs.
+
 ## [0.2.19] - 2026-09-12
 
 ### Fixed
