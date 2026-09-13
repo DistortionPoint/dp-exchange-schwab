@@ -177,10 +177,26 @@ jobs:
         # hand, and every one of them was a changelog claiming a version introduced something
         # it did not, which is precisely the defect issue #32 cut these headings to fix.
         #
-        # Skipping the cut costs nothing real: a release that recorded no changes now has no
-        # heading, which says the same thing by saying less, and whatever lands next gets the
-        # heading of the version that actually ships it. A version with no heading is not a
-        # gap in the record — `git log` and the Hex release list both still have it.
+        # That correction went one step too far, and dp-exchange-coinbase issue #2 is the
+        # bill. It claimed "skipping the cut costs nothing real ... a version with no heading
+        # is not a gap in the record". From inside the repository that is true — `git log` and
+        # the Hex release list both still have it. From **inside the shipped tarball**, which
+        # is the only thing a consumer reads, an absent heading is indistinguishable from a
+        # heading this step dropped, and the reporter said exactly that: they took 0.3.26,
+        # read `CHANGELOG.md`, found nothing above 0.3.25, and upgraded blind. Telling a
+        # consumer nothing and telling them "nothing changed" are different messages, and only
+        # one of them is information.
+        #
+        # So the heading is cut either way now, and an empty one carries an explicit marker
+        # line saying so.
+        #
+        # **What makes that safe is the guard below, not optimism.** The merge hazard above is
+        # real and cost three hand-unpicks; a marker line does not prevent a concurrent entry
+        # landing under the wrong heading. What it does is make that landing SELF-EVIDENT — an
+        # entry sitting under a heading whose body says "no consumer-facing changes" is a
+        # contradiction on its face, where an entry under a silently empty heading looks
+        # exactly like a normal release. The check below fails the build on precisely that
+        # contradiction, which turns the incident from invisible into loud.
         run: |
           set -euo pipefail
 
@@ -197,18 +213,47 @@ jobs:
             inside && NF { print; exit }
           ' CHANGELOG.md)
 
-          if [ -z "$unreleased_body" ]; then
-            echo "## [Unreleased] is empty — no heading cut for $VERSION. See this step's comment."
-            exit 0
+          # The guard the marker buys. A released section carrying the no-changes marker must
+          # carry NOTHING else: if a concurrent branch's entry merged into one, that is the
+          # misplacement this step's comment describes, and it is caught here instead of
+          # shipping a changelog that credits the wrong version.
+          # Matched on the SHAPE of a changelog entry — a `###` subsection or a list item —
+          # not on "any content". The marker paragraph itself runs to several lines of prose,
+          # and a first version of this guard flagged its own second line; a misplaced entry
+          # always arrives as `### Fixed` or `- ...`, which prose never does.
+          bad=$(awk '
+            /^## \[/ { in_marked = 0; ver = $0 }
+            /^_No consumer-facing changes/ { in_marked = 1; next }
+            in_marked && /^(### |[-*] )/ { print ver; in_marked = 0 }
+          ' CHANGELOG.md)
+
+          if [ -n "$bad" ]; then
+            echo "A version section marked 'no consumer-facing changes' has content under it:"
+            echo "$bad"
+            echo "An entry has almost certainly merged under the wrong heading — see this"
+            echo "step's comment for the three times that happened before. Move it and re-run."
+            exit 1
           fi
 
           today=$(date -u +%Y-%m-%d)
 
-          awk -v v="$VERSION" -v d="$today" '
+          # An empty `[Unreleased]` still gets a heading, with a body that says why it is
+          # empty. See this step's comment: silence and "nothing changed" are different
+          # messages to a consumer reading the tarball.
+          if [ -z "$unreleased_body" ]; then
+            marker="_No consumer-facing changes. Internal or packaging work only — recorded so"
+            marker="$marker every published version has a heading, because an absent one cannot be"
+            marker="$marker told apart from one the release pipeline dropped._"
+          else
+            marker=""
+          fi
+
+          awk -v v="$VERSION" -v d="$today" -v marker="$marker" '
             !cut && /^## \[Unreleased\]$/ {
               print
               print ""
               print "## [" v "] - " d
+              if (marker != "") { print ""; print marker }
               cut = 1
               next
             }
