@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.27] - 2026-09-13
+
 ### Fixed
 
 - **A REST quote the venue did not date was refused outright.** `build_quote/2` gated on
