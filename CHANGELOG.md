@@ -31,6 +31,42 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed quote whose last price was a NaN or Infinity was published with
+  `price: nil`.** `StreamerDecode.to_quote/3` guarded only `when last != nil` in the head
+  and then assigned `price: decimal(last)` — and `decimal/1` answers `nil` for exactly the
+  poisoned values this module's own comment documents at length ("NaN", "Inf", "-Inf" and
+  their case variants all parse fully). The guard was doing its job; its *output* was then
+  put straight into a field `Core.Types.Quote` lists in `@enforce_keys`, and `Quote.new/1`
+  refuses a `nil` there in as many words — "a nil here is what a decode bug on a renamed
+  venue field produces".
+
+  The asymmetry is the point, and it is why this survived: a `nil` **bid** is legitimate
+  (`TopOfBook` says a one-sided book is real, and the NaN test covers it), a `nil` **price**
+  is not. The guard was applied to one decoder in this module and not its neighbour, while
+  `Rest.build_quote/2` already used `required_decimal(raw_price, :price)` for the same field
+  on the other transport.
+
+  `:volume` is unchanged and still reads through `decimal/1`: it is not enforced, so an
+  unreadable last size is `nil` and the quote still stands.
+
+- **A screener row the venue did not name was published with `symbol: ""`.**
+  `Core.Types.ScreenerResult` enforces `:symbol`; `row["symbol"] || ""` satisfied that while
+  saying nothing. An empty string is worse than the `nil` it replaced — a `nil` is
+  detectable, `""` is a value, so a consumer keying coverage by symbol gets a live entry
+  named `""`.
+
+  Such a row is now dropped, the rule `dp_exchange_robinhood` already states for the same
+  situation: "a row missing `symbol` entirely is dropped rather than published under a
+  fabricated one". Dropped **after** `Enum.with_index/2`, so a survivor keeps the position
+  the venue returned it in — closing the gap would re-rank the list, which this endpoint's
+  own ordering comment rules out.
+
+  Both found by a mechanical audit of every literal struct construction in the family
+  against the fields its Core type requires non-nil — the check `new/1` performs and 85
+  literal constructions bypass.
+
 ## [0.2.27] - 2026-09-13
 
 ### Fixed

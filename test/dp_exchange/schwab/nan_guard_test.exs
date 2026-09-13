@@ -35,6 +35,40 @@ defmodule DpExchange.Schwab.NaNGuardTest do
       end
     end
 
+    for value <- @poison do
+      test "#{value} as a LEVELONE last price refuses the quote rather than nilling it" do
+        # The guard turns a NaN into `nil`, and what happens next depends on the type. A
+        # `nil` bid is legitimate — `Core.Types.TopOfBook` says a one-sided book is real. A
+        # `nil` PRICE is not: `Core.Types.Quote` lists `:price` in `@enforce_keys`, and
+        # `Quote.new/1` refuses it in as many words, because "a nil here is what a decode bug
+        # on a renamed venue field produces".
+        #
+        # `to_quote/3` built the struct literally, so that constructor never ran, and its only
+        # guard was `when last != nil` in the head — which a poisoned string passes. This
+        # package's own `Rest.build_quote/2` already used `required_decimal(raw_price, :price)`
+        # for the same field on the other transport.
+        fields = %{last: unquote(value), last_size: "10"}
+
+        assert {:error, {:invalid_decimal, :price, unquote(value)}} =
+                 StreamerDecode.to_quote(fields, "AAPL", @observed_at)
+      end
+    end
+
+    test "a quote with a readable price still decodes, so the guard has not eaten it" do
+      assert {:ok, quoted} = StreamerDecode.to_quote(%{last: "227.5"}, "AAPL", @observed_at)
+      assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
+    end
+
+    test "a poisoned last SIZE does not discard the price beside it" do
+      # `:volume` is not enforced on `Core.Types.Quote`, so the same asymmetry applies one
+      # field over: an unreadable size is `nil` and the quote still stands.
+      assert {:ok, quoted} =
+               StreamerDecode.to_quote(%{last: "227.5", last_size: "NaN"}, "AAPL", @observed_at)
+
+      assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
+      assert quoted.volume == nil
+    end
+
     test "a real number still decodes, so the guard has not eaten the happy path" do
       fields = %{bid: "99.5", ask: "100.5"}
 

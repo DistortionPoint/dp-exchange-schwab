@@ -355,6 +355,44 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert second.metrics["netPercentChange"] == 0.09
     end
 
+    test "a screener row with no symbol is dropped, never published as an empty one" do
+      # `row["symbol"] || ""` satisfied `ScreenerResult`'s enforced `:symbol` while saying
+      # nothing, and an empty string is worse than the `nil` it replaced: a `nil` is
+      # detectable, `""` is a value, so a consumer keying coverage by symbol gets a live
+      # entry named "".
+      body = %{
+        "screeners" => [
+          %{"symbol" => "AAPL"},
+          %{"netPercentChange" => 0.05},
+          %{"symbol" => "TSLA"}
+        ]
+      }
+
+      assert {:ok, results} =
+               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert Enum.map(results, & &1.symbol) == ["AAPL", "TSLA"]
+      refute Enum.any?(results, &(&1.symbol == ""))
+    end
+
+    test "dropping a screener row does not re-rank the survivors" do
+      # Same reason the test above this one gives for not re-ranking by metric: the venue's
+      # returned position IS the ranking, and closing a gap answers a different question.
+      body = %{
+        "screeners" => [
+          %{"symbol" => "AAPL"},
+          %{"netPercentChange" => 0.05},
+          %{"symbol" => "TSLA"}
+        ]
+      }
+
+      assert {:ok, [first, second]} =
+               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert first.rank == 1
+      assert second.rank == 3
+    end
+
     test "an unknown universe refuses through the screener too" do
       assert {:error, {:unknown_movers_universe, "AAPL"}} =
                Rest.get_screener("AAPL", @creds, [])

@@ -39,30 +39,34 @@ defmodule DpExchange.Schwab.StreamerDecode do
   """
   @spec to_quote(map(), String.t(), DateTime.t()) :: {:ok, Quote.t()} | {:error, term()}
   def to_quote(%{last: last} = fields, symbol, observed_at) when last != nil do
-    {:ok,
-     %Quote{
-       symbol: symbol,
-       price: decimal(last),
-       # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size` is
-       # the trade's own, and it is the one a Quote's volume means.
-       volume: decimal(Map.get(fields, :last_size)),
-       # **`nil`, and that is the fix.** `LEVELONE_*` frames carry no venue time in the
-       # fields this package reads, so there is nothing venue-stamped to put here — and
-       # `nil` says exactly that, which is a different fact from "quoted at 14:53:02".
-       #
-       # This used to be `timestamp: observed_at`: an arrival time in a field
-       # `Core.Types.Quote` documented as the venue's own, because the single `:timestamp`
-       # it had left no way to say the venue did not date the frame. Core 0.2.0 split that
-       # field for this reason (dp-exchange-core issue #31).
-       #
-       # `to_order_book/2` below is the counter-example and always was: it reads the venue's
-       # `snapshot_time` and fails closed when absent, rather than substituting. The rule was
-       # always keepable where the venue cooperates; it was unkeepable here, and now it is
-       # sayable.
-       venue_time: nil,
-       observed_at: observed_at,
-       provider: :schwab
-     }}
+    with {:ok, price} <- required_decimal(last, :price) do
+      {:ok,
+       %Quote{
+         symbol: symbol,
+         price: price,
+         # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size`
+         # is the trade's own, and it is the one a Quote's volume means. Read rather than
+         # required: `:volume` is not enforced on `Core.Types.Quote`, so an unreadable size
+         # is `nil` and the quote still stands.
+         volume: decimal(Map.get(fields, :last_size)),
+         # **`nil`, and that is the fix.** `LEVELONE_*` frames carry no venue time in the
+         # fields this package reads, so there is nothing venue-stamped to put here — and
+         # `nil` says exactly that, which is a different fact from "quoted at 14:53:02".
+         #
+         # This used to be `timestamp: observed_at`: an arrival time in a field
+         # `Core.Types.Quote` documented as the venue's own, because the single `:timestamp`
+         # it had left no way to say the venue did not date the frame. Core 0.2.0 split that
+         # field for this reason (dp-exchange-core issue #31).
+         #
+         # `to_order_book/2` below is the counter-example and always was: it reads the
+         # venue's `snapshot_time` and fails closed when absent, rather than substituting.
+         # The rule was always keepable where the venue cooperates; it was unkeepable here,
+         # and now it is sayable.
+         venue_time: nil,
+         observed_at: observed_at,
+         provider: :schwab
+       }}
+    end
   end
 
   def to_quote(_fields, _symbol, _observed_at), do: {:error, :no_traded_price}

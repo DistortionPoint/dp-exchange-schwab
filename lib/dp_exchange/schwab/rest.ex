@@ -985,15 +985,33 @@ defmodule DpExchange.Schwab.Rest do
         |> Map.get("screeners", [])
         |> List.wrap()
         |> Enum.with_index(1)
-        |> Enum.map(fn {row, rank} ->
-          %ScreenerResult{
-            symbol: row["symbol"] || "",
-            screener: name,
-            rank: rank,
-            metrics: row,
-            venue_time: nil,
-            provider: :schwab
-          }
+        # A row that cannot name its instrument is dropped rather than published under an
+        # empty one. `Core.Types.ScreenerResult` enforces `:symbol` and `new/1` refuses a
+        # `nil` there, but this builds the struct literally — as everywhere in this family —
+        # so `|| ""` satisfied the requirement while saying nothing. An empty string is worse
+        # than the `nil` it replaced: a `nil` is detectable, `""` is a value, so a consumer
+        # keying coverage by symbol gets a live entry named "".
+        #
+        # Dropped AFTER `Enum.with_index/2`, so a survivor keeps the position the venue
+        # returned it in. `rank` is that position and nothing else — closing the gap would
+        # re-rank the list, which is what the ordering comment above already rules out.
+        |> Enum.flat_map(fn {row, rank} ->
+          case row["symbol"] do
+            symbol when is_binary(symbol) and symbol != "" ->
+              [
+                %ScreenerResult{
+                  symbol: symbol,
+                  screener: name,
+                  rank: rank,
+                  metrics: row,
+                  venue_time: nil,
+                  provider: :schwab
+                }
+              ]
+
+            _unnamed ->
+              []
+          end
         end)
 
       {:ok, rows}
