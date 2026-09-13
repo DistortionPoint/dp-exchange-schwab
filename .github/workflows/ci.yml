@@ -77,6 +77,75 @@ jobs:
       # Together they mean no warning survives anywhere in the build.
       - run: mix test --cover --warnings-as-errors
 
+      - name: What the tarball actually contains
+        # `mix.exs`'s `files:` comment ends "Nothing warns. Inspect `mix hex.build` before
+        # every publish." That instruction is correct and nobody performs it, which makes it
+        # the shape this family calls a mechanism built, documented and never reached.
+        #
+        # It is not hypothetical. `dp_exchange_core`'s own note records the day it failed: a
+        # `files:` list written under `project/0` instead of `package/0` is **silently
+        # ignored** — Hex ships its own defaults, and that put a 4.4 MB dialyzer PLT in the
+        # tarball while the conformance suite and `usage-rules.md` were left out of it. The
+        # build succeeded. The tests passed. Nothing warned, then or now.
+        #
+        # So the tarball is built and read here, on every push, rather than trusted. The
+        # assertions are the things that are load-bearing for somebody who is not us:
+        #
+        #   * `usage-rules.md` — CLAUDE.md: "ships inside the Hex tarball and is what a
+        #     consuming agent reads. It is not optional and it is not the README."
+        #   * `CHANGELOG.md` — dp-exchange-coinbase issue #2: a consumer read a shipped
+        #     changelog to decide whether an upgrade was safe. An absent one is not a
+        #     cosmetic problem, it is the version-to-change mapping gone.
+        #   * `lib/` — the package itself, which is what the PLT incident displaced.
+        #   * `config/` absent — it governs this package's own dev and test, never a
+        #     consumer's, and shipping it would let a consumer's build read it.
+        #   * no PLT and no `.env` — build artefact and secrets. This repository is public
+        #     and a tarball cannot be unpublished, only retired.
+        run: |
+          set -euo pipefail
+
+          rm -f ./*.tar
+          mix hex.build >/dev/null
+          tarball=$(ls ./*.tar | head -1)
+
+          mkdir -p _pkgcheck
+          tar -xf "$tarball" -C _pkgcheck
+          tar -tzf _pkgcheck/contents.tar.gz > _pkgcheck/files.txt
+
+          fail=0
+          require() {
+            if ! grep -qE "$1" _pkgcheck/files.txt; then
+              echo "MISSING from the tarball: $2"
+              fail=1
+            fi
+          }
+          refuse() {
+            if grep -qE "$1" _pkgcheck/files.txt; then
+              echo "SHIPPED and must not be: $2"
+              grep -E "$1" _pkgcheck/files.txt | sed 's/^/    /'
+              fail=1
+            fi
+          }
+
+          require "^usage-rules\.md$"  "usage-rules.md — what a consuming agent reads"
+          require "^CHANGELOG\.md$"    "CHANGELOG.md — the version-to-change mapping"
+          require "^lib/"              "lib/ — the package itself"
+
+          refuse "^config/"            "config/ — this package's own dev and test config"
+          refuse "\.plt$"              "a dialyzer PLT — a build artefact"
+          refuse "^\.env$|^\.env\."    "a .env file — secrets never ship"
+
+          echo "Tarball contains $(grep -c '' _pkgcheck/files.txt) files."
+          rm -rf _pkgcheck "$tarball"
+
+          if [ "$fail" -ne 0 ]; then
+            echo 'See this step'"'"'s comment: a misplaced files: list is silent, so this is'
+            echo 'read from the built tarball rather than from mix.exs.'
+            exit 1
+          fi
+
+
+
   # No live-venue job in CI. Tier-1 tests (in-process fakes) are all CI runs;
   # tier-2 tests hit a venue's public API and run per venue, by hand, during
   # its extraction — never on a schedule, because a venue that sees a package
