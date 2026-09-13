@@ -31,6 +31,26 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usage-rules.md` said `get_price/3` always carries a real `venue_time`.** That stopped
+  being true in 0.2.29, when a quote row carrying neither `quoteTime` nor `tradeTime` stopped
+  being refused and started coming back with `venue_time: nil` — and the documentation did
+  not follow. `usage-rules.md` is what a consuming agent reads, so a consumer taking that
+  advice had a latent crash on a field this package had just started returning.
+
+  It now tells a REST caller to write the `nil` branch, names `get_historical_prices/5` as
+  the case that still refuses (because `Core.Types.Candle` enforces `:opened_at`), and
+  restates what has not changed: nothing is ever substituted into `venue_time`.
+
+### Changed
+
+- `usage-rules.md` now states three consumer-visible behaviours from 0.2.30 that shipped
+  without a consumer-facing note: the streamed order book's ordering guarantee, that a
+  `LEVELONE_*` frame with a NaN last price is refused rather than delivered with
+  `price: nil`, and that a screener row the venue did not name is dropped — leaving a gap in
+  `rank` rather than renumbering the survivors.
+
 ## [0.2.29] - 2026-09-13
 
 ### Fixed

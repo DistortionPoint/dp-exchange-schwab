@@ -43,7 +43,47 @@ documented as the venue's own.
 
 The **book** is the opposite and always was: `to_order_book/2` reads the venue's
 `snapshot_time` and fails closed without it, so an `OrderBook` always carries a real
-`venue_time`. `get_price/3` over REST does too.
+`venue_time`.
+
+**`get_price/3` over REST used to do the same, and stopped in 0.2.29.** This section said it
+still did. A quote row carrying neither `quoteTime` nor `tradeTime`, or carrying one this
+package cannot read, now comes back with `venue_time: nil` rather than refusing — the price
+is guarded separately and `Core.Types.Quote` does not enforce the time, so discarding a real
+traded price over it threw away what the caller asked for. **Write the `nil` branch for REST
+quotes too**, not only for streamed ones.
+
+`get_historical_prices/5` is unchanged and still refuses an undated bar, because
+`Core.Types.Candle` enforces `:opened_at` and a bar at an invented minute lands in the series
+looking like a real one.
+
+Nothing is ever substituted into `venue_time` on either path: it is the venue's own instant
+or it is `nil`, never this package's clock. That is what `dp_exchange_core` issue #31 split
+the field to guarantee, and it has not changed.
+
+## A streamed order book is sorted, so `hd(bids)` is the best bid
+
+`to_order_book/2` guarantees it as of 0.2.30 — **bids descending, asks ascending** — and it
+is `Core.Types.OrderBook`'s contract rather than this package's convenience. You do not need
+to sort what you receive, and you should not assume the venue's own row order means anything.
+A level whose price cannot be read is dropped rather than carried with a `nil` price.
+
+## A streamed quote with an unreadable last price is refused, not nilled
+
+As of 0.2.30, a `LEVELONE_*` frame whose `last` is a NaN or an Infinity produces
+`{:error, {:invalid_decimal, :price, _}}` rather than a `%Quote{price: nil}`.
+`Core.Types.Quote` enforces `:price`, and a quote with no price is not a weaker quote — it is
+not a quote. The frame's **size** is not enforced and an unreadable one still yields
+`volume: nil` beside a good price.
+
+## A screener row the venue did not name is dropped
+
+Also 0.2.30. `get_screener/3` used to publish such a row with `symbol: ""`, which satisfied
+the contract's non-nil requirement while saying nothing — and an empty string is worse than a
+`nil`, because a consumer keying coverage by symbol gets a live entry named `""`.
+
+**A shorter list is not an error, and the venue's ranking is preserved**: a dropped row
+leaves a gap in `rank` rather than renumbering the survivors, because `rank` is the position
+the venue returned the row in.
 
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
