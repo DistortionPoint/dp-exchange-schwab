@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.31] - 2026-09-13
+
 ### Fixed
 
 - **`usage-rules.md` said `get_price/3` always carries a real `venue_time`.** That stopped
