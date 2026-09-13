@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.28] - 2026-09-13
+
 ### Fixed
 
 - **A streamed quote whose last price was a NaN or Infinity was published with
