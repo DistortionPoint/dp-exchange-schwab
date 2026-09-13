@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.34] - 2026-09-13
+
 ### Changed
 
 - **A crashed POLLER was never tested, only a crashed socket.** `Feed` has two
