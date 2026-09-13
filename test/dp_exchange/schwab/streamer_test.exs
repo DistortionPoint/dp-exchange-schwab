@@ -549,12 +549,52 @@ defmodule DpExchange.Schwab.StreamerTest do
       refute Decimal.equal?(size, Decimal.new("150"))
     end
 
+    test "bids come back highest first and asks lowest first, whatever the venue sent" do
+      # `Core.Types.OrderBook`: "The ordering is part of the contract, not a convenience: a
+      # caller reading `hd(bids)` as the best bid is reading it correctly, and a venue
+      # package that returns venue-order without re-sorting has broken the contract even
+      # though every value in it is true."
+      #
+      # `dp_exchange_coinbase` was the only package in the family sorting. This one passed
+      # the venue's rows through, so `hd(bids)` was whatever row arrived first — a wrong best
+      # bid made entirely of real numbers.
+      fields = %{
+        snapshot_time: 1_787_936_147_000,
+        bids: [[10.49, 100, 1, []], [10.50, 300, 2, []], [10.48, 50, 1, []]],
+        asks: [[10.62, 200, 1, []], [10.60, 100, 1, []]]
+      }
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+
+      assert Enum.map(book.bids, fn {price, _size} -> Decimal.to_float(price) end) ==
+               [10.50, 10.49, 10.48]
+
+      assert Enum.map(book.asks, fn {price, _size} -> Decimal.to_float(price) end) ==
+               [10.60, 10.62]
+    end
+
     test "a book with no snapshot time is REFUSED, not stamped on arrival" do
       assert {:error, :missing_venue_timestamp} =
                StreamerDecode.to_order_book(%{bids: [], asks: []}, "AAPL")
     end
 
-    test "levels keep the venue's ordering" do
+    test "levels are re-sorted, not left in the venue's row order" do
+      # This asserted the opposite until 2026-09-13 — that `[10.49, 10.50]` comes back in
+      # that order — and carried no reasoning for it. Its own fixture is the tell: an
+      # ASCENDING bid list, which is exactly the order `Core.Types.OrderBook` calls broken.
+      #
+      # That type is unambiguous, and it anticipates this mistake by name: "The ordering is
+      # part of the contract, not a convenience: a caller reading `hd(bids)` as the best bid
+      # is reading it correctly, and a venue package that returns venue-order without
+      # re-sorting has broken the contract even though every value in it is true."
+      #
+      # `dp_exchange_coinbase` is the one package in the family that was already sorting, so
+      # the family had both answers running at once. Kept as a test rather than deleted,
+      # because the fixture is the useful part: it is the case that was wrong.
+      #
+      # `OrderBookDelta` is the genuine exception and says so separately — its entries
+      # "arrive in the venue's own order". This is a snapshot, which that type contrasts
+      # itself against as having "eager, sorted `bids`/`asks` lists".
       fields = %{
         snapshot_time: 1_787_936_147_000,
         bids: [[10.49, 100, 1, []], [10.50, 300, 1, []]],
@@ -563,8 +603,8 @@ defmodule DpExchange.Schwab.StreamerTest do
 
       assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
       assert [{first, _size1}, {second, _size2}] = book.bids
-      assert Decimal.equal?(first, Decimal.new("10.49"))
-      assert Decimal.equal?(second, Decimal.new("10.50"))
+      assert Decimal.equal?(first, Decimal.new("10.50")), "the best bid comes first"
+      assert Decimal.equal?(second, Decimal.new("10.49"))
     end
 
     test "a level with no price is dropped rather than carried as nil" do

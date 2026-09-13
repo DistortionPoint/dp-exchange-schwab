@@ -209,8 +209,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
       {:ok,
        %OrderBook{
          symbol: symbol,
-         bids: levels(Map.get(fields, :bids)),
-         asks: levels(Map.get(fields, :asks)),
+         bids: levels(Map.get(fields, :bids), :desc),
+         asks: levels(Map.get(fields, :asks), :asc),
          venue_time: timestamp,
          observed_at: DateTime.utc_now(),
          # The Streamer publishes no sequence on a book frame. `nil` means the venue did
@@ -226,14 +226,29 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   # A level is `[price, aggregate_size, …]`. A level without a price is not a level, and
   # keeping it would put `{nil, size}` into a book a caller folds over.
-  defp levels(rows) when is_list(rows) do
-    for row <- rows,
-        price = level_at(row, 0),
-        not is_nil(price),
-        do: {price, level_at(row, 1)}
+  # Sorted here, not passed through in the venue's row order. `Core.Types.OrderBook` makes the
+  # ordering part of the contract in as many words — "a caller reading `hd(bids)` as the best
+  # bid is reading it correctly, and a venue package that returns venue-order without
+  # re-sorting has broken the contract even though every value in it is true" — and this
+  # returned whatever row the venue sent first.
+  #
+  # `{direction, Decimal}` rather than term order, matching `dp_exchange_coinbase`'s
+  # `sorted/2` — the only package in the family that was already doing this — because
+  # `Decimal` structs do not compare correctly as plain terms.
+  #
+  # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
+  defp levels(rows, direction) when is_list(rows) do
+    rows
+    |> Enum.flat_map(fn row ->
+      case level_at(row, 0) do
+        nil -> []
+        price -> [{price, level_at(row, 1)}]
+      end
+    end)
+    |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})
   end
 
-  defp levels(_absent), do: []
+  defp levels(_absent, _direction), do: []
 
   defp level_at(row, index) when is_list(row), do: row |> Enum.at(index) |> decimal()
 

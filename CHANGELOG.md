@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed order book came back in the venue's row order, so `hd(bids)` was not the best
+  bid.** `Core.Types.OrderBook` makes this part of the contract and anticipates the mistake
+  by name: *"The ordering is part of the contract, not a convenience: a caller reading
+  `hd(bids)` as the best bid is reading it correctly, and a venue package that returns
+  venue-order without re-sorting has broken the contract even though every value in it is
+  true."*
+
+  A test asserted the opposite — "levels keep the venue's ordering" — and carried no
+  reasoning for it. Its own fixture was the tell: an ASCENDING bid list, which is exactly the
+  order that contract calls broken. It is kept rather than deleted, with its expectation
+  corrected and the reasoning recorded, because the fixture is the useful part: it is the
+  case that was wrong.
+
+  `dp_exchange_coinbase` was the one package in the family already sorting, so the family had
+  both answers running at once. The sort matches its `sorted/2`, including
+  `{direction, Decimal}` rather than term order, because `Decimal` structs do not compare
+  correctly as plain terms.
+
+  `Core.Types.OrderBookDelta` is the genuine exception and says so separately — its entries
+  "arrive in the venue's own order". This package decodes snapshots, which that type
+  contrasts itself against as having "eager, sorted `bids`/`asks` lists".
+
 ## [0.2.28] - 2026-09-13
 
 ### Fixed
