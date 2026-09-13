@@ -31,6 +31,50 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed `TopOfBook` published the venue's delta as though it were the book.**
+  `LEVELONE_*` is **Change** delivery — the vendor's own service table gives that type to
+  `LEVELONE_EQUITIES`, `LEVELONE_OPTIONS`, `LEVELONE_FUTURES` and
+  `LEVELONE_FUTURES_OPTIONS`, and defines it as *"Only fields that clients are interested in,
+  and have changed, are streamed to the client. Data is conflated by the streamer."* A frame
+  there states only what moved.
+
+  `Socket` emitted each frame straight through, so a frame that moved only the ask produced
+  `%TopOfBook{bid: nil, bid_size: nil, ask_size: nil}`. `Core.Types.TopOfBook` defines those
+  `nil`s: a `nil` bid is *"an illiquid instrument [that] can genuinely have no resting bid,
+  and a venue that says so is telling the truth"*, and a `nil` size *"means 'not published',
+  never 'none available'"*. Neither claim was the venue's. On a liquid equity the bid
+  vanished on every frame that moved only the other side.
+
+  Every value in it was real and came from the venue; only the meaning was wrong — the
+  failure mode this family names as its recurring one, and the reason it survived review is
+  that the delivery type had been read correctly and written down, and the conclusion drawn
+  from it was "so `nil` is permitted" rather than "so this is not a book yet".
+
+  Each frame is now merged onto the last book published for that symbol, and the SNAPSHOT
+  crosses the facade. Presence decides, not value: `StreamerProtocol.rename/2` builds its map
+  only from field numbers the frame carried, so a key means the venue spoke. A field present
+  but unreadable — a NaN, which has its own guard and tests — is **not** carried forward,
+  because the venue did say something and answering with the previous value would invent an
+  answer to a question that was actually asked.
+
+  The merge state is per connection and is dropped on reconnect alongside `subscriptions`,
+  for the same reason those are dropped: a level from a session the venue no longer has is
+  not one this package will keep asserting.
+
+  This is also a facade fix. A consumer able to tell a Change service from an All Sequence
+  one by the shape of its values is a consumer who can see how this venue works.
+
+  `CHART_*` (All Sequence) and the book services (Whole) deliver complete units and are
+  unchanged — nothing is merged for those, and a missing candle price is still refused.
+
+### Changed
+
+- `usage-rules.md` now states that a streamed `TopOfBook` is a merged snapshot: consumers
+  must not accumulate frames themselves, a side not yet reported by the current session is
+  `nil` and indistinguishable from a genuinely absent one, and a reconnect rebuilds the book.
+
 ## [0.2.25] - 2026-09-12
 
 ### Fixed

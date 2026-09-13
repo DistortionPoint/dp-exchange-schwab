@@ -76,6 +76,17 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   `venue_time` is `nil` because these frames carry none; `observed_at` is when the frame
   arrived, and the pair together is the only honest statement of freshness.
+
+  ## This returns the frame's DELTA, and is not what crosses the facade
+
+  `LEVELONE_*` is Change delivery, so a frame states only what moved and this function can
+  only report what the frame stated. The result is therefore a partial book: a field absent
+  here means "the venue did not mention it", which is **not** what a `nil` means on
+  `Core.Types.TopOfBook` — there it says the level does not exist.
+
+  `Socket.merge_top_of_book/3` resolves that, folding this delta onto the last book published
+  for the symbol, and the merged snapshot is what a consumer receives. Nothing that calls
+  this function directly should publish its result.
   """
   @spec to_top_of_book(map(), String.t(), DateTime.t()) :: {:ok, TopOfBook.t()}
   def to_top_of_book(fields, symbol, observed_at) do
@@ -118,10 +129,18 @@ defmodule DpExchange.Schwab.StreamerDecode do
   are interested in, and have changed, are streamed"*. So a missing price here is a decode
   fault, not a partial update, and refusing is the honest answer.
 
-  That distinction is why `to_top_of_book/3` above still carries a `nil` bid or ask: the
-  `LEVELONE_*` services ARE Change delivery, a frame there genuinely omits what did not move,
-  and `Types.TopOfBook` permits `nil` for exactly that reason. Same package, opposite answer,
-  because the venue says something different about each service.
+  That distinction is also why `to_top_of_book/3` above does not refuse an absent bid: the
+  `LEVELONE_*` services ARE Change delivery, and a frame there genuinely omits what did not
+  move, so an absent level is a normal frame rather than a decode fault. Same package,
+  opposite answer, because the venue says something different about each service.
+
+  An earlier version of this paragraph finished "and `Types.TopOfBook` permits `nil` for
+  exactly that reason", and stopped there. It does permit `nil` — but it says what that
+  `nil` MEANS, and the meaning is "this level does not exist", not "this frame did not
+  mention it". Reading the delivery type correctly and then publishing the delta anyway put
+  a claim about the book on the venue's behalf that the venue never made. The delta is now
+  merged onto the last known book in `Socket.merge_top_of_book/3`, and the snapshot is what
+  crosses the facade.
 
   `Rest.to_candle/3` — the REST arm of the same type — already guarded all four. This was the
   copy that did not.

@@ -10,6 +10,7 @@ defmodule DpExchange.Schwab.SocketTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Notice, Types}
+  alias DpExchange.Core.Types.TopOfBook
   alias DpExchange.Schwab.{Credentials, Socket, StreamerInfo}
 
   @info %StreamerInfo{
@@ -35,7 +36,8 @@ defmodule DpExchange.Schwab.SocketTest do
         logged_in?: false,
         request_id: 1,
         subscriptions: MapSet.new(),
-        login_failures: 0
+        login_failures: 0,
+        last_top: %{}
       },
       overrides
     )
@@ -640,6 +642,85 @@ defmodule DpExchange.Schwab.SocketTest do
       # outage and a quiet market already look alike. A decoder bug must not join them.
       assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
       assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}
+    end
+  end
+
+  describe "LEVELONE is Change delivery, so a frame is a delta and not a book" do
+    # The vendor's own table gives `LEVELONE_EQUITIES`, `LEVELONE_OPTIONS`,
+    # `LEVELONE_FUTURES` and `LEVELONE_FUTURES_OPTIONS` the delivery type **Change** —
+    # "Only fields that clients are interested in, and have changed, are streamed to the
+    # client. Data is conflated by the streamer."
+    #
+    # `Core.Types.TopOfBook` says the opposite about a `nil`: "An illiquid instrument can
+    # genuinely have no resting bid, and a venue that says so is telling the truth." So
+    # emitting a frame's absent bid as `nil` publishes a factual claim about the book that
+    # the venue never made — and on a liquid equity it is false on every frame that moves
+    # only the ask.
+    defp data_frame(fields) do
+      frame(%{"data" => [%{"service" => "LEVELONE_EQUITIES", "content" => [fields]}]})
+    end
+
+    test "a field the frame omits keeps its last known value rather than becoming nil" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50", "4" => "3", "5" => "7"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{bid: bid, ask: ask}}
+      assert Decimal.equal?(bid, Decimal.new("99.50"))
+      assert Decimal.equal?(ask, Decimal.new("100.50"))
+
+      # Only the ask moved. Everything else is unchanged, which is why the venue did not
+      # send it.
+      {:ok, _state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "2" => "100.75"}), state)
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{} = top}
+      assert Decimal.equal?(top.ask, Decimal.new("100.75"))
+
+      assert top.bid != nil, "an omitted bid must not be published as 'no resting bid'"
+      assert Decimal.equal?(top.bid, Decimal.new("99.50"))
+      assert Decimal.equal?(top.bid_size, Decimal.new("3"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("7"))
+    end
+
+    test "a symbol carries its own book, not another symbol's" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "AAPL"}}
+
+      {:ok, state} =
+        Socket.handle_frame(data_frame(%{"key" => "MSFT", "2" => "400.00"}), state)
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "MSFT"} = msft}
+
+      assert msft.bid == nil,
+             "MSFT has never reported a bid; AAPL's must not stand in for it"
+
+      {:ok, _state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "2" => "101.00"}), state)
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "AAPL"} = aapl}
+      assert Decimal.equal?(aapl.bid, Decimal.new("99.50"))
+    end
+
+    test "a reconnect drops what the previous session knew" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      # `handle_disconnect/2` already clears `subscriptions` because the venue's session is
+      # gone. A book carried across that boundary would be this package asserting a level
+      # from a session the venue no longer has.
+      {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, state)
+      assert reconnected.last_top == %{}
     end
   end
 end

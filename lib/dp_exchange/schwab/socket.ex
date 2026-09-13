@@ -114,7 +114,11 @@ defmodule DpExchange.Schwab.Socket do
       # Consecutive rejected LOGINs, reset to 0 on the next success. Drives
       # `reconnect_delay_ms/1` — see the moduledoc's "A rejected LOGIN is not a network
       # blip" section.
-      login_failures: 0
+      login_failures: 0,
+      # The last book this socket published per symbol, because `LEVELONE_*` is Change
+      # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
+      # connection, and dropped wholesale on reconnect.
+      last_top: %{}
     }
 
     WebSockex.start_link(
@@ -277,7 +281,10 @@ defmodule DpExchange.Schwab.Socket do
 
     # The venue's session is gone. A socket that kept `logged_in?` would send subscriptions
     # the venue ignores and report a healthy feed that receives nothing.
-    {:reconnect, %{state | logged_in?: false, subscriptions: MapSet.new()}}
+    # `last_top` goes with the subscriptions, and for the same reason. A book carried across
+    # this boundary would be this package continuing to assert a level on behalf of a session
+    # the venue no longer has; the fresh session re-states what is true when it resubscribes.
+    {:reconnect, %{state | logged_in?: false, subscriptions: MapSet.new(), last_top: %{}}}
   end
 
   @impl true
@@ -427,8 +434,7 @@ defmodule DpExchange.Schwab.Socket do
 
     case StreamerFields.for_service(service) do
       {:ok, field_map} ->
-        Enum.each(content, &emit(&1, service, field_map, observed_at, state))
-        state
+        Enum.reduce(content, state, &emit(&1, service, field_map, observed_at, &2))
 
       # A service with no field map is left undecoded rather than decoded with another's
       # numbering. Silence here is correct; a wrong field is not.
@@ -442,43 +448,81 @@ defmodule DpExchange.Schwab.Socket do
   defp emit(row, service, field_map, observed_at, state) do
     fields = StreamerProtocol.rename(row, field_map)
     symbol = Map.get(fields, :symbol) || row["key"]
+    {values, state} = decode(service, fields, symbol, observed_at, state)
 
-    for value <- decode(service, fields, symbol, observed_at) do
-      notify(state, value)
-    end
+    Enum.each(values, &notify(state, &1))
+    state
   end
 
   # A LEVELONE frame is two facts at once, so both are emitted: the quote only when the
   # venue reported a traded price, and the top of book always.
-  defp decode("LEVELONE_" <> _rest, fields, symbol, observed_at) do
+  defp decode("LEVELONE_" <> _rest, fields, symbol, observed_at, state) do
     quote_result = StreamerDecode.to_quote(fields, symbol, observed_at)
-    {:ok, top} = StreamerDecode.to_top_of_book(fields, symbol, observed_at)
+    {:ok, delta} = StreamerDecode.to_top_of_book(fields, symbol, observed_at)
+
+    top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
+    state = put_in(state.last_top[symbol], top)
 
     case quote_result do
-      {:ok, quote_struct} -> [quote_struct, top]
+      {:ok, quote_struct} -> {[quote_struct, top], state}
       # No traded price. The top of book still stands; a quote would have to invent one.
-      {:error, _reason} -> [top]
+      {:error, _reason} -> {[top], state}
     end
   end
 
-  defp decode("CHART_" <> _rest, fields, symbol, _observed_at) do
+  defp decode("CHART_" <> _rest, fields, symbol, _observed_at, state) do
     case StreamerDecode.to_candle(fields, symbol, "1m") do
-      {:ok, candle} -> [candle]
-      {:error, _reason} -> []
+      {:ok, candle} -> {[candle], state}
+      {:error, _reason} -> {[], state}
     end
   end
 
-  defp decode(book, fields, symbol, _observed_at)
+  defp decode(book, fields, symbol, _observed_at, state)
        when book in ~w(NYSE_BOOK NASDAQ_BOOK OPTIONS_BOOK) do
     case StreamerDecode.to_order_book(fields, symbol) do
-      {:ok, order_book} -> [order_book]
-      {:error, _reason} -> []
+      {:ok, order_book} -> {[order_book], state}
+      {:error, _reason} -> {[], state}
     end
   end
 
   # ACCT_ACTIVITY and the screeners have field maps but no value type in this contract yet.
   # Emitting the renamed map would hand a consumer a shape the facade never promised.
-  defp decode(_service, _fields, _symbol, _observed_at), do: []
+  defp decode(_service, _fields, _symbol, _observed_at, state), do: {[], state}
+
+  # `LEVELONE_*` is **Change** delivery. The vendor's own service table gives that type to
+  # `LEVELONE_EQUITIES`, `LEVELONE_OPTIONS`, `LEVELONE_FUTURES` and
+  # `LEVELONE_FUTURES_OPTIONS`, and defines it as *"Only fields that clients are interested
+  # in, and have changed, are streamed to the client. Data is conflated by the streamer."*
+  # A frame there is a DELTA: what it omits is what did not move.
+  #
+  # `Core.Types.TopOfBook` says something incompatible about an absent level — *"An illiquid
+  # instrument can genuinely have no resting bid, and a venue that says so is telling the
+  # truth"* — and about an absent size, *"`nil` means 'not published', never 'none
+  # available'"*. Publishing a delta straight through therefore made a factual claim about
+  # the book on the venue's behalf that the venue had not made, and on a liquid equity it was
+  # false on every frame that moved only one side. Every value in it was real; only the
+  # meaning was wrong, which is the failure this family names as its recurring one.
+  #
+  # So the delta is merged onto what this socket last published for that symbol, and the
+  # SNAPSHOT is what crosses the facade. That is also what the facade requires: a consumer
+  # able to tell a Change service from an All Sequence one by the shape of its values is a
+  # consumer who can see how this venue works.
+  #
+  # Presence, not value, decides — `StreamerProtocol.rename/2` builds its map only from the
+  # field numbers the frame actually carried, so a key here means the venue spoke. A field
+  # that is present but unreadable (a NaN, which `StreamerDecode` turns into `nil` and has
+  # its own guard and tests) is NOT carried forward: the venue said something this package
+  # could not read, and answering with the previous value would be inventing an answer to a
+  # question that was actually asked.
+  defp merge_top_of_book(nil, delta, _fields), do: delta
+
+  defp merge_top_of_book(previous, delta, fields) do
+    Enum.reduce([:bid, :ask, :bid_size, :ask_size], delta, fn field, merged ->
+      if Map.has_key?(fields, field),
+        do: merged,
+        else: Map.put(merged, field, Map.get(previous, field))
+    end)
+  end
 
   defp notify(%{subscriber: subscriber}, payload),
     do: send(subscriber, {:dp_exchange, :schwab, payload})

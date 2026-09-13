@@ -296,6 +296,34 @@ DpExchange.Schwab.capabilities().streamable
 # [:quotes, :top_of_book, :candles]
 ```
 
+### A streamed `TopOfBook` is a full book, not the frame that produced it
+
+Schwab's `LEVELONE_*` services are **Change** delivery: a frame carries only the fields that
+moved. This package merges each frame onto the last book it published for that symbol and
+hands you the merged snapshot, so a `TopOfBook` you receive means what
+`Core.Types.TopOfBook` says it means — a `nil` bid is a book with no resting bid, not a
+frame that happened not to mention one.
+
+You therefore do **not** need to accumulate these yourself, and you should not: two
+consumers folding the same stream would be doing the venue's conflation twice. Treat each
+`TopOfBook` as replacing the previous one for that symbol.
+
+Two consequences worth knowing:
+
+* **Before the venue has ever reported a side, it is `nil`.** The first frames after a
+  subscribe can carry one side only. A `nil` there is "not yet reported by this session"
+  rather than "no resting bid", and the two are indistinguishable from the outside — so a
+  caller sizing an order against a `nil` on a freshly subscribed symbol should wait for a
+  frame that states it, exactly as it would for a genuinely one-sided book.
+* **A reconnect resets it.** The merge state is per connection and is dropped when the
+  session is, because a level from a session the venue no longer has is not a level this
+  package will keep asserting. You will see a `:link_down` notice, and the book rebuilds
+  from the new session's frames.
+
+`CHART_*` is **All Sequence** and `NYSE_BOOK`/`NASDAQ_BOOK`/`OPTIONS_BOOK` are **Whole** —
+both deliver complete units, so nothing is merged for those and a missing price in a candle
+is refused rather than filled in.
+
 **A documentation-accuracy sweep (2026-09-06) found `streamable` naming three more kinds —
 `:order_book`, `:orders`, `:fills` — that nothing here ever subscribed.** The decoders for
 `NYSE_BOOK`/`NASDAQ_BOOK`/`OPTIONS_BOOK` and `ACCT_ACTIVITY` existed and were tested, which
