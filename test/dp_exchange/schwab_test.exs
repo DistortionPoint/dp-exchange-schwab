@@ -40,6 +40,10 @@ defmodule DpExchange.SchwabTest do
 
       assert Schwab.get_historical_prices("AAPL", "1d", []) ==
                {:error, {:missing_credentials, :schwab}}
+
+      # Was missing from this sweep, and it is the one read whose facade clause no test
+      # executed at all — see the happy-path test below for the other half of it.
+      assert Schwab.get_top_of_book("AAPL") == {:error, {:missing_credentials, :schwab}}
     end
 
     test "no account hash — every account path takes one, and none is defaulted" do
@@ -542,6 +546,35 @@ defmodule DpExchange.SchwabTest do
 
       assert renewed.access_token == "at-2"
       assert renewed.refresh_token == "rt-2"
+    end
+
+    test "get_top_of_book reaches the venue through the facade" do
+      # The whole of `get_top_of_book/2`'s facade clause — the `credentials/1` gate and the
+      # `Rest` call behind it — was never executed by any test: every assertion went to
+      # `Rest` directly. A delegate wired to the wrong function, or one dropping the
+      # `with_limiter/1` wrap, would have passed the entire suite.
+      body = %{
+        "AAPL" => %{
+          "quote" => %{
+            "bidPrice" => 227.4,
+            "askPrice" => 227.6,
+            "bidSize" => 3,
+            "askSize" => 5,
+            "quoteTime" => 1_787_936_147_000
+          }
+        }
+      }
+
+      assert {:ok, top} =
+               Schwab.get_top_of_book("AAPL",
+                 credentials: @refresh_creds,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert top.symbol == "AAPL"
+      assert Decimal.equal?(top.bid, Decimal.from_float(227.4))
+      assert Decimal.equal?(top.ask, Decimal.from_float(227.6))
     end
 
     test "a terminal refusal passes through unchanged" do

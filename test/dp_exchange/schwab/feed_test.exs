@@ -315,6 +315,49 @@ defmodule DpExchange.Schwab.FeedTest do
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
+    test "a crashed POLLER is isolated too, not only a crashed socket" do
+      # `Feed` has two `{:EXIT, pid, reason}` clauses — one matching `state.socket`, one
+      # matching `state.poller` — and only the socket one had ever executed. The poll route
+      # is this venue's documented degraded mode, so the untested clause is the one that runs
+      # when the venue is ALREADY not serving the Streamer.
+      #
+      # Both call `isolate_crashed_route/2`, which clears the route and retries from scratch.
+      # Without the clause the `:EXIT` would reach the catch-all and be ignored, leaving a
+      # feed whose `route` still says `:internal_poll` while the process doing the polling is
+      # gone — coverage answering for a route nobody is serving, which is the same
+      # truthfulness question the socket-crash test above asks.
+      feed =
+        start_feed(
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      # The route is bootstrapped lazily, on the first thing that needs one.
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     2_000
+
+      poller = :sys.get_state(feed).poller
+      assert is_pid(poller), "the poll route must actually be served by a process"
+      assert %{route: :internal_poll} = Feed.status(feed)
+
+      Process.exit(poller, :kill)
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 2_000
+      assert Process.alive?(feed), "one dead poller must not take the feed with it"
+
+      # Retried rather than left dead: the same refusing plug can only land it back on the
+      # poll route, and arriving there again is what proves the clause ran.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     2_000
+
+      refute :sys.get_state(feed).poller == poller,
+             "the replacement route must not be the process that just died"
+    end
+
     test "a TRANSPORT drop clears coverage too, not only a route crash" do
       # The test above kills the socket process. This one is the case that was missed:
       # `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so a transport drop leaves

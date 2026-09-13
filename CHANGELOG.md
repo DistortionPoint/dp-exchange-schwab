@@ -31,6 +31,33 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **A crashed POLLER was never tested, only a crashed socket.** `Feed` has two
+  `{:EXIT, pid, reason}` clauses — one matching `state.socket`, one matching
+  `state.poller` — and only the socket one had ever executed. The poll route is this
+  venue's documented degraded mode, so the untested clause is precisely the one that runs
+  when the venue is *already* not serving the Streamer.
+
+  Without that clause the `:EXIT` reaches the catch-all and is ignored, leaving a feed whose
+  `route` still says `:internal_poll` while the process doing the polling is gone —
+  `coverage/1` answering for a route nobody serves. That is the same truthfulness question
+  the socket-crash test beside it already asks. Verified by deleting the clause, which turns
+  the new test red.
+
+- **`get_top_of_book/2`'s facade clause was never executed at all.** Every assertion went to
+  `Rest` directly, so a delegate wired to the wrong function — or one dropping the
+  `with_limiter/1` wrap — would have passed the whole suite. It was also missing from the
+  "every read refuses without credentials" sweep, which is where the other reads are held.
+  Both halves are now covered, and the wrong-delegate case was performed on purpose and
+  fails.
+
+  No delegation was wrong. Found by reading which lines the suite never executes, with the
+  `def ... \\ []` head artifact filtered out — a multi-line default-argument head is counted
+  separately from its body and never runs, so most of what that report flags is noise.
+
+  Coverage 91.44% to 91.76%.
+
 ## [0.2.33] - 2026-09-13
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
