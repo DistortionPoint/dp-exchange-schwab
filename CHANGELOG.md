@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.26] - 2026-09-13
+
 ### Fixed
 
 - **A streamed `TopOfBook` published the venue's delta as though it were the book.**
