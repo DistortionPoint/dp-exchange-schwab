@@ -31,6 +31,33 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST quote the venue did not date was refused outright.** `build_quote/2` gated on
+  `{:ok, timestamp} <- venue_time(row)`, so a row carrying neither `quoteTime` nor
+  `tradeTime` — or carrying one this package could not read — discarded a real, already
+  guarded traded price over a field `Core.Types.Quote` does not enforce. It lists
+  `[:symbol, :price, :observed_at, :provider]`, and `observed_at` states freshness and is
+  always present.
+
+  This package's own **streamer** arm had already decided it the other way, and said so:
+  `StreamerDecode.to_quote/3` sets `venue_time: nil` under "**`nil`, and that is the fix**
+  … there is nothing venue-stamped to put here — and `nil` says exactly that, which is a
+  different fact from 'quoted at 14:53:02'." Same venue, same type, the opposite answer
+  decided by transport.
+
+  The guarantee those comments exist to protect is untouched: an unstated venue time is
+  `nil`, never this package's clock. That is what dp-exchange-core issue #31 split the field
+  to prevent, and the tests now assert it directly instead of inferring it from an `{:error,
+  _}` — which could not tell a `nil` from a substitution in the first place.
+
+  `get_historical_prices/5` is unchanged and still refuses: it builds a `Candle`, which does
+  enforce `:opened_at`, so a bar this package cannot place in time would otherwise land in
+  the series at an invented minute.
+
+  Third venue in this family with the same defect, found by sweep after `dp_exchange_gemini`
+  and `dp_exchange_webull`.
+
 ## [0.2.26] - 2026-09-13
 
 ### Fixed

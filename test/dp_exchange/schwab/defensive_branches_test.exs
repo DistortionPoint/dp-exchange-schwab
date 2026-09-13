@@ -48,11 +48,20 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Rest.get_price("AAPL", @creds, opts(responding(body)))
     end
 
-    test "an empty timestamp fails closed rather than taking the local clock" do
+    test "an empty timestamp is nil rather than the local clock" do
+      # The guarantee this test is named for is unchanged and is now asserted directly
+      # rather than inferred from an error: an unreadable venue time must never become this
+      # package's own clock. `Core.Types.Quote` does not enforce `venue_time`, so refusing
+      # the whole quote was throwing away a real, guarded price over an optional field —
+      # and an `{:error, _}` could not tell a nil apart from a substitution anyway, which is
+      # the thing actually worth pinning.
       body = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => ""}}}
 
-      assert {:error, :missing_venue_timestamp} =
-               Rest.get_price("AAPL", @creds, opts(responding(body)))
+      assert {:ok, quoted} = Rest.get_price("AAPL", @creds, opts(responding(body)))
+
+      assert quoted.venue_time == nil
+      assert quoted.observed_at
+      refute quoted.venue_time == quoted.observed_at
     end
 
     test "an empty candle close is unreadable" do
@@ -92,13 +101,31 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert quote_struct.venue_time.year == 2026
     end
 
-    test "a timestamp of an unexpected type is an error, not a guess" do
+    test "a timestamp of an unexpected type is nil, not a guess" do
+      # "Not a guess" is the claim, and it still holds: nothing is inferred from a shape
+      # this package cannot read, and the venue's field stays empty rather than being filled
+      # with an arrival time. What changed is that an unreadable OPTIONAL field no longer
+      # discards the required one beside it — `Core.Types.Quote` enforces `:price`, not
+      # `:venue_time`.
       for value <- ["not-a-number", %{"nested" => true}, [1, 2]] do
         body = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => value}}}
 
-        assert {:error, {:unparseable_venue_timestamp, _value}} =
-                 Rest.get_price("AAPL", @creds, opts(responding(body)))
+        assert {:ok, quoted} = Rest.get_price("AAPL", @creds, opts(responding(body)))
+
+        assert quoted.venue_time == nil, "unreadable is not a licence to guess"
+        assert Decimal.equal?(quoted.price, Decimal.new("1.0"))
       end
+    end
+
+    test "venue_time/1 still reports WHY a timestamp was unusable, for callers that need it" do
+      # The distinction the old assertions pinned is real and is kept where it is load
+      # bearing: `get_historical_prices/5` builds a `Candle`, which DOES enforce
+      # `:opened_at`, so an unreadable time there still refuses the row rather than
+      # producing a bar at an invented minute.
+      body = %{"candles" => [%{"close" => 1.0, "datetime" => "not-a-number"}]}
+
+      assert {:error, {:unparseable_venue_timestamp, "not-a-number"}} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
     end
   end
 

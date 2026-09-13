@@ -246,16 +246,29 @@ defmodule DpExchange.Schwab.Rest do
 
   defp quote_row(_other, _native), do: {:error, :unexpected_response_shape}
 
+  # `venue_time` is read but not required. `Core.Types.Quote` enforces
+  # `[:symbol, :price, :observed_at, :provider]` and not the venue's time, and `observed_at`
+  # — always present — is what states freshness.
+  #
+  # This gated on `{:ok, timestamp} <- venue_time(row)` until 2026-09-13, so a row carrying
+  # neither `quoteTime` nor `tradeTime` refused a real, already-guarded traded price over an
+  # optional field. `StreamerDecode.to_quote/3` had already decided this the other way on the
+  # other transport, and said why: "**`nil`, and that is the fix** ... there is nothing
+  # venue-stamped to put here — and `nil` says exactly that, which is a different fact from
+  # 'quoted at 14:53:02'." Same venue, same type, and the transport was deciding.
+  #
+  # What that comment actually rules out is putting `observed_at` into `venue_time`, which
+  # dp-exchange-core issue #31 split the field to prevent. That remains ruled out: an
+  # unstated venue time is `nil` here, never this package's clock.
   defp build_quote(native, row) do
     with {:ok, raw_price} <- quoted_price(row),
-         {:ok, price} <- required_decimal(raw_price, :price),
-         {:ok, timestamp} <- venue_time(row) do
+         {:ok, price} <- required_decimal(raw_price, :price) do
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
          volume: decimal(row["totalVolume"]),
-         venue_time: timestamp,
+         venue_time: venue_time_or_nil(row),
          observed_at: DateTime.utc_now(),
          provider: :schwab
        }}
@@ -284,6 +297,16 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   # `quoteTime` and `tradeTime` are epoch milliseconds on this venue.
+  # For the types whose contract makes the venue's time optional — see `build_quote/2`.
+  # Absent and present-but-unreadable answer the same way, because both mean this package
+  # cannot state the venue's time and `nil` says that.
+  defp venue_time_or_nil(row) do
+    case venue_time(row) do
+      {:ok, at} -> at
+      {:error, _unstated} -> nil
+    end
+  end
+
   defp venue_time(row) do
     case row["quoteTime"] || row["tradeTime"] do
       nil -> {:error, :missing_venue_timestamp}

@@ -93,11 +93,37 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
     end
 
-    test "a quote the venue did not date fails closed" do
+    test "a quote the venue did not date still delivers its price" do
+      # This asserted `{:error, :missing_venue_timestamp}` until 2026-09-13. That refused a
+      # real, guarded traded price over a field `Core.Types.Quote` does not enforce — it
+      # lists `[:symbol, :price, :observed_at, :provider]` — while `observed_at` states
+      # freshness and is always present.
+      #
+      # This package's OWN streamer arm already decided this, and said so in as many words:
+      # `StreamerDecode.to_quote/3` sets `venue_time: nil` under "**`nil`, and that is the
+      # fix** ... there is nothing venue-stamped to put here — and `nil` says exactly that,
+      # which is a different fact from 'quoted at 14:53:02'." Same venue, same type, the
+      # opposite answer decided by transport.
+      #
+      # The thing that must not happen — putting `observed_at` into `venue_time` — is
+      # unchanged and is what dp-exchange-core issue #31 split the field to prevent.
       body = %{"AAPL" => %{"quote" => %{"lastPrice" => 227.5}}}
 
-      assert {:error, :missing_venue_timestamp} =
+      assert {:ok, quoted} =
                Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
+      assert quoted.venue_time == nil, "the venue stated no time, and nil says exactly that"
+      assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
+    end
+
+    test "a dated quote still carries the venue's own time" do
+      body = quote_body(%{"lastPrice" => 227.5, "quoteTime" => 1_787_936_147_000})
+
+      assert {:ok, quoted} =
+               Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert quoted.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
     test "an unlisted symbol is refused, whether absent or returned as an error object" do
