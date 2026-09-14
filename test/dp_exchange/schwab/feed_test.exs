@@ -944,7 +944,12 @@ defmodule DpExchange.Schwab.FeedTest do
         start_feed(
           plug: plug,
           limiter: permissive_limiter(),
-          route_bootstrap_timeout_ms: 100
+          # 300, not 100. Even with the request path warmed in `test_helper.exs`, a
+          # hundred milliseconds is not reliably longer than spawning the bootstrap task
+          # and reaching the plug inside it: this test failed two runs in three at 100.
+          # 300 is what its sibling below asks for, and the pair is clean at 300 only
+          # because of that warm-up — without it both flake even here. See test_helper.exs.
+          route_bootstrap_timeout_ms: 300
         )
 
       spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
