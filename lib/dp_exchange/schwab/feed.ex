@@ -825,31 +825,6 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, state}
   end
 
-  # `apply_symbols/1`'s answer was discarded here. It returns `:ok`, `{:error, :no_route}`,
-  # or whatever `PollingFeed.update_symbols/2` returns, and a periodic re-assert is the only
-  # thing that recovers a subscription the venue has quietly stopped serving — so one that
-  # cannot run is exactly the event worth knowing about. `dp_exchange_webull` spent three
-  # issues on a blind resubscribe that failed without saying so.
-  #
-  # A WARNING rather than a notice or a state change: this is a condition a person should
-  # read, not one a consumer can act on differently from any other gap in coverage, and the
-  # next tick retries anyway. Nothing is torn down, because the route may be mid-rebuild and
-  # reacting here would race `ensure_route/1`.
-  #
-  # Found by running dialyzer with `:unmatched_returns`, which is not enabled by default —
-  # see the release note for why the flag itself was not adopted family-wide.
-  defp report_reassert(:ok, _state), do: :ok
-
-  defp report_reassert(other, state) do
-    Logger.warning(
-      "[Schwab Feed] periodic re-assert could not reach a route: #{inspect(other)} — its " <>
-        "#{MapSet.size(state.wanted)} wanted symbol(s) stay on whatever they last " <>
-        "delivered until the next tick"
-    )
-
-    :ok
-  end
-
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
     {:noreply, state}
@@ -888,6 +863,31 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # `apply_symbols/1`'s answer was discarded here. It returns `:ok`, `{:error, :no_route}`,
+  # or whatever `PollingFeed.update_symbols/2` returns, and a periodic re-assert is the only
+  # thing that recovers a subscription the venue has quietly stopped serving — so one that
+  # cannot run is exactly the event worth knowing about. `dp_exchange_webull` spent three
+  # issues on a blind resubscribe that failed without saying so.
+  #
+  # A WARNING rather than a notice or a state change: this is a condition a person should
+  # read, not one a consumer can act on differently from any other gap in coverage, and the
+  # next tick retries anyway. Nothing is torn down, because the route may be mid-rebuild and
+  # reacting here would race `ensure_route/1`.
+  #
+  # Found by running dialyzer with `:unmatched_returns`, which is not enabled by default —
+  # see the release note for why the flag itself was not adopted family-wide.
+  defp report_reassert(:ok, _state), do: :ok
+
+  defp report_reassert(other, state) do
+    Logger.warning(
+      "[Schwab Feed] periodic re-assert could not reach a route: #{inspect(other)} — its " <>
+        "#{MapSet.size(state.wanted)} wanted symbol(s) stay on whatever they last " <>
+        "delivered until the next tick"
+    )
+
+    :ok
+  end
 
   # Shared by both wedge clauses above. Identical to the `{ref, result}` reply path's own
   # tail — clear the bootstrap, complete it, apply the symbol set, answer everyone parked on
