@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.39] - 2026-09-14
+
 ### Fixed
 
 - **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
