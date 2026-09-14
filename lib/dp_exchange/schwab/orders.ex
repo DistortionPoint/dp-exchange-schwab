@@ -243,8 +243,20 @@ defmodule DpExchange.Schwab.Orders do
 
   defp maybe_put(payload, _key, nil), do: payload
 
+  # **`Decimal.to_string/1` defaults to SCIENTIFIC notation.** So a price carrying an
+  # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue reads,
+  # and a different order if it read one at all.
+  #
+  # An exponent is not exotic. `Decimal.normalize/1` — the ordinary way to strip trailing
+  # zeros — turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+  # construction. A caller normalising a price before placing an order is doing something
+  # entirely reasonable.
+  #
+  # Four of the five packages in this family already said `:normal` somewhere — including
+  # `Rest.chain_value/1` in this very repo — and none of them had said it on the order path,
+  # which is the one that spends money.
   defp maybe_put(payload, key, %Decimal{} = value),
-    do: Map.put(payload, key, Decimal.to_string(value))
+    do: Map.put(payload, key, Decimal.to_string(value, :normal))
 
   defp maybe_put(payload, key, value), do: Map.put(payload, key, to_string(value))
 end

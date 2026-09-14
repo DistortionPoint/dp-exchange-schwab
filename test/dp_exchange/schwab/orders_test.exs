@@ -240,4 +240,37 @@ defmodule DpExchange.Schwab.OrdersTest do
                Orders.build(%{@buy | symbol: "BTC-USD"})
     end
   end
+
+  describe "numbers on the wire are full notation, never scientific" do
+    test "a normalized price is sent as a plain number" do
+      # `Decimal.to_string/1` defaults to SCIENTIFIC, which is easy to miss because it is the
+      # ARITY-1 call that does it — `Decimal.to_string(value, :normal)` is what every other
+      # money path in this family uses, including `Rest.chain_value/1` in this very repo.
+      #
+      # An exponent is not exotic. `Decimal.normalize/1`, the ordinary way to strip trailing
+      # zeros, turns `150.00` into `1.5E+2`; anything below a millionth carries one by
+      # construction. A caller normalising a limit price before placing an order is doing
+      # something entirely reasonable, and used to get `"1.5E+2"` sent as the price.
+      request =
+        @buy
+        |> Map.put(:order_type, :limit)
+        |> Map.put(:price, Decimal.normalize(Decimal.new("150.00")))
+
+      assert {:ok, payload} = Orders.build(request)
+
+      assert payload["price"] == "150"
+      refute String.contains?(payload["price"], "E")
+    end
+
+    test "a very small price keeps its digits rather than becoming an exponent" do
+      request =
+        @buy
+        |> Map.put(:order_type, :limit)
+        |> Map.put(:price, Decimal.new("0.00000001"))
+
+      assert {:ok, payload} = Orders.build(request)
+
+      assert payload["price"] == "0.00000001"
+    end
+  end
 end
