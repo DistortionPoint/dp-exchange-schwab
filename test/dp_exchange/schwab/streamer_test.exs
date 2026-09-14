@@ -459,6 +459,31 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerDecode.to_candle(%{chart_time: "this morning"}, "AAPL", "1m")
     end
 
+    test "a chart_time outside the epoch range is refused, not raised out of the socket" do
+      # `DateTime.from_unix!/2` RAISES on an out-of-range value, and this decoder runs inside
+      # the Socket process on a streamed frame — so the exception did not surface as a bad
+      # field, it took the LINK down, costing a reconnect for every symbol on that
+      # connection. A venue moving a timestamp from milliseconds to microseconds is ordinary
+      # drift, not a corner case.
+      assert {:error, :missing_venue_timestamp} =
+               StreamerDecode.to_candle(%{chart_time: 1_787_936_147_000_000}, "AAPL", "1m")
+
+      # The string form reaches the same guard.
+      assert {:error, :missing_venue_timestamp} =
+               StreamerDecode.to_candle(%{chart_time: "1787936147000000"}, "AAPL", "1m")
+    end
+
+    test "a zero or negative chart_time is refused rather than opening the bar in 1970" do
+      # These do NOT raise — they are perfectly valid `DateTime`s — which is why they are
+      # worse. A bar that opens in 1970 sorts to the front of the series with every price in
+      # it real, and `0` is a common venue sentinel for "unknown".
+      for bad <- [0, -1, -1_787_936_147_000] do
+        assert {:error, :missing_venue_timestamp} =
+                 StreamerDecode.to_candle(%{chart_time: bad}, "AAPL", "1m"),
+               "a chart_time of #{bad} must be refused"
+      end
+    end
+
     test "all four prices survive, which a Quote could not carry" do
       fields = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
 
@@ -576,6 +601,19 @@ defmodule DpExchange.Schwab.StreamerTest do
     test "a book with no snapshot time is REFUSED, not stamped on arrival" do
       assert {:error, :missing_venue_timestamp} =
                StreamerDecode.to_order_book(%{bids: [], asks: []}, "AAPL")
+    end
+
+    test "a snapshot time outside the epoch range is refused, not raised out of the socket" do
+      assert {:error, :missing_venue_timestamp} =
+               StreamerDecode.to_order_book(
+                 %{bids: [], asks: [], book_time: 1_787_936_147_000_000},
+                 "AAPL"
+               )
+    end
+
+    test "a zero snapshot time is refused rather than dating the book to 1970" do
+      assert {:error, :missing_venue_timestamp} =
+               StreamerDecode.to_order_book(%{bids: [], asks: [], book_time: 0}, "AAPL")
     end
 
     test "levels are re-sorted, not left in the venue's row order" do

@@ -31,6 +31,25 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
+  became 1970.** The time helpers used `DateTime.from_unix!/2`, which handles neither case.
+
+  **Out of range RAISES.** A venue moving a field from seconds to milliseconds, or from
+  milliseconds to microseconds, is ordinary drift — and the value it sends is `invalid Unix
+  time`, thrown out of the read rather than returned by it, where the function's own contract
+  already offers `{:error, :missing_venue_timestamp}`.
+
+  **Zero and negative do NOT raise.** They become 1970 and earlier, which is worse, because
+  the result is a perfectly valid `DateTime` a caller cannot tell from the venue's own
+  instant — and `0` is a common venue sentinel for "unknown". This package had already ruled
+  that out in as many words for level timestamps ("an unreadable level timestamp does not
+  become the epoch"); the rule now holds wherever an epoch is converted.
+
+  Both answer `{:error, :missing_venue_timestamp}`. Tests cover each, and there were none for
+  either path before.
+
 ## [0.2.38] - 2026-09-14
 
 ### Fixed

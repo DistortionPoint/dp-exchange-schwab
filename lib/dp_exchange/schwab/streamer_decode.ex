@@ -221,8 +221,27 @@ defmodule DpExchange.Schwab.StreamerDecode do
     end
   end
 
-  defp snapshot_time(ms) when is_integer(ms), do: {:ok, DateTime.from_unix!(ms, :millisecond)}
+  defp snapshot_time(ms) when is_integer(ms), do: from_unix_ms(ms)
   defp snapshot_time(_absent), do: {:error, :missing_venue_timestamp}
+
+  # `DateTime.from_unix/2`, not `from_unix!/2`, and non-positive is refused.
+  #
+  # Two ways a number that reached here is still not a venue time, and the bang version
+  # handled neither. **Out of range RAISES** — a venue moving to microseconds is `invalid
+  # Unix time` — and this decoder runs inside the Socket process on a streamed frame, so the
+  # exception does not surface as a bad field, it takes the LINK down. One malformed frame
+  # costing a reconnect for every symbol on that connection is the opposite of what this
+  # module's `{:error, :missing_venue_timestamp}` branch exists to do. **Zero and negative do
+  # NOT raise**: they quietly become 1970 and earlier, on a field whose entire purpose is to
+  # carry the venue's own instant.
+  defp from_unix_ms(ms) when ms > 0 do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp from_unix_ms(_non_positive), do: {:error, :missing_venue_timestamp}
 
   # A level is `[price, aggregate_size, …]`. A level without a price is not a level, and
   # keeping it would put `{nil, size}` into a book a caller folds over.
@@ -258,11 +277,11 @@ defmodule DpExchange.Schwab.StreamerDecode do
   defp level_at(%{} = row, 1), do: decimal(row["aggregateSize"] || row["1"])
   defp level_at(_row, _index), do: nil
 
-  defp chart_time(ms) when is_integer(ms), do: {:ok, DateTime.from_unix!(ms, :millisecond)}
+  defp chart_time(ms) when is_integer(ms), do: from_unix_ms(ms)
 
   defp chart_time(ms) when is_binary(ms) do
     case Integer.parse(ms) do
-      {parsed, ""} -> {:ok, DateTime.from_unix!(parsed, :millisecond)}
+      {parsed, ""} -> from_unix_ms(parsed)
       _not_an_epoch -> {:error, :missing_venue_timestamp}
     end
   end
