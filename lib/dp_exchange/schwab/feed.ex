@@ -260,6 +260,8 @@ defmodule DpExchange.Schwab.Feed do
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.{Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
+  require Logger
+
   # Equities move fast intraday, but a REST snapshot every 30 seconds is what the
   # collection layer consumes; faster buys nothing a snapshot can express. Used only on the
   # fallback route.
@@ -817,10 +819,35 @@ defmodule DpExchange.Schwab.Feed do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     if MapSet.size(state.wanted) > 0 do
-      apply_symbols(state)
+      report_reassert(apply_symbols(state), state)
     end
 
     {:noreply, state}
+  end
+
+  # `apply_symbols/1`'s answer was discarded here. It returns `:ok`, `{:error, :no_route}`,
+  # or whatever `PollingFeed.update_symbols/2` returns, and a periodic re-assert is the only
+  # thing that recovers a subscription the venue has quietly stopped serving — so one that
+  # cannot run is exactly the event worth knowing about. `dp_exchange_webull` spent three
+  # issues on a blind resubscribe that failed without saying so.
+  #
+  # A WARNING rather than a notice or a state change: this is a condition a person should
+  # read, not one a consumer can act on differently from any other gap in coverage, and the
+  # next tick retries anyway. Nothing is torn down, because the route may be mid-rebuild and
+  # reacting here would race `ensure_route/1`.
+  #
+  # Found by running dialyzer with `:unmatched_returns`, which is not enabled by default —
+  # see the release note for why the flag itself was not adopted family-wide.
+  defp report_reassert(:ok, _state), do: :ok
+
+  defp report_reassert(other, state) do
+    Logger.warning(
+      "[Schwab Feed] periodic re-assert could not reach a route: #{inspect(other)} — its " <>
+        "#{MapSet.size(state.wanted)} wanted symbol(s) stay on whatever they last " <>
+        "delivered until the next tick"
+    )
+
+    :ok
   end
 
   def handle_info(:resubscribe, state) do

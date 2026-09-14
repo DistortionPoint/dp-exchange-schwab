@@ -399,14 +399,51 @@ defmodule DpExchange.Schwab.FeedTest do
                "CHART_EQUITY" => ["AAPL"]
              }
 
-      send(feed, :resubscribe)
-      # A synchronous call forces the cast above to be processed before this returns.
-      Feed.coverage(feed)
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(feed, :resubscribe)
+          # A synchronous call forces the cast above to be processed before this returns.
+          Feed.coverage(feed)
+        end)
 
       assert subscribed_services(socket) == %{
                "LEVELONE_EQUITIES" => ["AAPL", "AAPL"],
                "CHART_EQUITY" => ["AAPL", "AAPL"]
              }
+
+      # The negative control for the failure log added beside this test. A re-assert that
+      # WORKED must say nothing: this timer fires on every interval for the life of the
+      # feed, so a line here would be one per tick forever. `dp_exchange_webull`'s issue #2
+      # is what that costs — 234 of 239 ERROR lines in one boot describing routine
+      # behaviour, until ERROR stopped carrying information on that host.
+      refute log =~ "re-assert", "a successful re-assert must be silent"
+    end
+
+    test "a re-assert that cannot reach a route says so, rather than failing silently" do
+      # `apply_symbols/1` answers `:ok`, `{:error, :no_route}`, or whatever
+      # `PollingFeed.update_symbols/2` answers — and this handler threw that away. A
+      # periodic re-assert is the only thing that recovers a subscription the venue has
+      # quietly stopped serving, so one that cannot run is exactly the event worth knowing
+      # about; `dp_exchange_webull` spent three issues on a blind resubscribe that failed
+      # without saying so.
+      #
+      # `route: :stream` with no socket is the reachable shape: `apply_symbols/1`'s stream
+      # clause is guarded `when is_pid(socket)`, so anything else falls to
+      # `{:error, :no_route}`.
+      feed = start_feed(socket: fake_socket())
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      :sys.replace_state(feed, fn state -> %{state | socket: nil} end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(feed, :resubscribe)
+          Feed.coverage(feed)
+        end)
+
+      assert log =~ "re-assert", "the failure must reach a log line, not be discarded"
+      assert log =~ "no_route"
+      assert Process.alive?(feed), "and it must not take the feed down"
     end
 
     test "sends nothing when nothing is wanted" do

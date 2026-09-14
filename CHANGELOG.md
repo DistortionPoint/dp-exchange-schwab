@@ -31,6 +31,47 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The periodic re-assert discarded its own result, so one that could not run said
+  nothing.** `handle_info(:resubscribe, %{route: :stream})` called `apply_symbols/1` and
+  threw the answer away. That function returns `:ok`, `{:error, :no_route}`, or whatever
+  `PollingFeed.update_symbols/2` returns — and `route: :stream` with no socket is a reachable
+  shape, because `apply_symbols/1`'s stream clause is guarded `when is_pid(socket)` and
+  anything else falls through to `{:error, :no_route}`.
+
+  A periodic re-assert is the only thing that recovers a subscription the venue has quietly
+  stopped serving, so one that cannot run is exactly the event worth knowing about.
+  `dp_exchange_webull` spent three issues on a blind resubscribe that failed without saying
+  so. A failure is now a `Logger.warning` naming the reason and how many symbols are
+  affected; nothing is torn down, because the route may be mid-rebuild and reacting here
+  would race `ensure_route/1`.
+
+  **A successful re-assert stays silent, and that is now pinned by a test.** This timer fires
+  on every interval for the life of the feed, so a line on the happy path would be one per
+  tick forever — which is `dp_exchange_webull`'s issue #2, where 234 of 239 ERROR lines in a
+  single boot described routine behaviour until ERROR stopped carrying information on that
+  host. Both directions were broken on purpose and both fail.
+
+  Found by running dialyzer with `:unmatched_returns`, which is **not** enabled by default.
+
+### Changed
+
+- `Feed` now `require Logger` — it had no log line at all before this.
+
+#### On the dialyzer flag itself, since it is not being adopted
+
+`:unmatched_returns` was run across all six repositories as an experiment and found nine
+sites. Eight are idiomatic and correct: `Process.cancel_timer/1` where the answer genuinely
+does not matter, `if Process.alive?(socket) do … end` with no `else`, a discarded timer
+reference, and one `:xref.set_default/2` whose failure would only make a check noisier. One
+was real, and it is fixed above.
+
+Enabling the flag family-wide would mean annotating those eight with `_ =` — and an
+unexplained `_ =` reads as unexplained in a codebase whose style is to say why. One
+substantive finding in nine does not pay for that, so the flag stays off and the measurement
+is recorded here instead of being repeated by the next person who wonders.
+
 ## [0.2.34] - 2026-09-13
 
 ### Changed
