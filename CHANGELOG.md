@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.38] - 2026-09-14
+
 ### Fixed
 
 - **The fallback poll's notices named the poll where the venue belonged.** `provider` and
