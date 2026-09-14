@@ -1082,6 +1082,15 @@ defmodule DpExchange.Schwab.Feed do
         # pasted into an issue with no other context, as if the Streamer itself had gone
         # dark. "schwab-fallback-poll" makes the source unambiguous in the text alone.
         label: "schwab-fallback-poll",
+        # `provider:` is the venue; `label` above is which feed inside this venue spoke.
+        # They were one field, and the label won — so this package emitted `:schwab` from
+        # `Socket`'s link notices and `"schwab-fallback-poll"` from the poll's, and a
+        # consumer matching `notice.provider == :schwab` silently missed every notice the
+        # fallback poll raised. That includes the one saying the fallback poll is delivering
+        # nothing, which is precisely when a consumer needs to hear from it. Core 0.3.17
+        # separated the two so the label above can stay as deliberately unambiguous as its
+        # own comment requires, without costing the venue its name.
+        provider: :schwab,
         symbols: MapSet.to_list(state.wanted),
         interval_ms: Config.opt(state.opts, :interval_ms, @interval_ms),
         start_delay_ms: Keyword.get(state.opts, :start_delay_ms),

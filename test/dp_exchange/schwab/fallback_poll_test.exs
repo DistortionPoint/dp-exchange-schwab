@@ -76,7 +76,14 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
 
       assert notice.severity == :warning
-      assert notice.provider == "schwab-fallback-poll"
+      # `provider` is the VENUE and `details.label` is which feed inside it spoke. These were
+      # one field until Core 0.3.17, and the label won it — so this package named the venue
+      # `:schwab` on `Socket`'s link notices and `"schwab-fallback-poll"` on the poll's, and
+      # a consumer routing on `provider` missed every poll notice. The claim this test makes
+      # — that the notice names the POLL and not the Streamer — is unchanged and is still
+      # checked below, in the message and the label where it belongs.
+      assert notice.provider == :schwab
+      assert notice.details.label == "schwab-fallback-poll"
 
       assert notice.message ==
                "schwab-fallback-poll has delivered nothing in 1 consecutive attempts"
@@ -133,7 +140,8 @@ defmodule DpExchange.Schwab.FallbackPollTest do
                      3_000
 
       assert recovery.severity == :info
-      assert recovery.provider == "schwab-fallback-poll"
+      assert recovery.provider == :schwab
+      assert recovery.details.label == "schwab-fallback-poll"
 
       assert recovery.message ==
                "schwab-fallback-poll has resumed delivering after 3 consecutive failures"

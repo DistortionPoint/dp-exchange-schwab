@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The fallback poll's notices named the poll where the venue belonged.** `provider` and
+  "which feed inside this venue spoke" were one field, and the label won it — so this
+  package emitted `:schwab` from `Socket`'s link notices and `"schwab-fallback-poll"` from
+  the poll's. A consumer matching `notice.provider == :schwab` missed every notice the
+  fallback poll raised, including the one saying the fallback poll is delivering nothing.
+
+  Core 0.3.17 separated the two, so the label can stay as deliberately unambiguous as its
+  own comment requires — a `:coverage_change` pasted into an issue must not read as the
+  Streamer going dark — without costing the venue its name. `provider` is now `:schwab`
+  and `details.label` is still `"schwab-fallback-poll"`. The `dp_exchange_core` floor
+  moves to `~> 0.3.17`: below that the option does not exist and is silently ignored.
+
 ## [0.2.37] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

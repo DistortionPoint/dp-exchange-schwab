@@ -444,7 +444,9 @@ defmodule DpExchange.SchwabTest do
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
       assert notice.severity == :warning
-      assert notice.provider == "schwab-fallback-poll"
+      # The venue, not the feed inside it — see `fallback_poll_test.exs` and Core 0.3.17.
+      assert notice.provider == :schwab
+      assert notice.details.label == "schwab-fallback-poll"
     end
   end
 
