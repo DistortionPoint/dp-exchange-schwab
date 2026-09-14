@@ -515,6 +515,70 @@ defmodule DpExchange.Schwab.RestTest do
                )
     end
 
+    test "an order write that fails transiently is sent exactly once" do
+      # `Core.HttpClient` retries any error that is not a 4xx — a timeout, a reset, a 503 —
+      # which are exactly the failures where the venue may have received and ACTED ON the
+      # request. Retried, a `POST /accounts/{hash}/orders` that Schwab accepted before the
+      # failure places a SECOND order, and the caller sees one call and one answer.
+      #
+      # Retrying is only safe where the venue deduplicates, and Schwab publishes no
+      # idempotency key for these endpoints. `dp_exchange_coinbase` and
+      # `dp_exchange_robinhood` both send a `client_order_id` their venues document as one,
+      # which is why their writes may retry and these may not.
+      #
+      # Note the `retry_attempts: 3` in the call: it is passed and must be IGNORED, because
+      # a caller forwarding its own opts must not be able to re-enable this.
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+        Plug.Conn.resp(conn, 503, "")
+      end
+
+      Rest.place_order(@creds, "ABCDEF", %{"orderType" => "MARKET"},
+        plug: plug,
+        retry_attempts: 3,
+        retry_delay: 1
+      )
+
+      assert_receive :attempt
+      refute_receive :attempt, 200
+    end
+
+    test "a replace is sent exactly once too" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+        Plug.Conn.resp(conn, 503, "")
+      end
+
+      Rest.replace_order(@creds, "ABCDEF", "1005", %{"orderType" => "LIMIT"},
+        plug: plug,
+        retry_attempts: 3,
+        retry_delay: 1
+      )
+
+      assert_receive :attempt
+      refute_receive :attempt, 200
+    end
+
+    test "a read still retries, because re-asking a question repeats nothing" do
+      # Not a blanket ban on retrying — a ban on repeating an action the venue cannot tell
+      # apart from the first one.
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+        Plug.Conn.resp(conn, 503, "")
+      end
+
+      Rest.get_accounts(@creds, plug: plug, retry_attempts: 2, retry_delay: 1)
+
+      assert_receive :attempt
+      assert_receive :attempt, 1_000
+    end
+
     test "a 201 with no Location is a failure, not a success with no id" do
       # A caller that cannot name the order it just placed cannot cancel it.
       plug = fn conn -> Plug.Conn.resp(conn, 201, "") end

@@ -1691,14 +1691,35 @@ defmodule DpExchange.Schwab.Rest do
     |> Keyword.take([
       :limiter,
       :timeout,
-      :retry_attempts,
       :log_requests,
       :plug,
       :req_adapter,
       :rate_limit_blocking
     ])
-    |> Keyword.merge(provider: :schwab_orders, raw_status: true)
+    |> Keyword.merge(provider: :schwab_orders, raw_status: true, retry_attempts: 1)
   end
+
+  # **`retry_attempts: 1` means one attempt, no retry, and `:retry_attempts` is deliberately
+  # NOT forwarded from the caller — an order write must never be sent twice.**
+  #
+  # `Core.HttpClient` retries any error that is not a 4xx, which includes a timeout and a
+  # connection reset. Those are exactly the failures where the venue may have received and
+  # ACTED ON the request: a `POST /accounts/{hash}/orders` that times out after Schwab
+  # accepted it, retried, places a second order. The caller sees one call and one answer.
+  #
+  # Retrying is only safe where the venue deduplicates, and Schwab publishes no idempotency
+  # key for these endpoints — `dp_exchange_coinbase` and `dp_exchange_robinhood` both send a
+  # `client_order_id` their venues document as one, which is why their writes may retry and
+  # these may not. Schwab's own documentation for `/orders` names no such field, so there is
+  # nothing to send and nothing to rely on.
+  #
+  # The cost of not retrying is a caller seeing a transport failure and deciding for itself,
+  # which it can do safely because it knows what it asked for. The cost of retrying is an
+  # order placed two or three times, which nobody can undo from here.
+  #
+  # `cancel_order/4` is included on purpose even though cancelling twice is usually benign:
+  # the second attempt races the first, and the venue's answer to "cancel an order that is
+  # already cancelling" is not something this package has measured.
 
   defp refusal(status, body) do
     case refusal_body(body) do

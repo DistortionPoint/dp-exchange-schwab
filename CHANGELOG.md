@@ -35,6 +35,27 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **A timed-out order write was retried, and could place the order twice.**
+  `place_order/4`, `replace_order/5` and `cancel_order/4` forwarded `:retry_attempts` into
+  `Core.HttpClient`, which retries anything that is not a 4xx — a timeout, a connection
+  reset, a 503. Those are exactly the failures where the venue may have **received and acted
+  on** the request before the connection broke, so the retry places a second order and the
+  caller sees one call and one answer.
+
+  Retrying is only safe where the venue can tell the second attempt from the first. Schwab
+  publishes no idempotency key for these endpoints — `dp_exchange_coinbase` and
+  `dp_exchange_robinhood` both send a `client_order_id` their venues document as one, which
+  is why their writes may retry and these may not.
+
+  Order writes are now sent exactly once, and `:retry_attempts` is no longer forwarded at
+  all, so a caller passing its own opts through cannot re-enable it. Reads are unchanged.
+
+  **A transport failure on an order write now means the outcome is unknown**, which it
+  always did — it was simply being hidden by an automatic second attempt. `usage-rules.md`
+  says so, and says to read your open orders rather than placing again.
+
+### Fixed
+
 - **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
   became 1970.** The time helpers used `DateTime.from_unix!/2`, which handles neither case.
 

@@ -702,6 +702,23 @@ That is later than before for a consumer that does subscribe, and irrelevant for
 that never does — a feed nothing has asked anything of has no route to be degraded
 about.
 
+## A write the venue cannot deduplicate is sent exactly once, and never retried
+
+`Core.HttpClient` retries any failure that is not a 4xx — a timeout, a connection reset, a
+503. For a read that is right: asking the same question twice costs a request and nothing
+else. For a write it is not, because those are precisely the failures where the venue may
+have **received and acted on** the request before the connection broke. A retried order is a
+second order, and you see one call and one answer either way.
+
+So order-creating and order-changing calls here are sent once. A transport failure comes back
+to you as an error, and **the outcome of that attempt is genuinely unknown** — the order may
+or may not exist at the venue. Read your open orders before placing again; do not treat the
+error as "it did not happen".
+
+This is not a blanket ban on retrying. It is a ban on repeating an action the venue cannot
+tell apart from the first one. Reads still retry, and so does any write carrying an
+idempotency key the venue honours.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
