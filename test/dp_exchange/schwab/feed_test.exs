@@ -22,36 +22,10 @@ defmodule DpExchange.Schwab.FeedTest do
   one through a `plug`.
   """
 
-  use ExUnit.Case, async: true
+  use DpExchange.Schwab.FeedCase, async: true
 
-  alias DpExchange.Core.{Config, DefaultRateLimiter, Notice, Types}
+  alias DpExchange.Core.{Notice, Types}
   alias DpExchange.Schwab.Feed
-
-  @moduletag :capture_log
-
-  defmodule PermissiveLimiter do
-    @moduledoc false
-    @behaviour DpExchange.Core.RateLimitBehaviour
-
-    @impl true
-    def acquire(_provider, _weight, _opts), do: :ok
-    @impl true
-    def check(_provider, _weight, _opts), do: :ok
-    @impl true
-    def record(_provider, _weight, _opts), do: :ok
-  end
-
-  setup do
-    Config.put_override(:rate_limit_module, PermissiveLimiter)
-    :ok
-  end
-
-  @credentials %{
-    access_token: "token-abc",
-    refresh_token: "r",
-    client_id: "c",
-    client_secret: "s"
-  }
 
   @user_preference %{
     "streamerInfo" => [
@@ -68,47 +42,6 @@ defmodule DpExchange.Schwab.FeedTest do
   # A real 21-character Schwab option symbol — root, padded to 6; expiry as YYMMDD; C/P;
   # strike * 1000 padded to 8 digits — matching `SymbolFormat.option?/1`'s pattern.
   @option_symbol "AAPL  260116C00250000"
-
-  defp responding(body, status \\ 200) do
-    fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.resp(status, Jason.encode!(body))
-    end
-  end
-
-  # A stand-in for the socket process. It is a real process so `is_pid/1` and the liveness
-  # checks behave, and it never speaks — the feed's socket-side behaviour under test is what
-  # it *sends*, not what comes back.
-  defp fake_socket do
-    pid = spawn(fn -> Process.sleep(:infinity) end)
-    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
-    pid
-  end
-
-  defp start_feed(opts) do
-    {:ok, feed} =
-      Feed.start_link(
-        Keyword.merge([name: nil, credentials: @credentials, subscriber: self()], opts)
-      )
-
-    # `feed` is linked to THIS test process (plain `start_link`, no supervisor) and
-    # on_exit callbacks run after the test process itself has already exited — so by the
-    # time this runs, `feed` may already be gone, a race whose window `Feed` trapping
-    # exits (added for the crash-isolation fix) widens: `Process.alive?/1` can still
-    # answer `true` a moment before the same teardown catches up and the process is
-    # gone by the time `GenServer.stop/2` actually reaches it. `:noproc` here means
-    # cleanup has nothing left to do, not a test failure.
-    on_exit(fn ->
-      try do
-        GenServer.stop(feed, :normal)
-      catch
-        :exit, _reason -> :ok
-      end
-    end)
-
-    feed
-  end
 
   describe ":interval_ms is validated at init, not at the first tick" do
     # `interval_ms` reaches `Core.PollingFeed` and ends up in `Process.send_after/3`, which
@@ -612,7 +545,7 @@ defmodule DpExchange.Schwab.FeedTest do
       feed = start_feed(socket: socket)
       Feed.subscribe(feed, ["AAPL"])
 
-      new_credentials = Map.put(@credentials, :access_token, "fresh-token")
+      new_credentials = Map.put(credentials(), :access_token, "fresh-token")
       assert Feed.update_credentials(feed, new_credentials) == :ok
 
       assert_receive {:relayed_to_socket,
@@ -639,7 +572,7 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
       assert %{route: :internal_poll} = Feed.status(feed)
 
-      new_credentials = Map.put(@credentials, :access_token, "fresh-token")
+      new_credentials = Map.put(credentials(), :access_token, "fresh-token")
       assert Feed.update_credentials(feed, new_credentials) == :ok
       assert Process.alive?(feed)
     end
@@ -754,264 +687,6 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_union_matches_coverage(feed, by_kind)
       assert_declared_streamable(by_kind)
-    end
-  end
-
-  describe "the fallback poll's own silent-delivery notice — DpCryptoManagement issue #21" do
-    # `Core.PollingFeed` 0.1.50 added `:on_notice`, fired once on the transition into
-    # delivering nothing and once on the transition back out. This is `Feed`'s own wiring
-    # of it (`start_poller/1`) under test — not `Core.PollingFeed`'s latching logic itself,
-    # which belongs to that package's own suite.
-    #
-    # These notices must never read as the Streamer's own health. `PollingFeed` only ever
-    # runs on this venue's `:poll` route, so a `:coverage_change` notice can only ever
-    # describe the fallback poll — the Streamer's connection health is a different `kind`
-    # entirely (`:link_down` / `:link_up`, from `Socket`, provider `:schwab` as
-    # an atom). This poller's label is `"schwab-fallback-poll"`, a *string*, precisely so
-    # both the notice's `provider` and its message text are unambiguous even read alone.
-
-    defp always_failing_quotes_plug do
-      fn conn ->
-        if String.contains?(conn.request_path, "userPreference") do
-          Plug.Conn.resp(conn, 401, "no")
-        else
-          Plug.Conn.resp(conn, 500, "boom")
-        end
-      end
-    end
-
-    # Fails `fail_times` polls against `/quotes`, then succeeds — the family idiom for
-    # driving a poll through failure and recovery deterministically (see
-    # `dp_exchange_coinbase`'s `feed_test.exs`, `flaky_socket_loop/2`, for the same shape
-    # applied to a socket send instead of an HTTP response).
-    defp recovering_quotes_plug(counter, fail_times) do
-      fn conn ->
-        if String.contains?(conn.request_path, "userPreference") do
-          Plug.Conn.resp(conn, 401, "no")
-        else
-          attempt = :counters.get(counter, 1)
-          :counters.add(counter, 1, 1)
-
-          if attempt < fail_times do
-            Plug.Conn.resp(conn, 500, "boom")
-          else
-            Req.Test.json(conn, quote_body())
-          end
-        end
-      end
-    end
-
-    test "delivering nothing on the fallback poll emits a coverage_change warning naming the poll, not the Streamer" do
-      feed =
-        start_feed(
-          plug: always_failing_quotes_plug(),
-          retry_attempts: 0,
-          interval_ms: 50,
-          # Headroom before the first tick so `subscribe_notices/2` below is guaranteed to
-          # land before the poller's first attempt — the poller is a third process on its
-          # own timer, not driven by a message this test controls.
-          start_delay_ms: 150,
-          symbols: ["AAPL"]
-        )
-
-      :ok = Feed.subscribe(feed, ["AAPL"])
-      :ok = Feed.subscribe_notices(feed, to: self())
-
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
-
-      assert notice.severity == :warning
-      assert notice.provider == "schwab-fallback-poll"
-
-      assert notice.message ==
-               "schwab-fallback-poll has delivered nothing in 1 consecutive attempts"
-
-      assert notice.details.label == "schwab-fallback-poll"
-
-      # Never the Streamer's own vocabulary. A reader with only this text has to be able
-      # to tell the two apart.
-      refute notice.message =~ "Streamer"
-      refute notice.message =~ "socket"
-    end
-
-    test "the notice fires once per outage, not once per failed tick" do
-      feed =
-        start_feed(
-          plug: always_failing_quotes_plug(),
-          retry_attempts: 0,
-          interval_ms: 50,
-          start_delay_ms: 150,
-          symbols: ["AAPL"]
-        )
-
-      :ok = Feed.subscribe(feed, ["AAPL"])
-      :ok = Feed.subscribe_notices(feed, to: self())
-
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
-
-      # Several more tick intervals pass with the poll still failing every attempt — no
-      # second notice, because `PollingFeed` latches to `:dead` on the first crossing and
-      # only fires again on recovery.
-      refute_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change}}, 400
-    end
-
-    test "recovery fires a distinct info notice once the fallback poll starts delivering again" do
-      counter = :counters.new(1, [])
-
-      feed =
-        start_feed(
-          plug: recovering_quotes_plug(counter, 3),
-          retry_attempts: 0,
-          interval_ms: 50,
-          start_delay_ms: 150,
-          symbols: ["AAPL"]
-        )
-
-      :ok = Feed.subscribe(feed, ["AAPL"])
-      :ok = Feed.subscribe_notices(feed, to: self())
-
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
-
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = recovery},
-                     3_000
-
-      assert recovery.severity == :info
-      assert recovery.provider == "schwab-fallback-poll"
-
-      assert recovery.message ==
-               "schwab-fallback-poll has resumed delivering after 3 consecutive failures"
-
-      assert recovery.details.label == "schwab-fallback-poll"
-
-      # The recovered quote itself still arrives normally on the same route.
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
-      assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
-    end
-  end
-
-  describe "the Streamer bootstrap cannot wedge every subscribe/2 caller" do
-    # `start_route_bootstrap/2`'s "already in flight" clause makes every later `subscribe/2`
-    # JOIN the waiting list of the bootstrap in progress, and the only clause that used to
-    # clear `route_bootstrap` was the `{ref, result}` reply. So a bootstrap task that never
-    # answers meant no `subscribe/2` ever returned again: each caller blocked until its own
-    # `GenServer.call` timeout and then EXITED, taking the calling process with it, for the
-    # life of the feed.
-    #
-    # Verified to wedge before the fix by driving both paths directly — a killed task left
-    # `route_bootstrap` holding the dead ref, a second subscribe joined it, and neither
-    # caller was ever replied to.
-
-    test "a killed bootstrap task answers every waiting caller instead of stranding them" do
-      # `fetch_user_preference/2` converts a raise or an `exit` inside the task into an
-      # ordinary error result, and its comment says that stops waiting callers from never
-      # being answered. It does — for those two. A kill is untrappable, so neither runs.
-      test_pid = self()
-
-      plug = fn conn ->
-        send(test_pid, {:bootstrapping, self()})
-        Process.sleep(:infinity)
-        conn
-      end
-
-      feed = start_feed(plug: plug, limiter: permissive_limiter())
-
-      spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, task_pid}, 3_000
-
-      Process.exit(task_pid, :kill)
-
-      # The caller gets an answer rather than hanging to its own call timeout, and the
-      # answer is this venue's documented degraded mode.
-      assert_receive {:subscribed, _result}, 3_000
-      assert :sys.get_state(feed).route_bootstrap == nil
-      assert :sys.get_state(feed).route == :poll
-      assert Process.alive?(feed)
-    end
-
-    test "a bootstrap that never returns is timed out, not waited on forever" do
-      # The other half, and the one no `:DOWN` can catch: the task is perfectly alive, it
-      # just never answers.
-      test_pid = self()
-
-      plug = fn conn ->
-        send(test_pid, {:bootstrapping, self()})
-        Process.sleep(:infinity)
-        conn
-      end
-
-      feed =
-        start_feed(
-          plug: plug,
-          limiter: permissive_limiter(),
-          # 300, not 100. Even with the request path warmed in `test_helper.exs`, a
-          # hundred milliseconds is not reliably longer than spawning the bootstrap task
-          # and reaching the plug inside it: this test failed two runs in three at 100.
-          # 300 is what its sibling below asks for, and the pair is clean at 300 only
-          # because of that warm-up — without it both flake even here. See test_helper.exs.
-          route_bootstrap_timeout_ms: 300
-        )
-
-      spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, task_pid}, 3_000
-
-      assert_receive {:subscribed, _result}, 3_000
-      assert :sys.get_state(feed).route_bootstrap == nil
-
-      # The timed-out task is actually gone, not left running behind the feed's back.
-      # Polled rather than slept: a fixed sleep here is a bet on how fast the VM reaps a
-      # killed process, which is exactly the kind of guess this suite avoids elsewhere.
-      refute_eventually_alive(task_pid)
-      assert Process.alive?(feed)
-    end
-
-    test "a SECOND subscriber parked on a wedged bootstrap is answered too" do
-      # The one that made this the worst wedge in the package: the waiting list is what every
-      # later caller joins, so stranding it strands all of them, not just the first.
-      test_pid = self()
-
-      plug = fn conn ->
-        send(test_pid, {:bootstrapping, self()})
-        Process.sleep(:infinity)
-        conn
-      end
-
-      feed =
-        start_feed(
-          plug: plug,
-          limiter: permissive_limiter(),
-          route_bootstrap_timeout_ms: 300
-        )
-
-      spawn(fn -> send(test_pid, {:first, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, _task_pid}, 3_000
-
-      spawn(fn -> send(test_pid, {:second, Feed.subscribe(feed, ["MSFT"])}) end)
-
-      assert_receive {:first, _r1}, 3_000
-      assert_receive {:second, _r2}, 3_000
-      assert Process.alive?(feed)
-    end
-
-    test "a timer left over from a bootstrap that already settled is ignored" do
-      # The timeout is armed per attempt and matched on the stored ref, so one arriving for a
-      # bootstrap that has since completed must not tear down whatever is running now.
-      feed = start_feed(socket: fake_socket())
-      :ok = Feed.subscribe(feed, ["AAPL"])
-
-      send(feed, {:route_bootstrap_timeout, make_ref()})
-      _settled = Feed.coverage(feed)
-
-      assert Process.alive?(feed)
-      assert :sys.get_state(feed).route_bootstrap == nil
-    end
-
-    defp refute_eventually_alive(pid, waited \\ 0) do
-      cond do
-        not Process.alive?(pid) -> :ok
-        waited >= 2_000 -> flunk("#{inspect(pid)} was still alive after 2000ms")
-        true -> Process.sleep(10) && refute_eventually_alive(pid, waited + 10)
-      end
     end
   end
 
@@ -1173,7 +848,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert {:error, {%ArgumentError{message: message}, _stack}} =
                Feed.start_link(
                  name: nil,
-                 credentials: @credentials,
+                 credentials: credentials(),
                  subscriber: self(),
                  max_queue_len: "3"
                )
@@ -1292,121 +967,6 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
-  describe "rate_limit_blocking — DpCryptoManagement issue #23 (fallback poll)" do
-    # A limiter with a single, already-spent allowance: `record/3` commits usage the way
-    # `acquire/3` does, without `acquire/3`'s own wait — so the bucket starts genuinely
-    # empty and the next request against it has to wait out one whole emission interval
-    # (~300ms) regardless of which mode reaches it. That wait is the one observable
-    # difference between blocking (`acquire/3`, which waits it out and then succeeds) and
-    # fail-fast (`check/3`, which refuses immediately and never retries before the next
-    # poll tick) — proving `rate_limit_blocking` actually reaches `Core.HttpClient` on the
-    # fallback poll route, across the process boundary `apply_config/1` exists to cross.
-    #
-    # `Config.put_override(:rate_limit_module, DefaultRateLimiter)` overrides this file's
-    # own `setup` block (which points every other test at `PermissiveLimiter`) so these
-    # two tests exercise the real limiter — `state.config_snapshot` captures whichever
-    # module is active in the test process at the moment `start_feed/1` calls
-    # `Feed.start_link/1`, so the override has to happen first.
-
-    # The bootstrap path (`Rest.get_user_preference/2`) reaches `Core.HttpClient`, which fails
-    # closed with "Rate limiter unavailable" when no limiter is named — so a test that means
-    # to exercise the Streamer bootstrap must supply one, or it silently measures the
-    # fallback-to-poll path instead. Learned the hard way while proving the blocking bug:
-    # without this the plug was never reached at all.
-    defp permissive_limiter do
-      name = :"limiter_#{System.unique_integer([:positive])}"
-
-      {:ok, _pid} =
-        start_supervised(
-          {DefaultRateLimiter,
-           name: name, limits: %{schwab: %{limit: 1_000, per_ms: 1_000, burst: 1_000}}},
-          id: name
-        )
-
-      name
-    end
-
-    defp exhausted_limiter do
-      name = :"limiter_#{System.unique_integer([:positive])}"
-
-      {:ok, _pid} =
-        DefaultRateLimiter.start_link(
-          name: name,
-          limits: %{default: %{limit: 1, per_ms: 300, burst: 0}}
-        )
-
-      :ok = DefaultRateLimiter.record(:schwab, 1, limiter: name)
-      name
-    end
-
-    defp poll_plug do
-      fn conn ->
-        if String.contains?(conn.request_path, "userPreference") do
-          Plug.Conn.resp(conn, 401, "no")
-        else
-          Req.Test.json(conn, quote_body())
-        end
-      end
-    end
-
-    test "the fallback poll defaults to blocking, matching this feed's own documented design: a slow cycle, not a missing price" do
-      Config.put_override(:rate_limit_module, DefaultRateLimiter)
-
-      feed =
-        start_feed(
-          plug: poll_plug(),
-          retry_attempts: 0,
-          interval_ms: 60_000,
-          start_delay_ms: 0,
-          symbols: ["AAPL"],
-          limiter: exhausted_limiter()
-        )
-
-      :ok = Feed.subscribe(feed, ["AAPL"])
-
-      # check/3 would refuse immediately and never retry inside this window (the next
-      # tick is 60s away) — only acquire/3 (the default) delivers here at all. The
-      # bootstrap's own `/userPreference` call shares this same limiter and opts, so it
-      # waits out the bucket too before falling back — hence the generous timeout.
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
-      assert %{route: :internal_poll} = Feed.status(feed)
-    end
-
-    test "a caller can still opt into fail-fast explicitly, and it costs the poll cycle" do
-      Config.put_override(:rate_limit_module, DefaultRateLimiter)
-
-      feed =
-        start_feed(
-          plug: poll_plug(),
-          retry_attempts: 0,
-          interval_ms: 60_000,
-          start_delay_ms: 0,
-          symbols: ["AAPL"],
-          limiter: exhausted_limiter(),
-          rate_limit_blocking: false
-        )
-
-      :ok = Feed.subscribe(feed, ["AAPL"])
-
-      refute_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 1_500
-      assert Process.alive?(feed)
-    end
-  end
-
-  test "child_spec carries the configured name as its id" do
-    assert %{id: :my_feed, type: :worker} = Feed.child_spec(name: :my_feed)
-  end
-
-  defp quote_for(symbol) do
-    %Types.Quote{
-      symbol: symbol,
-      price: Decimal.new("100.5"),
-      venue_time: DateTime.utc_now(),
-      observed_at: DateTime.utc_now(),
-      provider: :schwab
-    }
-  end
-
   defp order_book_for(symbol) do
     %Types.OrderBook{
       symbol: symbol,
@@ -1470,168 +1030,11 @@ defmodule DpExchange.Schwab.FeedTest do
     assert MapSet.subset?(reported, declared)
   end
 
-  defp quote_body do
-    %{
-      "AAPL" => %{
-        "quote" => %{
-          "lastPrice" => 227.5,
-          "totalVolume" => 51_234_567,
-          "quoteTime" => 1_787_936_147_000
-        }
-      }
-    }
-  end
-
   defp relay(parent) do
     receive do
       message ->
         send(parent, {:relayed, message})
         relay(parent)
-    end
-  end
-
-  describe "a read cannot be blocked by a subscribe establishing the route (core #28's class)" do
-    test "coverage/1 answers while a subscribe is still bootstrapping the Streamer" do
-      # Establishing the Streamer route means a signed `Rest.get_user_preference/2` round
-      # trip plus a WebSocket connect. That used to run INLINE in `handle_call/3`, so a
-      # subscribe blocked this GenServer for the whole of it — and with `Core.HttpClient`'s
-      # documented defaults (30_000 ms per attempt, 3 attempts) that window reaches about
-      # ninety seconds. `coverage/1` and `status/1` are plain `GenServer.call/2`s carrying
-      # the FIVE-second default, so a health check arriving during a subscribe did not wait,
-      # it exited — and a consumer calling it from their own `handle_call/3` died with it.
-      #
-      # That is dp-exchange-core issue #28's exact failure on a different venue and a
-      # different call. It was found by sweeping this family for the class the #30 reporter
-      # named — "work done in the process that owes a reply" — not by it failing in
-      # production a second time. This test failed before the fix, with `coverage/1` not
-      # answering inside 500 ms.
-      test_pid = self()
-
-      plug = fn conn ->
-        if String.contains?(conn.request_path, "userPreference") do
-          send(test_pid, :bootstrap_started)
-          # Stands in for a slow venue. The real budget is ~90s; 2s keeps the test quick
-          # while still being far longer than the 500ms this asserts a read answers within.
-          Process.sleep(2_000)
-          Plug.Conn.resp(conn, 401, "no")
-        else
-          Req.Test.json(conn, quote_body())
-        end
-      end
-
-      feed =
-        start_feed(
-          plug: plug,
-          limiter: permissive_limiter(),
-          retry_attempts: 0,
-          start_delay_ms: 0,
-          interval_ms: 50
-        )
-
-      subscriber = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
-      assert_receive :bootstrap_started, 1_000
-
-      reader = Task.async(fn -> Feed.coverage(feed) end)
-      result = Task.yield(reader, 500) || Task.shutdown(reader, :brutal_kill)
-
-      assert match?({:ok, _}, result),
-             "coverage/1 did not answer within 500ms while a subscribe was establishing " <>
-               "the route — the Feed is blocked inside handle_call. got: #{inspect(result)}"
-
-      # The subscribe still gets its own answer once the route settles; deferring the reply
-      # must not mean losing it.
-      assert Task.await(subscriber, 5_000) in [:ok, {:error, :no_route}]
-      assert Process.alive?(feed)
-    end
-
-    test "two subscribes during one bootstrap share it, and both are answered" do
-      # `waiting` is a list precisely so this cannot become two Streamer connections for a
-      # consumer that called `subscribe/2` twice in quick succession. Both callers are owed
-      # a reply from the one bootstrap; dropping either would hang a caller until its
-      # `@call_timeout`.
-      test_pid = self()
-
-      plug = fn conn ->
-        if String.contains?(conn.request_path, "userPreference") do
-          send(test_pid, :bootstrap_started)
-          Process.sleep(500)
-          Plug.Conn.resp(conn, 401, "no")
-        else
-          Req.Test.json(conn, quote_body())
-        end
-      end
-
-      feed =
-        start_feed(
-          plug: plug,
-          limiter: permissive_limiter(),
-          retry_attempts: 0,
-          start_delay_ms: 0,
-          interval_ms: 50
-        )
-
-      first = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
-      assert_receive :bootstrap_started, 1_000
-      second = Task.async(fn -> Feed.subscribe(feed, ["MSFT"]) end)
-
-      assert Task.await(first, 5_000) in [:ok, {:error, :no_route}]
-      assert Task.await(second, 5_000) in [:ok, {:error, :no_route}]
-
-      # Exactly one bootstrap ran: a second would have sent a second `:bootstrap_started`.
-      refute_receive :bootstrap_started, 300
-
-      assert Enum.sort(Feed.wanted(feed)) == ["AAPL", "MSFT"]
-    end
-  end
-
-  describe "subscribe_notices/2 survives a busy feed" do
-    @describetag timeout: 60_000
-
-    test "it waits @call_timeout, not GenServer.call/2's five-second default" do
-      # `subscribe_notices` was the one public call in `Feed` left on the default timeout.
-      # Every sibling call is given `@call_timeout` — 15 seconds, the authors' own statement
-      # of how long this feed may legitimately take to answer — and this one had five.
-      #
-      # The blocker runs INSIDE the feed process: `:sys.replace_state/2` applies its function
-      # there, so the sleep occupies the feed exactly as a slow callback would, and the call
-      # under test queues behind it on the real mailbox. Six seconds is chosen to sit between
-      # the two timeouts: comfortably past the five-second default that used to fire, and
-      # nowhere near the fifteen the call is now allowed.
-      #
-      # A `GenServer.call/3` timeout exits in the CALLER, so before the fix this test would
-      # not have failed an assertion — it would have killed the test process with
-      # `{:timeout, ...}`, which is the same thing that happened to a host registering for
-      # notices while the feed was starting up.
-      feed = start_feed([])
-
-      blocked = make_ref()
-      test_pid = self()
-
-      # `spawn`, not `spawn_link`, and `:sys.replace_state/3` rather than `/2`: the two-arity
-      # form carries its own five-second timeout, which the six-second block deliberately
-      # outlasts, and a linked blocker would then have killed the test with that exit before
-      # the assertion below could run.
-      spawn(fn ->
-        :sys.replace_state(
-          feed,
-          fn state ->
-            send(test_pid, blocked)
-            Process.sleep(6_000)
-            state
-          end,
-          30_000
-        )
-      end)
-
-      assert_receive ^blocked, 5_000
-
-      started = System.monotonic_time(:millisecond)
-      assert :ok = Feed.subscribe_notices(feed, to: self())
-      waited = System.monotonic_time(:millisecond) - started
-
-      # Proves the call actually queued behind the block rather than being answered before
-      # it started — without which this would pass on the unfixed code too.
-      assert waited > 5_000
     end
   end
 end
