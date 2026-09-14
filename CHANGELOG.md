@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.35] - 2026-09-14
+
 ### Fixed
 
 - **The periodic re-assert discarded its own result, so one that could not run said
