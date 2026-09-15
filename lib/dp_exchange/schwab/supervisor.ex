@@ -155,17 +155,27 @@ defmodule DpExchange.Schwab.Supervisor do
     reads = ceiling(opts, :read_limit_per_minute, @default_read_limit)
     orders = ceiling(opts, :order_limit_per_minute, @default_order_limit)
 
+    # `max(_, 1)` on every entry, not only the order one. It is not a floor on the
+    # DECLARATION — zero is legal there and means a registration granted no throughput. It is
+    # a floor on the GCRA arithmetic, which divides by the rate. A host registered at zero
+    # should not be issuing those calls at all, and `capabilities/0` is where that is said.
+    #
+    # It guarded `schwab_orders` only, because that is the key whose default is `0` and so
+    # the one that was obviously reachable. `read_limit_per_minute: 0` is just as reachable —
+    # `validate_ceiling!/2` below accepts it by name, deliberately — and reached
+    # `DefaultRateLimiter` as `limit: 0`, which divided by it and took the limiter down on
+    # the first REST call. Core now refuses a zero rate at `start_link/1` rather than dying
+    # on first use, so the failure is no longer silent either way; this floor is what keeps
+    # a host that registered no read throughput from being unable to start the supervisor at
+    # all over a number it is entitled to declare.
+    reads = max(reads, 1)
+
     %{
       default: %{limit: reads, per_ms: 60_000, burst: reads},
       schwab: %{limit: reads, per_ms: 60_000, burst: reads},
       # `scope: :account` because that is what Schwab counts against, and a limiter keyed
       # by credential would silently over-permit a host running several accounts through
       # one registration.
-      #
-      # `max(orders, 1)` is not a floor on the DECLARATION — zero is legal there and means
-      # a registration granted no order throughput. It is a floor on the GCRA arithmetic,
-      # which divides by the rate. A host registered at zero should not be placing orders
-      # at all, and `capabilities/0` is where that is said.
       schwab_orders: %{
         limit: max(orders, 1),
         per_ms: 60_000,

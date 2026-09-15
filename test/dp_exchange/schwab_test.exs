@@ -173,6 +173,31 @@ defmodule DpExchange.SchwabTest do
       assert limits.schwab_orders.limit >= 1
     end
 
+    # The same question, asked about the other ceiling, which is where the answer was no.
+    # The test above was written when `max(orders, 1)` went in and checked the one key that
+    # prompted it; `read_limit_per_minute: 0` is just as legal — `validate_ceiling!/2`
+    # accepts it by name — and went straight into the limiter as `limit: 0`, the divisor in
+    # its GCRA arithmetic. Asserted over EVERY entry, so a sixth key added later cannot
+    # reopen it by simply not being listed here.
+    test "a registration with zero READ throughput does not divide by zero either" do
+      limits = Supervisor.limits(read_limit_per_minute: 0, order_limit_per_minute: 0)
+
+      for {key, limit} <- limits do
+        assert limit.limit >= 1, "#{key} would divide by zero in the limiter"
+        assert limit.per_ms > 0, "#{key} has no interval"
+      end
+    end
+
+    test "the floor applies to zero and to nothing else" do
+      # A floor that quietly rounded every small ceiling up would be worse than the crash it
+      # replaces: it would pace a host faster than it registered for, and the venue, not the
+      # limiter, would be the one to say so. Only zero moves.
+      assert Supervisor.limits(read_limit_per_minute: 0).default.limit == 1
+      assert Supervisor.limits(read_limit_per_minute: 1).default.limit == 1
+      assert Supervisor.limits(read_limit_per_minute: 7).default.limit == 7
+      assert Supervisor.limits(order_limit_per_minute: 7).schwab_orders.limit == 7
+    end
+
     # An explicit `nil` is what a consumer forwarding `Application.get_env/2` produces when
     # nothing was configured. `Keyword.has_key?/2` answers `true` for it and
     # `Keyword.get/3` returns the `nil` rather than the default, so the old code read it as

@@ -35,6 +35,25 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`read_limit_per_minute: 0` divided by zero in the limiter.** `limits/1` floored the order
+  ceiling at 1 and not the read ceiling, so a host that registered no read throughput — a
+  value `validate_ceiling!/2` accepts by name, deliberately, because zero is a legal
+  registration — handed `DefaultRateLimiter` a `limit: 0`, which is the divisor in its GCRA
+  arithmetic. The limiter died on the first REST call and was restarted into a crash loop.
+
+  The floor went in with `schwab_orders`, the key whose default is `0` and so the obviously
+  reachable one; the read key is just as reachable and was never asked the same question. The
+  test covering it had the same shape — it asserted `schwab_orders.limit >= 1` and stopped
+  there. It now asserts over every entry, so a key added later cannot reopen this by simply
+  not being listed, and a companion test pins that the floor moves zero and nothing else: a
+  floor that rounded every small ceiling up would pace a host faster than it registered for,
+  which is a worse failure than the crash it replaces.
+
+  The floor is on the arithmetic, never on the declaration. `capabilities/0` keeps saying what
+  this application was actually registered for.
+
+### Fixed
+
 - **An order price or size could go onto the wire in scientific notation.**
   `Decimal.to_string/1` defaults to `:scientific`, and `to_string/1` on a `%Decimal{}`
   reaches that same default through `String.Chars` — so a value carrying an exponent was
