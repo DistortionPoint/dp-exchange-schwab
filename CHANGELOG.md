@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.43] - 2026-09-15
+
 ### Fixed
 
 - **A blank `:client_secret` turned a misconfiguration into a terminal "a person must log in
