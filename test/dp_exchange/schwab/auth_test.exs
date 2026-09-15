@@ -273,7 +273,18 @@ defmodule DpExchange.Schwab.AuthTest do
             Map.delete(@creds, :refresh_token),
             Map.delete(@creds, :client_id),
             Map.delete(@creds, :client_secret),
+            # Blank, not only absent, and for EVERY field rather than the one that happened
+            # to get a case. The list enumerated all three deletions and exactly one
+            # blanking, and the code matched it: `refresh_token` and `client_id` were
+            # trimmed, `client_secret` was checked with `is_binary/1` alone. A blank secret
+            # therefore went out over the wire as `Basic base64("client_id:")`, came back
+            # 401, and was reported as `{:refused, {:reauthorization_required, ...}}` — the
+            # answer this module documents as terminal and fixable only by a person at a
+            # browser. The remedy was an unset config value.
             %{@creds | refresh_token: "  "},
+            %{@creds | client_id: "  "},
+            %{@creds | client_secret: "  "},
+            %{@creds | client_secret: ""},
             %{}
           ] do
         assert Auth.refresh(incomplete, plug: exploding) ==

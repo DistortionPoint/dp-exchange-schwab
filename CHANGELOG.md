@@ -31,6 +31,24 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A blank `:client_secret` turned a misconfiguration into a terminal "a person must log in
+  again".** `refresh/2` trimmed `:refresh_token` and `:client_id` and checked `:client_secret`
+  with `is_binary/1` alone, so a blank secret passed the local gate and went out as
+  `Basic base64("client_id:")`. Schwab answers a bad client pair with 401; `do_refresh/5`
+  maps 400/401/403 to `{:refused, {:reauthorization_required, ...}}`, which this module
+  documents as **terminal** — seven days elapsed, or the user reset their password, fixable
+  only by a person at a browser. So a host with an unset config value was told its grant was
+  dead and a human was needed, when the remedy was a string it already had somewhere else.
+  Every value plausible, only the meaning wrong.
+
+  All three fields are now checked the same way, and a blank one takes the
+  `{:missing_credentials, :schwab}` branch, whose contract says nothing was sent and nothing
+  is spent. The test had the same shape as the code: it enumerated all three deletions and
+  exactly one blanking, so the field nobody blanked was the field nobody trimmed. It now
+  blanks all three.
+
 ## [0.2.42] - 2026-09-15
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

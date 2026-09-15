@@ -192,8 +192,19 @@ defmodule DpExchange.Schwab.Auth do
           credentials,
         opts
       )
-      when is_binary(refresh_token) and is_binary(client_id) and is_binary(client_secret) do
-    if String.trim(refresh_token) == "" or String.trim(client_id) == "" do
+      when is_binary(refresh_token) and is_binary(client_secret) and is_binary(client_id) do
+    # All three, not two of them. `:client_secret` was guarded only by `is_binary/1` above,
+    # so a blank one passed the gate and went out as `Basic base64("client_id:")`. Schwab
+    # answers a bad client pair with 401, `do_refresh/5` maps 400/401/403 to
+    # `{:refused, {:reauthorization_required, ...}}`, and the moduledoc calls that
+    # **terminal** — seven days elapsed, or the user reset their password, fixable only by a
+    # person at a browser. So a host with an unset config value was told its grant was dead
+    # and a human was needed, when the remedy was a string it already had somewhere else.
+    # That is the substitution this family exists to refuse: every value plausible, only the
+    # meaning wrong. A credential that is blank is a credential that is missing, and
+    # `{:missing_credentials, :schwab}` is the branch whose contract says nothing was sent
+    # and nothing is spent.
+    if Enum.any?([refresh_token, client_id, client_secret], &blank?/1) do
       {:error, {:missing_credentials, :schwab}}
     else
       do_refresh(credentials, refresh_token, client_id, client_secret, opts)
@@ -201,6 +212,8 @@ defmodule DpExchange.Schwab.Auth do
   end
 
   def refresh(_incomplete, _opts), do: {:error, {:missing_credentials, :schwab}}
+
+  defp blank?(value), do: String.trim(value) == ""
 
   defp do_refresh(credentials, refresh_token, client_id, client_secret, opts) do
     # Basic auth over the client pair, per the venue's documented example. This is the

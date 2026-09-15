@@ -114,6 +114,17 @@ locally with `{:error, {:missing_credentials, :schwab}}` rather than being sent.
 `{:refused, _}`: `Core.Venue` reserves that for the venue's own word about a request it
 actually received, and a call with no credential never leaves this process.
 
+**A blank credential counts as a missing one.** An `:access_token` — or, for `refresh/2`, a `:refresh_token`, `:client_id` or `:client_secret` that is `""`, or only
+whitespace, is refused locally with `{:error, {:missing_credentials, :schwab}}` — it is
+never signed with. This matters because the usual way a credential goes missing is not a
+`nil`: it is a `.env` line reading `NAME=` with nothing after it, and `System.get_env/1`
+hands that back as `""`. Signing with it produced a well-formed request the venue refused
+for a reason naming signatures, which points at the signing code rather than at the
+credential.
+A blank `:client_secret` used to reach the venue and come back 401, which this package maps
+to `{:refused, {:reauthorization_required, ...}}` — the **terminal** answer meaning a person
+must authorize again at a browser. An unset config value is not a spent grant.
+
 **`DpExchange.Schwab.Fake` enforces that on every endpoint, and five of them slipped
 before.** `Fake.get_positions/1`, `Fake.get_option_chain/2`,
 `Fake.get_option_expirations/2`, `Fake.get_screener/2` and `Fake.get_transactions/2`
