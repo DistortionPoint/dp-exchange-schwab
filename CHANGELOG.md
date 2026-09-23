@@ -31,6 +31,37 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forwarded `nil` option was used as the value instead of meaning "not set".** This
+  family forwards `opts` unchanged through every layer, so an option a caller's own caller
+  never set arrives as `key: nil`, and `Keyword.get/3` substitutes its default only for an
+  ABSENT key. `Core.Config.opt/3` exists for exactly this; these call sites predated it and
+  now use it.
+
+  The one that mattered most was **`:to`**, and its two halves failed in opposite
+  directions. The real `Feed` put `nil` in its subscriber set, and `Core.Fanout.deliver/4`
+  resolves `nil` the way it resolves any name nothing answers to — nobody — so
+  `subscribe/2` answered `:ok` and **data never arrived**. The fake called `send(nil, _)`,
+  which raises. A consumer's tier-1 tests could not have shown them the real behaviour even
+  by accident: the fake crashed where the venue went quiet.
+
+  **`:limiter`** returned `nil` from `Supervisor.limiter_name/1`: the limiter started
+  unnamed while REST resolved `limiter: nil` to `Core.DefaultRateLimiter`'s global default —
+  a different, usually absent limiter.
+
+  **`:name` was deliberately left alone.** There `nil` is not "unset" — it is OTP's own way
+  to say "do not register this process", and this package's test support starts unnamed
+  feeds with it. The first pass converted it too and several test files went red at once,
+  which is how that was found; it is recorded so it is not tried again. `:credentials` is
+  unchanged as well, since `nil` and `%{}` already end in the same `missing_credentials`
+  refusal.
+
+  Each changed call site is tested red-before, green-after: `forwarded_nil_test.exs` drives
+  `Feed.subscribe/3` and `subscribe_notices/2` against a probe standing in for the feed
+  process, so what is measured is exactly the client-side resolution that changed. Core's
+  conformance suite gains assertion 27 for the fake half.
+
 ## [0.2.43] - 2026-09-15
 
 ### Fixed

@@ -127,11 +127,11 @@ defmodule DpExchange.Schwab.Supervisor do
 
   @doc "The limiter this venue meters against."
   @spec limiter_name(keyword()) :: atom()
-  def limiter_name(opts), do: Keyword.get(opts, :limiter, DpExchange.Schwab.RateLimiter)
+  def limiter_name(opts), do: Config.opt(opts, :limiter, DpExchange.Schwab.RateLimiter)
 
   @doc "This venue's feed process."
   @spec feed_name(keyword()) :: atom()
-  def feed_name(opts), do: Keyword.get(opts, :feed, Feed)
+  def feed_name(opts), do: Config.opt(opts, :feed, Feed)
 
   @doc """
   The process recording whether `:order_limit_per_minute` was stated — see `OrderLimit`.
@@ -140,7 +140,7 @@ defmodule DpExchange.Schwab.Supervisor do
   the limiter meters a number, this records whether that number was ever a real claim.
   """
   @spec order_limit_name(keyword()) :: atom()
-  def order_limit_name(opts), do: Keyword.get(opts, :order_limit, OrderLimit)
+  def order_limit_name(opts), do: Config.opt(opts, :order_limit, OrderLimit)
 
   @doc """
   The limits this tree meters with.

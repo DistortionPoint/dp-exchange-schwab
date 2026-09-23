@@ -61,7 +61,7 @@ defmodule DpExchange.Schwab.Socket do
 
   use WebSockex
 
-  alias DpExchange.Core.{Notice, Telemetry}
+  alias DpExchange.Core.{Config, Notice, Telemetry}
   alias DpExchange.Schwab.{Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
 
   require Logger
@@ -122,7 +122,7 @@ defmodule DpExchange.Schwab.Socket do
     }
 
     WebSockex.start_link(
-      Keyword.get(opts, :url, info.socket_url),
+      Config.opt(opts, :url, info.socket_url),
       __MODULE__,
       state,
       connection_opts(opts)

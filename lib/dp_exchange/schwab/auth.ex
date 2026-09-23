@@ -69,7 +69,7 @@ defmodule DpExchange.Schwab.Auth do
   against a credential that can never succeed.
   """
 
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
 
   @token_url "https://api.schwabapi.com/v1/oauth/token"
 
@@ -120,7 +120,7 @@ defmodule DpExchange.Schwab.Auth do
          [
            {"Authorization", "Bearer " <> trimmed},
            {"Accept", "application/json"}
-         ] ++ Keyword.get(opts, :extra_headers, [])}
+         ] ++ Config.opt(opts, :extra_headers, [])}
     end
   end
 
@@ -296,7 +296,7 @@ defmodule DpExchange.Schwab.Auth do
 
   @doc "Token endpoint, overridable for tests."
   @spec token_url(keyword()) :: String.t()
-  def token_url(opts), do: Keyword.get(opts, :token_url, @token_url)
+  def token_url(opts), do: Config.opt(opts, :token_url, @token_url)
 
   defp request_opts(opts) do
     opts

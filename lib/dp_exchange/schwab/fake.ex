@@ -57,7 +57,7 @@ defmodule DpExchange.Schwab.Fake do
 
   alias DpExchange.Core.Types.{Balance, Candle, Quote, TopOfBook}
 
-  alias DpExchange.Core.{FakeInjection, Notice, Types, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Orders, Rest, SymbolFormat}
 
@@ -276,7 +276,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_market_status(opts) do
     with :ok <- require_credentials(opts) do
-      {:ok, Keyword.get(opts, :market_status, :open)}
+      {:ok, Config.opt(opts, :market_status, :open)}
     end
   end
 
@@ -292,7 +292,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_get_accounts(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials) do
-      {:ok, [%{account_number: "123456789", hash: Keyword.get(opts, :account_hash, "FAKEHASH")}]}
+      {:ok, [%{account_number: "123456789", hash: Config.opt(opts, :account_hash, "FAKEHASH")}]}
     end
   end
 
@@ -435,7 +435,7 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def subscribe(symbols, opts \\ []) do
-    to = Keyword.get(opts, :to, self())
+    to = Config.opt(opts, :to, self())
     covered = Enum.filter(symbols, &(&1 in @listed))
 
     Process.put(__MODULE__, Enum.uniq(subscribed() ++ covered))
@@ -500,7 +500,7 @@ defmodule DpExchange.Schwab.Fake do
   @impl true
   def subscribe_notices(opts \\ []) do
     send(
-      Keyword.get(opts, :to, self()),
+      Config.opt(opts, :to, self()),
       {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)}
     )
 

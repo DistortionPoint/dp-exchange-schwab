@@ -329,7 +329,7 @@ defmodule DpExchange.Schwab.Feed do
   """
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts \\ []) do
-    GenServer.call(feed, {:subscribe, symbols, Keyword.get(opts, :to, self())}, @call_timeout)
+    GenServer.call(feed, {:subscribe, symbols, Config.opt(opts, :to, self())}, @call_timeout)
   end
 
   @doc "Remove `symbols` from the delivered set."
@@ -456,7 +456,7 @@ defmodule DpExchange.Schwab.Feed do
   # calling process for asking during exactly the conditions it exists to report.
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
-    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())}, @call_timeout)
+    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
 
   @doc """
   Replaces the credentials this feed signs and connects with — see the moduledoc's
@@ -499,14 +499,14 @@ defmodule DpExchange.Schwab.Feed do
     # which this flag is what makes reachable at all.
     Process.flag(:trap_exit, true)
 
-    snapshot = Keyword.get(opts, :config_snapshot, %{})
+    snapshot = Config.opt(opts, :config_snapshot, %{})
     apply_config(snapshot)
 
     validate_interval_ms!(Config.opt(opts, :interval_ms, @interval_ms))
 
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
-    subscriber = Keyword.get(opts, :subscriber, self())
+    subscriber = Config.opt(opts, :subscriber, self())
 
     state = %{
       # Wrapped immediately, before it reaches `state` — see `Credentials`'s moduledoc.
@@ -557,7 +557,7 @@ defmodule DpExchange.Schwab.Feed do
       # which would arrive at the rate of the stream it already cannot keep up with.
       dropping: MapSet.new(),
       max_queue_len: Fanout.max_queue_len!(opts, :schwab),
-      wanted: MapSet.new(Keyword.get(opts, :symbols, [])),
+      wanted: MapSet.new(Config.opt(opts, :symbols, [])),
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),

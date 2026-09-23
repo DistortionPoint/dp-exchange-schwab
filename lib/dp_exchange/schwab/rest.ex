@@ -58,7 +58,7 @@ defmodule DpExchange.Schwab.Rest do
   success, because a caller that cannot name the order it just placed cannot cancel it.
   """
 
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
 
   alias DpExchange.Core.Types.{
     Candle,
@@ -103,11 +103,11 @@ defmodule DpExchange.Schwab.Rest do
 
   @doc "Market-data base URL, overridable for tests."
   @spec market_data_url(keyword()) :: String.t()
-  def market_data_url(opts), do: Keyword.get(opts, :market_data_url, @market_data_url)
+  def market_data_url(opts), do: Config.opt(opts, :market_data_url, @market_data_url)
 
   @doc "Trader base URL, overridable for tests."
   @spec trader_url(keyword()) :: String.t()
-  def trader_url(opts), do: Keyword.get(opts, :trader_url, @trader_url)
+  def trader_url(opts), do: Config.opt(opts, :trader_url, @trader_url)
 
   @doc "Canonical candle widths this venue serves, shortest first."
   @spec timeframes() :: [String.t()]
@@ -494,7 +494,7 @@ defmodule DpExchange.Schwab.Rest do
   @spec market_status(map(), keyword()) ::
           {:ok, :open | :closed} | {:error, term()} | {:refused, term()}
   def market_status(credentials, opts) do
-    market = Keyword.get(opts, :market, "equity")
+    market = Config.opt(opts, :market, "equity")
     path = "/markets?markets=" <> URI.encode(market)
 
     with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
@@ -541,7 +541,7 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, query} <- fetch_query(opts) do
       params = %{
         "symbol" => query,
-        "projection" => Keyword.get(opts, :projection, "symbol-search")
+        "projection" => Config.opt(opts, :projection, "symbol-search")
       }
 
       path = "/instruments?" <> URI.encode_query(params)

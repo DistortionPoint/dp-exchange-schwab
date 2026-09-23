@@ -78,7 +78,7 @@ defmodule DpExchange.Schwab do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.Venue
+  alias DpExchange.Core.{Config, Venue}
   alias DpExchange.Schwab.{Auth, Capabilities, Feed, OrderLimit, Orders, Rest, Supervisor}
 
   # --- identity -----------------------------------------------------------
@@ -651,7 +651,7 @@ defmodule DpExchange.Schwab do
     end
   end
 
-  defp feed(opts), do: Keyword.get(opts, :feed, Supervisor.feed_name(opts))
+  defp feed(opts), do: Config.opt(opts, :feed, Supervisor.feed_name(opts))
 
   defp alive?(name) when is_atom(name), do: is_pid(Process.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)

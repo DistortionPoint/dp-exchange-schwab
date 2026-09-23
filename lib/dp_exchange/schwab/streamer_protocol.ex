@@ -51,6 +51,7 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   `LOGIN`, `SUBS`, `UNSUBS`, `ADD`, `VIEW`.
   """
 
+  alias DpExchange.Core.Config
   alias DpExchange.Schwab.StreamerInfo
 
   @services ~w(
@@ -99,7 +100,7 @@ defmodule DpExchange.Schwab.StreamerProtocol do
         %{"keys" => Enum.join(keys, ",")}
         |> put_fields(Keyword.get(opts, :fields))
 
-      {:ok, request(info, service, command, Keyword.get(opts, :request_id, 1), parameters)}
+      {:ok, request(info, service, command, Config.opt(opts, :request_id, 1), parameters)}
     end
   end
 
