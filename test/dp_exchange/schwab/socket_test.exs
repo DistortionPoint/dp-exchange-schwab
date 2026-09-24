@@ -37,6 +37,7 @@ defmodule DpExchange.Schwab.SocketTest do
         request_id: 1,
         subscriptions: MapSet.new(),
         login_failures: 0,
+        held: [],
         last_top: %{}
       },
       overrides
@@ -76,17 +77,103 @@ defmodule DpExchange.Schwab.SocketTest do
   end
 
   describe "LOGIN gates every other command" do
-    test "a subscribe before login is dropped and reported, not queued" do
-      # A caller told the subscription succeeded would wait for data the venue never agreed
-      # to send.
-      assert {:ok, unchanged} =
+    test "a subscribe before login is held, not sent and not dropped" do
+      # `Feed` subscribes the moment `Socket.start_link/1` returns, which is before the LOGIN
+      # response can arrive. Dropping it cost every bootstrap its first subscription — see
+      # the moduledoc's "A command sent before LOGIN is held, not dropped".
+      assert {:ok, held} =
                Socket.handle_cast(
                  {:subscribe, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []},
                  state()
                )
 
-      assert unchanged.subscriptions == MapSet.new()
+      assert held.held == [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []}]
+      assert held.subscriptions == MapSet.new()
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    end
+
+    test "a successful LOGIN sends everything held, in order, in one envelope" do
+      before =
+        state(%{
+          held: [
+            {"LEVELONE_EQUITIES", "SUBS", ~w(AAPL MSFT), []},
+            {"CHART_EQUITY", "SUBS", ~w(AAPL), []}
+          ]
+        })
+
+      login = %{
+        "response" => [%{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => 0}}]
+      }
+
+      assert {:reply, {:text, raw}, after_login} = Socket.handle_frame(frame(login), before)
+
+      assert %{"requests" => [first, second]} = Jason.decode!(raw)
+      assert {first["service"], first["parameters"]["keys"]} == {"LEVELONE_EQUITIES", "AAPL,MSFT"}
+      assert {second["service"], second["parameters"]["keys"]} == {"CHART_EQUITY", "AAPL"}
+      assert first["requestid"] != second["requestid"]
+
+      assert after_login.logged_in?
+      assert after_login.held == []
+      assert MapSet.size(after_login.subscriptions) == 2
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
+    end
+
+    test "a held SUBS supersedes what was held for its service, and only its service" do
+      # `SUBS` replaces a service's whole symbol set on the wire, so the earlier command
+      # would be overwritten the instant this one landed. It also keeps a caller that only
+      # sends `SUBS` (as `Feed` does) holding at most one command per service.
+      commands = [
+        {"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []},
+        {"CHART_EQUITY", "SUBS", ~w(AAPL), []},
+        {"LEVELONE_EQUITIES", "ADD", ~w(MSFT), []},
+        {"LEVELONE_EQUITIES", "SUBS", ~w(TSLA), []}
+      ]
+
+      held =
+        Enum.reduce(commands, state(), fn command, acc ->
+          {:ok, acc} = Socket.handle_cast(Tuple.insert_at(command, 0, :subscribe), acc)
+          acc
+        end)
+
+      assert held.held == [
+               {"CHART_EQUITY", "SUBS", ~w(AAPL), []},
+               {"LEVELONE_EQUITIES", "SUBS", ~w(TSLA), []}
+             ]
+    end
+
+    test "the hold is bounded, and a command past the bound is refused out loud" do
+      full = state(%{held: List.duplicate({"LEVELONE_EQUITIES", "ADD", ~w(AAPL), []}, 64)})
+
+      assert {:ok, still_full} =
+               Socket.handle_cast({:subscribe, "CHART_EQUITY", "ADD", ~w(MSFT), []}, full)
+
+      assert length(still_full.held) == 64
       assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    end
+
+    test "an invalid subscribe before login is reported at once, not held" do
+      assert {:ok, unchanged} =
+               Socket.handle_cast({:subscribe, "LEVELONE_CRYPTO", "SUBS", ~w(BTC), []}, state())
+
+      assert unchanged.held == []
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    end
+
+    test "a failed LOGIN keeps the hold for the next connection — nothing in it was sent" do
+      before = state(%{held: [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []}]})
+
+      denied = %{
+        "response" => [
+          %{
+            "service" => "ADMIN",
+            "command" => "LOGIN",
+            "content" => %{"code" => 3, "msg" => "no"}
+          }
+        ]
+      }
+
+      assert {:close, closed} = Socket.handle_frame(frame(denied), before)
+      assert closed.held == before.held
     end
 
     test "a subscribe after login goes out" do

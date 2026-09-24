@@ -11,8 +11,31 @@ defmodule DpExchange.Schwab.Socket do
   looks exactly like a quiet market.
 
   Login is also asynchronous: the frame goes out on connect and the *response* arrives
-  later, so `subscribe/4` before that response is `{:error, :not_logged_in}` rather than a
-  frame the venue drops.
+  later. A command sent in between is held, not put on the wire where the venue would
+  drop it — see the next section.
+
+  ## A command sent before LOGIN is held, not dropped
+
+  `subscribe/4` is a cast and always answers `:ok`. This module used to *drop* a command
+  that arrived before the LOGIN response, raise a `:degraded` "not logged in" notice, and
+  let the `:ok` stand. The reason given was that a caller told a subscription had succeeded
+  would wait for data the venue never agreed to send. But the caller had already been told
+  `:ok`, and it was the drop that made that untrue.
+
+  It also happened on nearly every start. `WebSockex.start_link/4` runs `handle_connect/2`,
+  which queues `:login`, before it returns. `Feed` subscribes the moment `start_link`
+  answers, so its `SUBS` reach this mailbox right behind `:login` and are handled a full
+  network round trip before the LOGIN response can arrive. Every bootstrap dropped its
+  first subscription and raised a spurious `:degraded`. Data began only when `Feed`'s
+  periodic re-assert fired, up to a minute later.
+
+  Such a command is now held in `state.held` and sent, in the order asked, in one envelope
+  once the LOGIN succeeds. It is validated when it arrives, so one that could never be sent
+  is still reported at once. A held `SUBS` supersedes whatever is held for its service
+  (`SUBS` replaces that service's whole set on the wire anyway), which bounds the hold by
+  the number of services for a caller like `Feed` that only sends `SUBS`. A hard cap of
+  64 commands refuses the rest with a `:degraded` notice. A failed LOGIN leaves the
+  hold in place for the next connection, since nothing in it was ever sent.
 
   ## The two identifiers must not change after login
 
@@ -107,6 +130,10 @@ defmodule DpExchange.Schwab.Socket do
   @base_reconnect_delay_ms 1_000
   @max_reconnect_delay_ms 30_000
 
+  # The most commands held while a LOGIN is pending — see the moduledoc's "A command sent
+  # before LOGIN is held, not dropped". `Feed` holds at most one per service.
+  @max_held 64
+
   @doc """
   Opens the Streamer for `info`, logging in with `access_token`.
 
@@ -133,6 +160,9 @@ defmodule DpExchange.Schwab.Socket do
       # `reconnect_delay_ms/1` — see the moduledoc's "A rejected LOGIN is not a network
       # blip" section.
       login_failures: 0,
+      # Commands that arrived before the LOGIN response, sent once it succeeds — see the
+      # moduledoc's "A command sent before LOGIN is held, not dropped".
+      held: [],
       # The last book this socket published per symbol, because `LEVELONE_*` is Change
       # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
       # connection, and dropped wholesale on reconnect.
@@ -165,8 +195,9 @@ defmodule DpExchange.Schwab.Socket do
   Subscribes `keys` on `service` using `command`.
 
   **`command` has no default.** `SUBS` replaces every prior symbol for the service and `ADD`
-  accumulates; see `StreamerProtocol`. Returns `{:error, :not_logged_in}` when the login
-  response has not arrived, because the venue ignores commands sent before it.
+  accumulates; see `StreamerProtocol`. Before the LOGIN response has arrived the command is
+  held and sent once the login succeeds, because the venue ignores commands sent before it;
+  see the moduledoc's "A command sent before LOGIN is held, not dropped" section.
   """
   @spec subscribe(pid(), String.t(), String.t(), [String.t()], keyword()) ::
           :ok | {:error, term()}
@@ -309,11 +340,18 @@ defmodule DpExchange.Schwab.Socket do
   def handle_cast({:update_access_token, access_token}, state),
     do: {:ok, %{state | credentials: Credentials.wrap_token(access_token)}}
 
-  def handle_cast({:subscribe, _service, _command, _keys, _opts}, %{logged_in?: false} = state) do
-    # Dropped deliberately rather than queued: a caller told the subscription succeeded
-    # would wait for data the venue never agreed to send.
-    notify(state, Notice.new(:degraded, :schwab, details: %{reason: "not logged in"}))
-    {:ok, state}
+  # Held until LOGIN succeeds, not dropped — see the moduledoc's "A command sent before
+  # LOGIN is held, not dropped" section. Validated now so a command that could never be
+  # sent is reported at once rather than after the login.
+  def handle_cast({:subscribe, service, command, keys, opts}, %{logged_in?: false} = state) do
+    case StreamerProtocol.subscribe(state.info, service, command, keys, opts) do
+      {:ok, _request} ->
+        {:ok, hold(state, {service, command, keys, opts})}
+
+      {:error, reason} ->
+        notify(state, Notice.new(:degraded, :schwab, details: %{reason: inspect(reason)}))
+        {:ok, state}
+    end
   end
 
   def handle_cast({:subscribe, service, command, keys, opts}, state) do
@@ -384,7 +422,66 @@ defmodule DpExchange.Schwab.Socket do
        when failures > before,
        do: {:close, state}
 
+  # The LOGIN just succeeded: everything held while it was pending goes out now, as one
+  # envelope, in the order it was asked for.
+  defp after_responses(%{logged_in?: true, held: [_first | _rest]} = state, %{logged_in?: false}),
+    do: release_held(state)
+
   defp after_responses(state, _before), do: {:ok, state}
+
+  # `SUBS` replaces the service's whole symbol set on the wire, so a held `SUBS` makes every
+  # command held before it for the same service moot. Dropping them keeps what is sent
+  # identical in effect to sending each in turn, and keeps the hold bounded by the number of
+  # services when, as `Feed` does, a caller only ever sends `SUBS`.
+  defp hold(state, {service, "SUBS", _keys, _opts} = command) do
+    kept =
+      Enum.reject(state.held, fn {held_service, _command, _keys, _opts} ->
+        held_service == service
+      end)
+
+    hold_within_limit(%{state | held: kept}, command)
+  end
+
+  defp hold(state, command), do: hold_within_limit(state, command)
+
+  defp hold_within_limit(%{held: held} = state, command) when length(held) < @max_held,
+    do: %{state | held: held ++ [command]}
+
+  defp hold_within_limit(state, _command) do
+    notify(
+      state,
+      Notice.new(:degraded, :schwab,
+        details: %{reason: "#{@max_held} commands already held awaiting LOGIN; this one refused"}
+      )
+    )
+
+    state
+  end
+
+  defp release_held(state) do
+    {requests, state} =
+      Enum.reduce(state.held, {[], %{state | held: []}}, fn {service, command, keys, opts},
+                                                            {requests, state} ->
+        {:ok, request} =
+          StreamerProtocol.subscribe(
+            state.info,
+            service,
+            command,
+            keys,
+            Keyword.put(opts, :request_id, state.request_id)
+          )
+
+        {[request | requests],
+         %{
+           state
+           | request_id: state.request_id + 1,
+             subscriptions: MapSet.put(state.subscriptions, {service, keys})
+         }}
+      end)
+
+    frame = Jason.encode!(StreamerProtocol.envelope(Enum.reverse(requests)))
+    {:reply, {:text, frame}, state}
+  end
 
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
     if StreamerProtocol.succeeded?(response) do

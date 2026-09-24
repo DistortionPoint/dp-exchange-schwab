@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every Streamer bootstrap dropped its first subscription.** `WebSockex.start_link/4`
+  runs `handle_connect/2`, which queues LOGIN, before it returns, and `Feed` subscribes the
+  moment it does. Its `SUBS` were therefore handled a network round trip before the LOGIN
+  response could arrive. `Socket` dropped them with a spurious `:degraded` "not logged in"
+  notice, and streaming data began only when `Feed`'s periodic re-assert fired, up to 60s
+  later. `subscribe/4` is a cast that always answers `:ok`, so its documented
+  `{:error, :not_logged_in}` was never returned either. A command that arrives before
+  LOGIN succeeds is now validated, held, and sent in one envelope once the LOGIN succeeds.
+  A held `SUBS` supersedes earlier held commands for its service, the hold is capped at 64
+  with a `:degraded` refusal past that, and a failed LOGIN keeps the hold for the next
+  connection. Break-verified: three socket tests fail on the previous code.
+
 ## [0.2.47] - 2026-09-24
 
 ### Fixed
