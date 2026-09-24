@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.48] - 2026-09-24
+
 ### Fixed
 
 - **Every Streamer bootstrap dropped its first subscription.** `WebSockex.start_link/4`
