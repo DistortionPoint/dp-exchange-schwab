@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Both option endpoints raised on an array.** `get_option_chain/2` read
+  `body["callExpDateMap"]` and raised `ArgumentError` from `Access` on a list;
+  `get_option_expirations/2` raised `BadMapError`. Both now refuse a non-object body with
+  `:unexpected_response_shape`, the atom this package's `Auth` already uses.
+
+  Found by feeding every active facade callback a set of plausible-but-wrong bodies — `[]`,
+  `null`, `{}`, an object whose list fields are all `null`, and `{"data": {}}` — and
+  flagging any call that raised, or that answered with a wrapper as a row or a record with
+  no identity. `Core.Venue`'s error discipline is that a facade answers and never raises in
+  the caller's process. `response_shape_test.exs` pins each body that used to fail, driven
+  through the facade, red against the previous code.
+
 ## [0.2.44] - 2026-09-23
 
 ### Fixed

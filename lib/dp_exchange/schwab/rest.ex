@@ -649,8 +649,11 @@ defmodule DpExchange.Schwab.Rest do
           |> put_chain_params(opts)
           |> query_string()
 
+        # `object/1` makes this function's own `@spec` true: it claimed `{:ok, map()}` and
+        # passed on whatever JSON arrived, including an array — which the callers then read
+        # with `body["callExpDateMap"]` and raised on.
         with {:ok, body} <- get(market_data_url(opts) <> "/chains" <> query, credentials, opts),
-             do: {:ok, body}
+             do: object(body)
 
       _missing ->
         {:error, {:symbol_required, :schwab}}
@@ -686,6 +689,17 @@ defmodule DpExchange.Schwab.Rest do
   defp chain_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp chain_value(value), do: value
 
+  # **A response of the wrong JSON shape is a refusal, never a raise**, applied where the body
+  # is fetched so `get_chains/2`'s and `get_expiration_chain/3`'s `{:ok, map()}` specs are true
+  # rather than hoped for. Both option endpoints read fields off the body — `body["callExpDateMap"]`, `Map.get(body, ...)` — and
+  # an array answer raised in the CALLER's process: `ArgumentError` from `Access` on a list
+  # in `get_option_chain/3`, `BadMapError` in `get_option_expirations/3`. Found by feeding
+  # every active facade call plausible-but-wrong bodies. `Core.Venue`'s error discipline is
+  # that a facade answers and never raises; `:unexpected_response_shape` is the refusal this
+  # package's `Auth` already uses for the same condition.
+  defp object(%{} = body), do: {:ok, body}
+  defp object(_other), do: {:error, :unexpected_response_shape}
+
   @doc """
   The expiries listed on an underlying — `GET /expirationchain`.
 
@@ -697,9 +711,10 @@ defmodule DpExchange.Schwab.Rest do
   def get_expiration_chain(symbol, credentials, opts) when is_binary(symbol) do
     query = query_string(%{"symbol" => SymbolFormat.to_exchange_symbol(symbol)})
 
+    # See `get_chains/2`: `object/1` is what makes the `{:ok, map()}` in this spec true.
     with {:ok, body} <-
            get(market_data_url(opts) <> "/expirationchain" <> query, credentials, opts),
-         do: {:ok, body}
+         do: object(body)
   end
 
   @doc """
