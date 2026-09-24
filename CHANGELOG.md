@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.47] - 2026-09-24
+
 ### Fixed
 
 - **A LOGIN the venue refused without closing the connection left the Streamer dead
