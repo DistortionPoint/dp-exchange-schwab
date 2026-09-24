@@ -48,6 +48,24 @@ defmodule DpExchange.Schwab.Socket do
   through `update_access_token/2` can do that, and this backoff exists to stop hammering the
   venue while nobody has done so yet — not to fix the credential itself.
 
+  ## A failed LOGIN always ends the connection
+
+  Only `3 LOGIN_DENIED` is certain to be severed by the venue. The same table marks
+  `11 SERVICE_NOT_AVAILABLE` `Connection Severed: No` and `9 UNKNOWN_FAILURE` `TBD`. This
+  module used to wait for the venue to close the socket after any failed LOGIN, and LOGIN
+  is sent only from `handle_connect/2`. So a LOGIN answered with `11` left the socket open
+  and never logged in, with nothing that would ever send LOGIN again. `Feed` fans the
+  `:degraded` notice out and does nothing else, and every later subscribe got only
+  "not logged in". The result was a live connection delivering nothing, indefinitely, which
+  is the failure this family ranks worst, and a token refreshed through
+  `update_access_token/2` never reached a LOGIN either.
+
+  So `handle_frame/2` answers `{:close, state}` for any failed LOGIN. The local close goes
+  through `handle_disconnect/2` like a remote one. It backs off on the `login_failures`
+  count the failure just raised, then reconnects and sends a fresh LOGIN with the current
+  token. Closing a connection the venue was about to sever anyway (code 3 or 12) costs
+  nothing.
+
   ## The access token can be replaced without a reconnect
 
   `update_access_token/2` is how a refreshed token reaches an already-running socket. It
@@ -345,13 +363,28 @@ defmodule DpExchange.Schwab.Socket do
 
   defp handle_decoded(frame, state) do
     case StreamerProtocol.classify(frame) do
-      {:ok, :response, responses} -> {:ok, Enum.reduce(responses, state, &handle_response/2)}
-      {:ok, :data, entries} -> {:ok, Enum.reduce(entries, state, &handle_data/2)}
+      {:ok, :response, responses} ->
+        after_responses(Enum.reduce(responses, state, &handle_response/2), state)
+
+      {:ok, :data, entries} ->
+        {:ok, Enum.reduce(entries, state, &handle_data/2)}
+
       # Heartbeats. Not data, and reading one as a quote is a price that never traded.
-      {:ok, :notify, _notices} -> {:ok, state}
-      {:error, :unrecognised_frame} -> {:ok, state}
+      {:ok, :notify, _notices} ->
+        {:ok, state}
+
+      {:error, :unrecognised_frame} ->
+        {:ok, state}
     end
   end
+
+  # A failed LOGIN ends the connection from this side, whatever its code — see the
+  # moduledoc's "A failed LOGIN always ends the connection" section.
+  defp after_responses(%{login_failures: failures} = state, %{login_failures: before})
+       when failures > before,
+       do: {:close, state}
+
+  defp after_responses(state, _before), do: {:ok, state}
 
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
     if StreamerProtocol.succeeded?(response) do
@@ -404,10 +437,9 @@ defmodule DpExchange.Schwab.Socket do
         )
       )
 
-      # Counted here, not in `handle_disconnect/2`: the venue's own table marks
-      # `LOGIN_DENIED` `Connection Severed: Yes`, so this response is what causes the
-      # disconnect that follows, and `reconnect_delay_ms/1` reads the count from the state
-      # this response leaves behind.
+      # Counted here, not in `handle_disconnect/2`: this response is what causes the
+      # disconnect that follows (`after_responses/2` closes on it), and
+      # `reconnect_delay_ms/1` reads the count from the state this response leaves behind.
       %{state | login_failures: state.login_failures + 1}
     end
   end

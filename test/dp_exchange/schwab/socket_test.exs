@@ -153,7 +153,7 @@ defmodule DpExchange.Schwab.SocketTest do
         ]
       }
 
-      assert {:ok, new_state} = Socket.handle_frame(frame(response), state())
+      assert {:close, new_state} = Socket.handle_frame(frame(response), state())
 
       refute new_state.logged_in?
 
@@ -185,12 +185,37 @@ defmodule DpExchange.Schwab.SocketTest do
           ]
         }
 
-        assert {:ok, new_state} = Socket.handle_frame(frame(response), state())
+        assert {:close, new_state} = Socket.handle_frame(frame(response), state())
 
         refute new_state.logged_in?
         assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}
         assert details.reason == "not a credential problem"
       end
+    end
+
+    test "a failed LOGIN the venue does not sever is closed from this side, then retried" do
+      # The vendor's table marks `11 SERVICE_NOT_AVAILABLE` `Connection Severed: No`. LOGIN is
+      # sent only on connect, so waiting for the venue to close left this socket open, never
+      # logged in and never retrying — see the moduledoc's "A failed LOGIN always ends the
+      # connection" section.
+      response = %{
+        "response" => [
+          %{
+            "service" => "ADMIN",
+            "command" => "LOGIN",
+            "content" => %{"code" => 11, "msg" => "service not available"}
+          }
+        ]
+      }
+
+      assert {:close, closed} = Socket.handle_frame(frame(response), state())
+      assert closed.login_failures == 1
+
+      # The next connection starts with a fresh LOGIN, carrying whatever token is current.
+      assert {:ok, _state} = Socket.handle_connect(:conn, closed)
+      assert_receive :login
+      assert {:reply, {:text, login}, _state} = Socket.handle_info(:login, closed)
+      assert login =~ "LOGIN"
     end
 
     test "a REJECTED login counts against the login-failure streak" do
@@ -207,10 +232,10 @@ defmodule DpExchange.Schwab.SocketTest do
         ]
       }
 
-      assert {:ok, once} = Socket.handle_frame(frame(response), state(%{login_failures: 0}))
+      assert {:close, once} = Socket.handle_frame(frame(response), state(%{login_failures: 0}))
       assert once.login_failures == 1
 
-      assert {:ok, twice} = Socket.handle_frame(frame(response), once)
+      assert {:close, twice} = Socket.handle_frame(frame(response), once)
       assert twice.login_failures == 2
     end
 

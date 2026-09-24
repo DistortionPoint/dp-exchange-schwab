@@ -198,6 +198,12 @@ UNKNOWN_FAILURE` is the vendor's error of last resort and `11 SERVICE_NOT_AVAILA
 venue being down; a fresh token is the remedy for neither, and reporting them as a rejected
 credential would be this package claiming something the venue never said.
 
+**Any refused login ends that Streamer connection and is retried.** The package closes the
+socket itself, backs off on the consecutive-failure count (1s, doubling, capped at 30s) and
+logs in again on a fresh connection, presenting whatever token `update_credentials/2` last
+supplied. So a `:degraded` login notice means a retry is in progress, not a feed that has
+stopped for good. There is nothing to restart.
+
 **The refresh token is one-time use.** Every refresh spends the old one and returns a new one
 carrying a fresh seven days. So:
 

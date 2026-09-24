@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A LOGIN the venue refused without closing the connection left the Streamer dead
+  indefinitely.** LOGIN is sent only when a connection opens, and after any refused LOGIN
+  `Socket` waited for the venue to close the socket. The vendor's response-code table marks
+  only `3 LOGIN_DENIED` (and `12`) as `Connection Severed: Yes`. `11 SERVICE_NOT_AVAILABLE` is
+  `No` and `9 UNKNOWN_FAILURE` is `TBD`. A LOGIN answered with `11` therefore left an open
+  socket that was never logged in and never retried. `Feed` passed the `:degraded` notice on
+  and nothing else, every later subscribe got "not logged in", and a refreshed token never
+  reached a LOGIN. Now any failed LOGIN makes `handle_frame/2` answer `{:close, state}`. The
+  local close takes the same backed-off `handle_disconnect/2` path as a remote one and
+  reconnects with a fresh LOGIN. Break-verified: four socket tests fail on the previous
+  code. `usage-rules.md` now says a refused login is retried.
+
 ## [0.2.46] - 2026-09-24
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
