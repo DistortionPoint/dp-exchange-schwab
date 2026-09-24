@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.45] - 2026-09-24
+
 ### Fixed
 
 - **Both option endpoints raised on an array.** `get_option_chain/2` read
