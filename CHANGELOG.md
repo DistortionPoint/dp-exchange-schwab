@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.49] - 2026-09-24
+
 ### Fixed
 
 - **A reconnect left the Streamer silent for up to a minute.** A reconnect clears the
