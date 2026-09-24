@@ -352,6 +352,36 @@ defmodule DpExchange.Schwab.FeedTest do
       refute log =~ "re-assert", "a successful re-assert must be silent"
     end
 
+    test "a successful re-login re-asserts at once, without waiting for the timer" do
+      # On the timer alone a reconnected Streamer carried nothing for up to 60s — see the
+      # moduledoc's "A re-login re-asserts at once; the timer is the net".
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      send(feed, {:dp_exchange, :schwab, :relogged_in, socket})
+      Feed.coverage(feed)
+
+      assert subscribed_services(socket) == %{
+               "LEVELONE_EQUITIES" => ["AAPL", "AAPL"],
+               "CHART_EQUITY" => ["AAPL", "AAPL"]
+             }
+    end
+
+    test "a re-login report from a socket this feed no longer holds changes nothing" do
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      send(feed, {:dp_exchange, :schwab, :relogged_in, spawn(fn -> :ok end)})
+      Feed.coverage(feed)
+
+      assert subscribed_services(socket) == %{
+               "LEVELONE_EQUITIES" => ["AAPL"],
+               "CHART_EQUITY" => ["AAPL"]
+             }
+    end
+
     test "a re-assert that cannot reach a route says so, rather than failing silently" do
       # `apply_symbols/1` answers `:ok`, `{:error, :no_route}`, or whatever
       # `PollingFeed.update_symbols/2` answers — and this handler threw that away. A

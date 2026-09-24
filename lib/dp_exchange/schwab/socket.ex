@@ -160,6 +160,9 @@ defmodule DpExchange.Schwab.Socket do
       # `reconnect_delay_ms/1` — see the moduledoc's "A rejected LOGIN is not a network
       # blip" section.
       login_failures: 0,
+      # Whether a LOGIN has ever succeeded here — so only a RE-login is reported to `Feed`.
+      # See `report_relogged_in/1`.
+      logged_in_once?: false,
       # Commands that arrived before the LOGIN response, sent once it succeeds — see the
       # moduledoc's "A command sent before LOGIN is held, not dropped".
       held: [],
@@ -498,9 +501,11 @@ defmodule DpExchange.Schwab.Socket do
       # lossy by design.
       Telemetry.link_up(:schwab)
 
+      if state.logged_in_once?, do: report_relogged_in(state)
+
       # Reset the streak. A success proves the access token this process currently holds
       # works, so the next disconnect — whatever causes it — is presumed innocent again.
-      %{state | logged_in?: true, login_failures: 0}
+      %{state | logged_in?: true, login_failures: 0, logged_in_once?: true}
     else
       # A rejected LOGIN still arrives as a response. Treating its arrival as success is how
       # a socket waits forever for data.
@@ -655,4 +660,18 @@ defmodule DpExchange.Schwab.Socket do
 
   defp notify(%{subscriber: subscriber}, payload),
     do: send(subscriber, {:dp_exchange, :schwab, payload})
+
+  # A reconnect clears the venue's subscriptions (see "Reconnection is not
+  # resubscription"), and `Feed` re-asserts on a 60s timer regardless, which left up to a
+  # minute of silence after every ordinary reconnect. This tells `Feed` once the new LOGIN
+  # has SUCCEEDED, the first moment a `SUBS` can land, so it can re-assert now. The first
+  # login is not reported, because what `Feed` asked for before it is held and released by
+  # `release_held/1`. A private message rather than a `Core.Notice`, because it carries this
+  # socket's pid, which a consumer has no use for.
+  defp report_relogged_in(%{subscriber: subscriber}) when is_pid(subscriber) do
+    send(subscriber, {:dp_exchange, :schwab, :relogged_in, self()})
+    :ok
+  end
+
+  defp report_relogged_in(_state), do: :ok
 end

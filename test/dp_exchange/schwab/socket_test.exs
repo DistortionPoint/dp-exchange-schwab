@@ -37,6 +37,7 @@ defmodule DpExchange.Schwab.SocketTest do
         request_id: 1,
         subscriptions: MapSet.new(),
         login_failures: 0,
+        logged_in_once?: false,
         held: [],
         last_top: %{}
       },
@@ -213,6 +214,23 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert new_state.logged_in?
       assert_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
+    end
+
+    test "only a RE-login is reported to the feed, so it can re-assert at once" do
+      # The first login releases what `Feed` asked for before it (`state.held`); reporting
+      # it too would send the same `SUBS` twice.
+      login = %{
+        "response" => [%{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => 0}}]
+      }
+
+      assert {:ok, first} = Socket.handle_frame(frame(login), state())
+      refute_received {:dp_exchange, :schwab, :relogged_in, _pid}
+
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, first)
+      assert {:ok, _again} = Socket.handle_frame(frame(login), dropped)
+
+      me = self()
+      assert_received {:dp_exchange, :schwab, :relogged_in, ^me}
     end
 
     test "a successful LOGIN resets the login-failure streak" do

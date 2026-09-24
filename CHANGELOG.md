@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconnect left the Streamer silent for up to a minute.** A reconnect clears the
+  venue's subscriptions, and `Feed` only re-asserted them on its 60s timer. `Socket` now
+  reports each successful RE-login (`{:dp_exchange, :schwab, :relogged_in, pid}`), the first
+  moment a `SUBS` can land. The first login is excluded because its commands are already
+  held and released. `Feed` re-asserts `wanted` at once without re-arming the timer.
+  Break-verified: the new socket and feed tests fail on the previous code.
+
 ## [0.2.48] - 2026-09-24
 
 ### Fixed

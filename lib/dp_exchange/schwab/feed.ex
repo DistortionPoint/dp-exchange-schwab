@@ -174,6 +174,15 @@ defmodule DpExchange.Schwab.Feed do
   costs one frame the venue ignores; not re-subscribing one it silently dropped costs
   this feed's whole coverage until someone notices.
 
+  ## A re-login re-asserts at once; the timer is the net
+
+  On the timer alone, an ordinary reconnect meant up to `@resubscribe_interval_ms` (60s)
+  of silence. `Socket` now reports each successful RE-login
+  (`{:dp_exchange, :schwab, :relogged_in, pid}`). That is the first moment a `SUBS` can
+  land, since the venue ignores commands before LOGIN. This module re-asserts `wanted` the
+  moment it hears, without re-arming the timer. The timer still runs unconditionally,
+  because a report can be lost and the timer is what catches that.
+
   ## A crashed socket or poller used to be Feed's crash too — and now it is caught
 
   `start_socket/1` calls `Socket.start_link/1`, and `start_poller/1` calls
@@ -818,6 +827,23 @@ defmodule DpExchange.Schwab.Feed do
   def handle_info(:resubscribe, %{route: :stream} = state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
+    if MapSet.size(state.wanted) > 0 do
+      report_reassert(apply_symbols(state), state)
+    end
+
+    {:noreply, state}
+  end
+
+  # The live socket reconnected and its new LOGIN succeeded, so the venue carries nothing
+  # for it now. This re-asserts at once — see the moduledoc's "A re-login re-asserts at
+  # once; the timer is the net" section. The same work as a `:resubscribe` tick, but the
+  # timer is NOT re-armed here: re-sending `:resubscribe` would start a second chain beside
+  # the first. A report from a socket that is no longer `state.socket` falls through to the
+  # catch-all.
+  def handle_info(
+        {:dp_exchange, :schwab, :relogged_in, socket},
+        %{route: :stream, socket: socket} = state
+      ) do
     if MapSet.size(state.wanted) > 0 do
       report_reassert(apply_symbols(state), state)
     end
