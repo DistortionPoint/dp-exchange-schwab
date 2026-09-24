@@ -35,6 +35,29 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`get_order/3` and `get_orders/2` returned the venue's raw JSON, not `Types.Order`.** Both
+  are `@impl` of `Core.Venue` callbacks typed `result(Types.Order.t())` and
+  `result([Types.Order.t()])`, and both handed back Schwab's map as it arrived. A consumer
+  writing venue-agnostic code that matched `%Order{}`, or read `order.status`, broke on this
+  venue and only this one. **The fake did the same**, so the conformance suite — which drives
+  fakes — could not see it, and two tests pinned it: one asserted `{:ok, %{}}` for an EMPTY
+  OBJECT as a successful order, one asserted the raw `%{"orderId" => "1"}`. Found by feeding
+  the real facade plausible response bodies and reading what came back.
+
+  `Orders.from_venue/1` now decodes the OpenAPI `Order` object, used by both the facade and the
+  fake so they cannot drift. Read from the vendor's committed OpenAPI document and not probed
+  live — this repository holds no Schwab credentials. A value Core has no word for becomes
+  `nil`, never the nearest atom: `TRAILING_STOP` is not `:stop`, `REPLACED` is not
+  `:cancelled`. `WORKING` is `:partially_filled` only when the venue's own `filledQuantity`
+  says so. A spread reports its legs with ratios over their greatest common divisor and no
+  single top-level symbol or side. An order with no `orderId` is refused, and so is a list
+  containing one. `enteredTime`'s colon-less `+0000` offset is parsed.
+
+  The fake's `get_orders/2` now answers one order rather than `[]`, which made every check
+  over its elements vacuous.
+
+### Fixed
+
 - **Both option endpoints raised on an array.** `get_option_chain/2` read
   `body["callExpDateMap"]` and raised `ArgumentError` from `Access` on a list;
   `get_option_expirations/2` raised `BadMapError`. Both now refuse a non-object body with

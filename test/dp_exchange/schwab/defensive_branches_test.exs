@@ -503,7 +503,15 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       assert {:ok, [_balance]} = Schwab.get_balances(@creds, base ++ opts(responding(balances)))
       assert {:ok, []} = Schwab.get_orders(@creds, base ++ opts(responding([])))
-      assert {:ok, %{}} = Schwab.get_order(@creds, "1", base ++ opts(responding(%{})))
+      # This asserted `{:ok, %{}}` — an EMPTY OBJECT accepted as an order — which pinned the
+      # facade returning the venue's raw map instead of the `Types.Order.t()` its `Core.Venue`
+      # callback is typed as. An empty object has no `orderId` and is now refused; a
+      # venue-shaped order body routes through and decodes.
+      assert {:error, {:missing_required_field, :id}} =
+               Schwab.get_order(@creds, "1", base ++ opts(responding(%{})))
+
+      assert {:ok, %DpExchange.Core.Types.Order{id: "1"}} =
+               Schwab.get_order(@creds, "1", base ++ opts(responding(%{"orderId" => 1})))
 
       assert :ok =
                Schwab.cancel_order(

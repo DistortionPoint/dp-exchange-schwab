@@ -739,8 +739,17 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, [balance]} = Fake.get_balances(@creds, account_hash: "H")
       assert balance.currency == "USD"
       assert :ok = Fake.cancel_order(@creds, "1", account_hash: "H")
-      assert {:ok, %{"orderId" => "1"}} = Fake.get_order(@creds, "1", account_hash: "H")
-      assert {:ok, []} = Fake.get_orders(@creds, account_hash: "H")
+      # Was `{:ok, %{"orderId" => "1"}}` — the fake returning the raw venue map, which pinned
+      # the same contract violation the real facade had. `Core.Venue.get_order/3` is typed
+      # `result(Types.Order.t())`.
+      assert {:ok, %DpExchange.Core.Types.Order{id: "1"}} =
+               Fake.get_order(@creds, "1", account_hash: "H")
+
+      # One decoded order now, not `[]` — an empty list made every check over its elements
+      # vacuous.
+      assert {:ok, [%DpExchange.Core.Types.Order{id: "fake-order-1"}]} =
+               Fake.get_orders(@creds, account_hash: "H")
+
       assert {:ok, %{accounts: 1}} = Fake.test_connection(@creds)
     end
 

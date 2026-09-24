@@ -398,7 +398,11 @@ defmodule DpExchange.Schwab.Fake do
   defp do_get_order(credentials, order_id, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
-      {:ok, %{"orderId" => order_id, "status" => "FILLED"}}
+      # Decoded through the same `Orders.from_venue/1` the real facade uses, from a body in
+      # the venue's own shape — so the fake cannot drift from the real decode. It returned the
+      # raw map, the same contract violation the real facade had, which is why the suite
+      # (driving fakes) could not see either.
+      Orders.from_venue(fake_order_body(order_id))
     end
   end
 
@@ -410,8 +414,27 @@ defmodule DpExchange.Schwab.Fake do
   defp do_get_orders(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
-      {:ok, []}
+      # One order, not `[]`: an empty list makes every check over its elements vacuous, which
+      # is the "third axis" `dp_exchange_core`'s assertion-coverage document records.
+      Orders.list_from_venue([fake_order_body("fake-order-1")])
     end
+  end
+
+  # A venue-shaped `Order` object — the OpenAPI schema's own field names.
+  defp fake_order_body(order_id) do
+    %{
+      "orderId" => order_id,
+      "status" => "FILLED",
+      "orderType" => "LIMIT",
+      "duration" => "DAY",
+      "quantity" => 1,
+      "filledQuantity" => 1,
+      "price" => 190.25,
+      "enteredTime" => "2026-01-02T15:04:05+0000",
+      "orderLegCollection" => [
+        %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}}
+      ]
+    }
   end
 
   @impl true

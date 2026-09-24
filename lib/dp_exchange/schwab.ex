@@ -320,17 +320,22 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  # `Orders.from_venue/1` is what makes these two return what `Core.Venue` types them as —
+  # `Types.Order.t()` — rather than the venue's raw JSON map, which they did until the
+  # response-shape sweep read what the real facade actually handed back. See its @doc.
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts) do
-      Rest.get_order(credentials, hash, order_id, with_limiter(opts))
+    with {:ok, hash} <- account_hash(opts),
+         {:ok, order} <- Rest.get_order(credentials, hash, order_id, with_limiter(opts)) do
+      Orders.from_venue(order)
     end
   end
 
   @impl true
   def get_orders(credentials, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts) do
-      Rest.get_orders(credentials, hash, with_limiter(opts))
+    with {:ok, hash} <- account_hash(opts),
+         {:ok, orders} <- Rest.get_orders(credentials, hash, with_limiter(opts)) do
+      Orders.list_from_venue(orders)
     end
   end
 

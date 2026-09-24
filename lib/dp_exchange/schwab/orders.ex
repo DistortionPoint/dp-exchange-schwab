@@ -32,6 +32,7 @@ defmodule DpExchange.Schwab.Orders do
   reason has spent a scarce slot to learn something the documentation already said.
   """
 
+  alias DpExchange.Core.Types.{Order, OrderLeg}
   alias DpExchange.Schwab.SymbolFormat
 
   # Read verbatim from the venue's "Instruction for EQUITY and OPTION" table.
@@ -259,4 +260,201 @@ defmodule DpExchange.Schwab.Orders do
     do: Map.put(payload, key, Decimal.to_string(value, :normal))
 
   defp maybe_put(payload, key, value), do: Map.put(payload, key, to_string(value))
+  # --- reading an order back --------------------------------------------------
+
+  @order_types_in %{
+    "MARKET" => :market,
+    "LIMIT" => :limit,
+    "STOP" => :stop,
+    "STOP_LIMIT" => :stop_limit
+  }
+
+  # The inverse of `@durations`, which is what this module SENDS — so reading back an order
+  # this package placed yields the same atom it was placed with.
+  @durations_in Map.new(@durations, fn {atom, wire} -> {wire, atom} end)
+
+  @doc """
+  One venue order object — the OpenAPI `Order` schema — as a `Core.Types.Order`.
+
+  ## Why this exists
+
+  `get_order/3` and `get_orders/2` are `@impl` of `Core.Venue` callbacks typed
+  `result(Types.Order.t())` and `result([Types.Order.t()])`, and both handed back the
+  venue's raw JSON map instead. A consumer writing venue-agnostic code that matched
+  `%Order{}`, or read `order.status`, broke on this venue and only this one. The fake did the
+  same, so the conformance suite — which drives fakes — could not see it; found by feeding the
+  real facade plausible response bodies and reading what came back.
+
+  ## Mapping, read from the vendor's committed OpenAPI document
+
+  Every enum below is the `accounts-and-trading-production.openapi.json` schema's own list.
+  **A value Core has no word for becomes `nil`, never the nearest atom** — `TRAILING_STOP`
+  is not `:stop`, `REPLACED` is not `:cancelled`, `EXCHANGE` is not a side. Read from the
+  document and not probed live: this repository holds no Schwab credentials.
+
+  `WORKING` is `:open`, or `:partially_filled` when the venue's own `filledQuantity` is above
+  zero — Schwab has no partial-fill status of its own, and that field is its statement of
+  one. A single-leg order carries that leg's symbol and side; a spread carries neither at
+  the top and reports its legs, each with a `ratio` taken as the leg quantities over their
+  greatest common divisor — the definition of a spread ratio, not an estimate of one.
+
+  An order with no `orderId` is `{:error, {:missing_required_field, :id}}`: one a caller
+  cannot cancel, replace or look up again is not an order it can use.
+  """
+  @spec from_venue(term()) :: {:ok, Order.t()} | {:error, term()}
+  def from_venue(%{"orderId" => id} = order)
+      when is_integer(id) or (is_binary(id) and id != "") do
+    legs = order |> Map.get("orderLegCollection") |> List.wrap() |> Enum.filter(&is_map/1)
+    {symbol, side, spread_legs} = leg_fields(legs)
+
+    {:ok,
+     %Order{
+       id: to_string(id),
+       symbol: symbol,
+       side: side,
+       order_type: @order_types_in[order["orderType"]],
+       time_in_force: @durations_in[order["duration"]],
+       quantity: number(order["quantity"]),
+       price: number(order["price"]),
+       stop_price: number(order["stopPrice"]),
+       filled_quantity: number(order["filledQuantity"]),
+       status: status(order["status"], number(order["filledQuantity"])),
+       legs: spread_legs,
+       created_at: timestamp(order["enteredTime"]),
+       provider: :schwab
+     }}
+  end
+
+  def from_venue(%{} = _order), do: {:error, {:missing_required_field, :id}}
+  def from_venue(_other), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  A list of venue orders, all or nothing.
+
+  Refused whole if any one cannot be read — this package's rule for a row it cannot address,
+  stated on `Rest.get_option_chain/3`: a list with an entry silently missing reads as complete.
+  """
+  @spec list_from_venue(term()) :: {:ok, [Order.t()]} | {:error, term()}
+  def list_from_venue(orders) when is_list(orders) do
+    orders
+    |> Enum.reduce_while({:ok, []}, fn order, {:ok, acc} ->
+      case from_venue(order) do
+        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, decoded} -> {:ok, Enum.reverse(decoded)}
+      error -> error
+    end
+  end
+
+  def list_from_venue(_other), do: {:error, :unexpected_response_shape}
+
+  @buys ~w(BUY BUY_TO_COVER BUY_TO_OPEN BUY_TO_CLOSE)
+  @sells ~w(SELL SELL_SHORT SELL_TO_OPEN SELL_TO_CLOSE SELL_SHORT_EXEMPT)
+
+  defp leg_fields([leg]), do: {leg_symbol(leg), leg_side(leg), []}
+
+  defp leg_fields([_first, _second | _rest] = legs) do
+    quantities = Enum.map(legs, &whole(number(&1["quantity"])))
+
+    spread_legs =
+      if Enum.all?(quantities, &(is_integer(&1) and &1 > 0)) do
+        divisor = Enum.reduce(quantities, &Integer.gcd/2)
+
+        legs
+        |> Enum.zip(quantities)
+        |> Enum.map(fn {leg, quantity} ->
+          %OrderLeg{
+            symbol: leg_symbol(leg),
+            side: leg_side(leg),
+            ratio: div(quantity, divisor),
+            position_effect: position_effect(leg["positionEffect"]),
+            instrument_type: instrument_type(leg["orderLegType"])
+          }
+        end)
+      end
+
+    # A spread has no single symbol or side; saying one would be naming one leg as the order.
+    {nil, nil, spread_legs}
+  end
+
+  defp leg_fields(_no_legs), do: {nil, nil, []}
+
+  defp leg_symbol(%{"instrument" => %{"symbol" => symbol}}) when is_binary(symbol),
+    do: SymbolFormat.to_canonical_symbol(symbol)
+
+  defp leg_symbol(_leg), do: nil
+
+  defp leg_side(%{"instruction" => instruction}) when instruction in @buys, do: :buy
+  defp leg_side(%{"instruction" => instruction}) when instruction in @sells, do: :sell
+  defp leg_side(_leg), do: nil
+
+  defp position_effect("OPENING"), do: :open
+  defp position_effect("CLOSING"), do: :close
+  defp position_effect(_other), do: nil
+
+  defp instrument_type("EQUITY"), do: :equity
+  defp instrument_type("OPTION"), do: :option
+  defp instrument_type(_other), do: nil
+
+  @pending ~w(NEW ACCEPTED QUEUED PENDING_ACTIVATION PENDING_ACKNOWLEDGEMENT AWAITING_PARENT_ORDER
+              AWAITING_CONDITION AWAITING_STOP_CONDITION AWAITING_MANUAL_REVIEW AWAITING_UR_OUT
+              AWAITING_RELEASE_TIME)
+  @still_live ~w(PENDING_CANCEL PENDING_REPLACE PENDING_RECALL)
+
+  defp status("WORKING", filled) do
+    if match?(%Decimal{}, filled) and Decimal.gt?(filled, 0), do: :partially_filled, else: :open
+  end
+
+  defp status("FILLED", _filled), do: :filled
+  defp status("CANCELED", _filled), do: :cancelled
+  defp status("REJECTED", _filled), do: :rejected
+  defp status("EXPIRED", _filled), do: :expired
+  defp status(pending, _filled) when pending in @pending, do: :pending
+  defp status(live, _filled) when live in @still_live, do: :open
+  defp status(_replaced_or_unknown, _filled), do: nil
+
+  defp number(value) when is_integer(value), do: Decimal.new(value)
+  defp number(value) when is_float(value), do: Decimal.from_float(value)
+
+  defp number(value) when is_binary(value) do
+    case Decimal.parse(String.trim(value)) do
+      {parsed, ""} -> if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+      _unreadable -> nil
+    end
+  end
+
+  defp number(_absent), do: nil
+
+  defp whole(%Decimal{} = value) do
+    if Decimal.integer?(value), do: Decimal.to_integer(value), else: nil
+  end
+
+  defp whole(_other), do: nil
+
+  defp timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> at
+      _unreadable -> timestamp_compact(value)
+    end
+  end
+
+  defp timestamp(_absent), do: nil
+
+  # Schwab writes `enteredTime` as `2024-03-29T14:05:31+0000` — an offset with no colon, which
+  # `DateTime.from_iso8601/1` does not accept.
+  defp timestamp_compact(value) do
+    case Regex.run(~r/^(.*)([+-])(\d{2})(\d{2})$/, value) do
+      [_all, head, sign, hours, minutes] ->
+        case DateTime.from_iso8601("#{head}#{sign}#{hours}:#{minutes}") do
+          {:ok, at, _offset} -> at
+          _unreadable -> nil
+        end
+
+      _no_offset ->
+        nil
+    end
+  end
 end

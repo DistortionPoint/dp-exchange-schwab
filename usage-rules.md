@@ -4,6 +4,14 @@ Rules for an agent or developer writing code against this package. Read this bef
 README; it is what the Hex tarball ships for consumers.
 
 
+## `get_order/3` and `get_orders/2` return `Core.Types.Order`
+
+They used to return the venue's raw JSON map, against the `Core.Venue` contract. If you
+wrote `order["status"]` against this package, it is now `order.status` — an atom from
+`Core.Types.Order`'s vocabulary, or `nil` where Schwab's own value has no equivalent there
+(`REPLACED`, `TRAILING_STOP`, `END_OF_WEEK`). A spread has `symbol: nil` and `side: nil` at
+the top and carries its `legs`. An order with no `orderId` is refused rather than returned.
+
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
