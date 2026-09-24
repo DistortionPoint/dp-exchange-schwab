@@ -563,13 +563,18 @@ package retries the route on its own — a fresh Streamer bootstrap if the crede
 still works, falling back to the poll otherwise. You never need to call `subscribe/2`
 again for this.
 
-**An ordinary reconnect — no crash, just the venue dropping the TCP connection — also
-resubscribes on its own**, on a 60-second unconditional timer: `Socket.handle_disconnect/2`
+**An ordinary reconnect (no crash, just the venue dropping the TCP connection) also
+resubscribes on its own, as soon as the new LOGIN succeeds.** `Socket.handle_disconnect/2`
 clears the venue's own subscriptions on every reconnect (see `Socket`'s own moduledoc),
-and `Feed` re-issues your `wanted` symbols whether or not it can tell a reconnect
-happened. Worst case, up to 60 seconds of silence after a reconnect before delivery
-resumes on its own — sooner if you notice `:link_up` via `subscribe_notices/1` and call
-`subscribe/2` or `update_symbols/2` yourself, which also re-issues immediately.
+and `Feed` re-issues your `wanted` symbols the moment the socket reports it has logged in
+again. A 60-second unconditional timer re-issues them as well, as a safety net.
+
+**The fallback poll is not permanent.** If the Streamer could not be bootstrapped and this
+feed fell back to polling (`coverage/1` says `:internal_poll`), it retries the Streamer on
+that same 60-second timer and switches back when it can. The poll stops, your `wanted`
+set moves to the socket, and an `:info` `:coverage_change` notice says the Streamer is
+back. A credential the venue *refused* is not retried on the timer, because it would be
+refused again. Calling `update_credentials/2` with a refreshed one retries at once.
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the crash-isolation path above, or anything that kills the `Feed` pid directly.

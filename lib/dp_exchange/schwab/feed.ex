@@ -60,6 +60,22 @@ defmodule DpExchange.Schwab.Feed do
   What the fallback does buy is that a Streamer outage degrades to slower quotes rather than
   to silence — and `:degraded` says so.
 
+  ## The fallback is not permanent
+
+  Nothing used to move a feed back off the poll route. Once `/userPreference` failed, the
+  route stayed `:poll` for the life of the process: `:resubscribe` on that route only
+  re-armed itself, and `update_credentials/2` only pushed a token into a socket that did not
+  exist. So one 5xx at startup, or an access token the host refreshed a minute later, cost
+  the feed its candles (which exist only on the socket) and its Streamer quotes until
+  something restarted it.
+
+  Now each `:resubscribe` tick on the poll route retries the bootstrap in the background, as
+  does `update_credentials/2` at once. On success the new socket takes over, the poller is
+  stopped, `wanted` is re-issued, and an `:info` `:coverage_change` notice says the Streamer
+  is back. On failure the running poll carries on, and nothing is re-announced. A tick does
+  not retry a credential the venue REFUSED (`last_error` is `{:refused, _}`), because the
+  same credential would be refused every minute. New credentials always retry.
+
   ## The fallback poll going silent is a different failure from the bootstrap failing
 
   `ensure_route/1` already emits `Notice{kind: :degraded}` once, the instant the Streamer
@@ -695,7 +711,8 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call({:update_credentials, credentials}, _from, state) do
     push_access_token(state, Map.get(credentials, :access_token))
-    {:reply, :ok, %{state | credentials: Credentials.wrap(credentials)}}
+    state = %{state | credentials: Credentials.wrap(credentials)}
+    {:reply, :ok, maybe_upgrade(state, :credentials_changed)}
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
@@ -853,7 +870,7 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
-    {:noreply, state}
+    {:noreply, maybe_upgrade(state, :tick)}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -875,6 +892,11 @@ defmodule DpExchange.Schwab.Feed do
   #
   # Ordered ABOVE the catch-all below, and matched on the stored `ref` so a late reply from
   # a superseded bootstrap cannot settle the current one.
+  def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, upgrade?: true}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, complete_upgrade(%{state | route_bootstrap: nil}, result)}
+  end
+
   def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, waiting: waiting}} = state) do
     Process.demonitor(ref, [:flush])
 
@@ -919,6 +941,9 @@ defmodule DpExchange.Schwab.Feed do
   # tail — clear the bootstrap, complete it, apply the symbol set, answer everyone parked on
   # it — because a bootstrap that failed by dying is not a different KIND of failure from one
   # that failed by answering `{:error, _}`, and giving it its own path is how the two drift.
+  defp settle_failed_bootstrap(%{route_bootstrap: %{upgrade?: true}} = state, result),
+    do: {:noreply, complete_upgrade(%{state | route_bootstrap: nil}, result)}
+
   defp settle_failed_bootstrap(%{route_bootstrap: %{waiting: waiting}} = state, result) do
     state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
     applied = apply_symbols(state)
@@ -1038,6 +1063,76 @@ defmodule DpExchange.Schwab.Feed do
   #
   # The Streamer could not be bootstrapped. Say so — a consumer reading only `coverage/1`
   # would see `:internal_poll` and have no idea a socket was expected.
+  # See the moduledoc's "The fallback is not permanent" section. Only from the poll route,
+  # only with nothing already in flight, and only when something is wanted. A tick does not
+  # retry a credential the venue REFUSED, since the same credential is refused the same way
+  # every minute. New credentials always retry.
+  defp maybe_upgrade(%{route: :poll, route_bootstrap: nil} = state, why) do
+    cond do
+      MapSet.size(state.wanted) == 0 -> state
+      why == :tick and match?({:refused, _reason}, state.last_error) -> state
+      true -> start_route_bootstrap(state, []) |> mark_upgrade()
+    end
+  end
+
+  defp maybe_upgrade(state, _why), do: state
+
+  defp mark_upgrade(%{route_bootstrap: bootstrap} = state),
+    do: %{state | route_bootstrap: Map.put(bootstrap, :upgrade?, true)}
+
+  # The Streamer answered: the socket takes over and the poll it replaces is stopped.
+  # `state.poller` is cleared BEFORE the stop, so the `:EXIT` that follows matches no
+  # route and falls to the catch-all, not to `isolate_crashed_route/2`. `apply_symbols/1`
+  # re-issues `wanted` on the new socket, where it is held until the LOGIN succeeds.
+  defp complete_upgrade(state, {:ok, body}) do
+    case build_socket(state, body) do
+      {:ok, socket} ->
+        poller = state.poller
+
+        state = %{
+          state
+          | socket: socket,
+            poller: nil,
+            route: :stream,
+            last_error: nil,
+            delivering: %{},
+            kinds: %{}
+        }
+
+        if is_pid(poller), do: Process.exit(poller, :shutdown)
+        apply_symbols(state)
+
+        notify(
+          state,
+          Notice.new(:coverage_change, :schwab,
+            severity: :info,
+            message: "the Streamer is reachable again; the fallback poll has stopped",
+            details: %{route: :stream}
+          )
+        )
+
+        state
+
+      other ->
+        stay_on_poll(state, failure_reason(other))
+    end
+  end
+
+  defp complete_upgrade(state, other), do: stay_on_poll(state, failure_reason(other))
+
+  # Still unreachable. The poll that is already running keeps running. No second poller is
+  # started, and no second `:degraded` notice is raised, because the one from the first
+  # fallback still stands. Only `last_error` moves, so `status/1` and the next tick see the
+  # latest reason.
+  defp stay_on_poll(state, reason) do
+    Logger.debug(
+      "[Schwab Feed] Streamer still unreachable (#{inspect(reason)}); staying on the " <>
+        "fallback poll until the next attempt"
+    )
+
+    %{state | last_error: reason}
+  end
+
   defp fall_back_to_poll(state, reason) do
     notify(
       state,

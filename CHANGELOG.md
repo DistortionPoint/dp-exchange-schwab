@@ -31,6 +31,22 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A feed that fell back to the poll never returned to the Streamer.** Once
+  `/userPreference` failed, the route stayed `:poll` for the life of the process: the
+  `:resubscribe` tick only re-armed itself on that route, and `update_credentials/2` only
+  pushed a token into a socket that did not exist. One 5xx at startup, or a token the host
+  refreshed a minute later, cost the feed its candles (socket-only) and its Streamer quotes
+  until a restart. Each tick on the poll route now retries the bootstrap in the
+  background, and `update_credentials/2` retries at once. On success the socket takes
+  over, the poller is stopped and `wanted` is re-issued, with an `:info`
+  `:coverage_change` notice. On failure the running poll continues, with no second poller
+  and no repeated `:degraded`. A credential the venue refused is retried only when it
+  changes. `usage-rules.md` §14 now says so, and its stale "up to 60 seconds of silence
+  after a reconnect" is corrected. Break-verified: the three new tests fail on the
+  previous code.
+
 ## [0.2.49] - 2026-09-24
 
 ### Fixed
