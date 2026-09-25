@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.54] - 2026-09-25
+
 ### Fixed
 
 - **A half-open Streamer connection stayed "connected" indefinitely.** It delivered
