@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Candles kept whatever order the venue sent.** `get_historical_prices/5` returned the
+  `candles` rows in arrival order, and the vendor's document does not state one. They are
+  now sorted oldest first by `opened_at`, as the other venues in this family already
+  sort them and as `Core.Venue` now documents. Break-verified: the new test fails on the
+  previous code.
+
 ## [0.2.52] - 2026-09-25
 
 ### Fixed

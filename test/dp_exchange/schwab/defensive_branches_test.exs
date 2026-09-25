@@ -71,6 +71,30 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
     end
 
+    test "candles come back oldest first, whatever order the venue sent them in" do
+      # The vendor's document states no order for `candles`. Read by their own time.
+      body = %{
+        "candles" =>
+          for datetime <- [1_787_936_400_000, 1_787_936_280_000, 1_787_936_340_000] do
+            %{
+              "open" => 1.0,
+              "high" => 1.0,
+              "low" => 1.0,
+              "close" => 1.0,
+              "volume" => 1,
+              "datetime" => datetime
+            }
+          end
+      }
+
+      assert {:ok, candles} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
+
+      times = Enum.map(candles, & &1.opened_at)
+      assert times == Enum.sort(times, DateTime)
+      assert length(times) == 3
+    end
+
     test "an explicitly null candle datetime is missing, not zero" do
       body = %{"candles" => [%{"close" => 1.0, "datetime" => nil}]}
 

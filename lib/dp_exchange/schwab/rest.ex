@@ -422,7 +422,11 @@ defmodule DpExchange.Schwab.Rest do
       end
     end)
     |> case do
-      {:ok, built} -> {:ok, Enum.reverse(built)}
+      # Oldest first, by the candle's own time, not by the order rows arrived in. The
+      # vendor's document does not state an order for `candles`, and a series a consumer
+      # reads out of order still gives plausible returns and indicators, just wrong ones.
+      # The other venues in this family sort the same way.
+      {:ok, built} -> {:ok, Enum.sort_by(built, & &1.opened_at, DateTime)}
       error -> error
     end
   end
