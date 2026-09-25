@@ -31,6 +31,17 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A half-open Streamer connection stayed "connected" indefinitely.** It delivered
+  nothing and was never reconnected, and on this venue overnight silence is normal, so
+  nothing else would notice. The Streamer's heartbeat notifies have no documented
+  interval, so each connection now pings every 30s (RFC 6455 requires a pong). After 90s
+  with no frame or pong it raises a `:degraded` notice (`:silent_connection`) and closes,
+  taking the ordinary reconnect-and-LOGIN path. Also corrects a `handle_connect/2` comment
+  that still said a pre-login subscribe is refused (it has been held since 0.2.48).
+  Break-verified: three of the four new tests fail on the previous code.
+
 ## [0.2.53] - 2026-09-25
 
 ### Fixed

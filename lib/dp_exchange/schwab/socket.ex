@@ -37,6 +37,23 @@ defmodule DpExchange.Schwab.Socket do
   64 commands refuses the rest with a `:degraded` notice. A failed LOGIN leaves the
   hold in place for the next connection, since nothing in it was ever sent.
 
+  ## A dead connection is found by pinging it
+
+  A network path can die without either end being told. TCP notices only when it next
+  sends, and this socket sends almost nothing once subscribed, so a half-open connection
+  stayed "connected", delivering nothing, for as long as the operating system's own
+  timeouts allowed. The Streamer does send heartbeat notifies, but the vendor's document
+  states no interval for them, so their absence cannot be timed honestly. And on this venue
+  delivering nothing overnight is normal, so silence alone proves nothing.
+
+  RFC 6455 gives a signal that needs no venue claim: an endpoint answers a ping with a pong.
+  Each connection pings every `@ping_every_ms` (30s), and a frame or a pong counts as being
+  heard from. After `@silence_ms` (90s, three pings) with nothing heard, it raises a
+  `:degraded` notice (`details.reason: :silent_connection`) and closes. That takes the
+  ordinary `handle_disconnect/2` path: `:link_down`, reconnect, LOGIN, re-assert. The check
+  carries this connection's ref and a stale one is not re-armed, so reconnects cannot stack
+  check chains.
+
   ## The two identifiers must not change after login
 
   The venue's error notes list *"client modifies SchwabClientCustomerId or
@@ -134,6 +151,10 @@ defmodule DpExchange.Schwab.Socket do
   # before LOGIN is held, not dropped". `Feed` holds at most one per service.
   @max_held 64
 
+  # See the moduledoc's "A dead connection is found by pinging it".
+  @ping_every_ms 30_000
+  @silence_ms 90_000
+
   @doc """
   Opens the Streamer for `info`, logging in with `access_token`.
 
@@ -166,6 +187,10 @@ defmodule DpExchange.Schwab.Socket do
       # Commands that arrived before the LOGIN response, sent once it succeeds — see the
       # moduledoc's "A command sent before LOGIN is held, not dropped".
       held: [],
+      # When anything, a frame or a pong, last arrived, and this connection's liveness
+      # check. See the moduledoc's "A dead connection is found by pinging it".
+      last_heard_at: nil,
+      liveness: nil,
       # The last book this socket published per symbol, because `LEVELONE_*` is Change
       # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
       # connection, and dropped wholesale on reconnect.
@@ -286,14 +311,17 @@ defmodule DpExchange.Schwab.Socket do
   def handle_connect(_conn, state) do
     # `handle_connect/2` cannot reply — the behaviour returns `{:ok, state}` only — so the
     # LOGIN frame is sent from `handle_info/2` a moment later. That is a transport detail,
-    # not a delay a caller can observe: `subscribe/5` refuses until the login *response*
-    # arrives regardless.
+    # not a delay a caller can observe: a `subscribe/5` before the login *response* is held
+    # and sent once it arrives, regardless.
     #
     # The link is up and the session is not. `:link_up` waits for that response —
     # announcing it here would tell a consumer the feed is live while the venue is still
     # ignoring every command.
     send(self(), :login)
-    {:ok, state}
+
+    liveness = make_ref()
+    schedule_liveness(liveness)
+    {:ok, %{state | last_heard_at: now_ms(), liveness: liveness}}
   end
 
   @impl true
@@ -304,7 +332,38 @@ defmodule DpExchange.Schwab.Socket do
     {:reply, {:text, frame}, %{state | request_id: state.request_id + 1}}
   end
 
+  # See the moduledoc's "A dead connection is found by pinging it". A check whose ref is not
+  # this connection's belongs to one that has since dropped, and is not re-armed.
+  def handle_info({:liveness, liveness}, %{liveness: liveness} = state) do
+    silent_for = now_ms() - state.last_heard_at
+
+    if silent_for >= @silence_ms do
+      notify(
+        state,
+        Notice.new(:degraded, :schwab,
+          message:
+            "nothing heard, not even a pong, for #{silent_for}ms — closing the connection " <>
+              "and reconnecting",
+          details: %{reason: :silent_connection, silent_for_ms: silent_for}
+        )
+      )
+
+      {:close, %{state | liveness: nil}}
+    else
+      schedule_liveness(liveness)
+      {:reply, :ping, state}
+    end
+  end
+
   def handle_info(_message, state), do: {:ok, state}
+
+  @impl true
+  def handle_pong(_frame, state), do: {:ok, %{state | last_heard_at: now_ms()}}
+
+  defp schedule_liveness(liveness),
+    do: Process.send_after(self(), {:liveness, liveness}, @ping_every_ms)
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
@@ -385,6 +444,7 @@ defmodule DpExchange.Schwab.Socket do
 
   @impl true
   def handle_frame({:text, raw}, state) do
+    state = %{state | last_heard_at: now_ms()}
     # Emitted BEFORE the decode, and counted whether or not it parses — the question this
     # event answers is "is the venue sending", and a frame this package could not read is
     # still a frame the venue sent. Counting only what parsed would make a decoder bug here

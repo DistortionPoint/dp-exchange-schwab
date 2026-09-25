@@ -39,6 +39,8 @@ defmodule DpExchange.Schwab.SocketTest do
         login_failures: 0,
         logged_in_once?: false,
         held: [],
+        last_heard_at: nil,
+        liveness: nil,
         last_top: %{}
       },
       overrides
@@ -74,6 +76,42 @@ defmodule DpExchange.Schwab.SocketTest do
 
     test "an unrelated message is ignored" do
       assert {:ok, _state} = Socket.handle_info(:tick, state())
+    end
+  end
+
+  describe "liveness — a dead connection is found by pinging it" do
+    # See the moduledoc's "A dead connection is found by pinging it".
+    defp checked(heard_ms_ago) do
+      check = make_ref()
+      heard = System.monotonic_time(:millisecond) - heard_ms_ago
+      {check, state(%{liveness: check, last_heard_at: heard})}
+    end
+
+    test "nothing heard past the limit: say so and close, so it reconnects" do
+      {check, silent} = checked(100_000)
+
+      assert {:close, _state} = Socket.handle_info({:liveness, check}, silent)
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :degraded, details: %{reason: :silent_connection}}}
+    end
+
+    test "heard recently: ping, and look again later" do
+      {check, live} = checked(0)
+
+      assert {:reply, :ping, ^live} = Socket.handle_info({:liveness, check}, live)
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    end
+
+    test "a pong counts as being heard from" do
+      {_check, stale} = checked(100_000)
+      assert {:ok, heard} = Socket.handle_pong(:pong, stale)
+      assert heard.last_heard_at > stale.last_heard_at
+    end
+
+    test "a check left over from an earlier connection does nothing" do
+      {_check, current} = checked(100_000)
+      assert {:ok, ^current} = Socket.handle_info({:liveness, make_ref()}, current)
     end
   end
 
