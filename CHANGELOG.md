@@ -31,6 +31,18 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A slow Streamer bootstrap crashed every caller waiting on it.** The first
+  `subscribe/2` or `update_symbols/2` on a feed with no route waits for
+  `GET /userPreference`, and so does every call that joins it. That bootstrap is allowed
+  95s (`HttpClient`'s own retry budget), but the caller's `GenServer.call` gives up at 15s,
+  so each waiting caller EXITED and took its process down. Each caller now arms a reply
+  deadline at two thirds of the call timeout and is answered
+  `{:error, {:route_pending, ms}}` if the bootstrap is still running. Its symbols are
+  already wanted and are applied when the route settles. `usage-rules.md` §14 says so.
+  Break-verified: the new test fails on the previous code.
+
 ## [0.2.50] - 2026-09-24
 
 ### Fixed

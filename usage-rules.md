@@ -569,6 +569,12 @@ clears the venue's own subscriptions on every reconnect (see `Socket`'s own modu
 and `Feed` re-issues your `wanted` symbols the moment the socket reports it has logged in
 again. A 60-second unconditional timer re-issues them as well, as a safety net.
 
+**`subscribe/2` or `update_symbols/2` can answer `{:error, {:route_pending, ms}}`.** The
+first call on a feed waits for the Streamer to be set up (`GET /userPreference`). If that
+is slow, the call is answered after about ten seconds rather than outliving its own 15s
+timeout and exiting. Your symbols are recorded and applied once the route is set up, so
+there is nothing to retry.
+
 **The fallback poll is not permanent.** If the Streamer could not be bootstrapped and this
 feed fell back to polling (`coverage/1` says `:internal_poll`), it retries the Streamer on
 that same 60-second timer and switches back when it can. The poll stops, your `wanted`

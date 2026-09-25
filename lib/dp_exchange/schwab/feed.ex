@@ -46,6 +46,22 @@ defmodule DpExchange.Schwab.Feed do
     this document." There is no `Core.Types.Order` or `Core.Types.Fill` decode to wire,
     because writing one would mean inventing the schema Schwab did not document.
 
+  ## A caller waiting on the bootstrap is answered before its call times out
+
+  The first `subscribe/2` or `update_symbols/2` on a feed with no route waits for the
+  Streamer bootstrap (`GET /userPreference`), and so does every call that arrives while it
+  runs. That bootstrap is allowed `@route_bootstrap_timeout_ms` (95s), because
+  `Core.HttpClient`'s own retry budget is about ninety seconds. The caller's
+  `GenServer.call` gives up at `@call_timeout` (15s). So a slow bootstrap left every caller
+  waiting past its own deadline, and each one EXITED, taking the calling process down: the
+  outcome the 95s bound was written to prevent, still reachable because 95 is more than 15.
+
+  Each caller that joins now arms a reply deadline, `@bootstrap_reply_ms` (two thirds of
+  `@call_timeout`). If the bootstrap has not settled by then, whoever is waiting is answered
+  `{:error, {:route_pending, ms}}`. Nothing has to be retried: the symbols are already in
+  `wanted`, and the bootstrap applies them to whichever route it settles on. The
+  `:degraded` notice still says so if that route is the fallback poll.
+
   ## The bootstrap can fail, and the fallback is not a substitution
 
   `GET /userPreference` is an authenticated call. A credential that cannot make it — no
@@ -313,6 +329,12 @@ defmodule DpExchange.Schwab.Feed do
 
   @call_timeout 15_000
 
+  # How long a `subscribe/2` or `update_symbols/2` may wait on a Streamer bootstrap before
+  # it is answered anyway. Two thirds of `@call_timeout`, so the reply always beats the
+  # caller's own deadline. See the moduledoc's "A caller waiting on the bootstrap is
+  # answered before its call times out".
+  @bootstrap_reply_ms div(@call_timeout * 2, 3)
+
   # Re-issues `state.wanted` on the `:stream` route on this cadence, unconditionally — see
   # the moduledoc's "A reconnect used to mean silence" section. Matches the interval
   # `dp_exchange_coinbase` and `dp_exchange_gemini` use for the identical purpose; there is
@@ -351,6 +373,13 @@ defmodule DpExchange.Schwab.Feed do
   and not yet quoted is absent from it — and the next `subscribe/2` would drop it. That is
   the observed-versus-intended distinction this family insists on, pointed the other way,
   and it costs a symbol rather than merely reporting one wrongly.
+
+  **`{:error, {:route_pending, ms}}` means "recorded, not yet routed", not "refused".** The
+  first call on a feed with no route waits for the Streamer bootstrap, for at most `ms`.
+  If the bootstrap is still running by then, this answers before the call's own timeout
+  instead of exiting. The symbols are already wanted, and are applied when the route
+  settles. See the moduledoc's "A caller waiting on the bootstrap is answered before its
+  call times out".
   """
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts \\ []) do
@@ -568,6 +597,8 @@ defmodule DpExchange.Schwab.Feed do
       # need not wait out ninety-five real seconds.
       route_bootstrap_timeout_ms:
         Keyword.get(opts, :route_bootstrap_timeout_ms) || @route_bootstrap_timeout_ms,
+      # Overridable so a test can prove the early reply without waiting ten seconds.
+      bootstrap_reply_ms: Keyword.get(opts, :bootstrap_reply_ms) || @bootstrap_reply_ms,
       subscriber: subscriber,
       subscribers: MapSet.new([subscriber]),
       notice_subscribers: MapSet.new(),
@@ -772,6 +803,23 @@ defmodule DpExchange.Schwab.Feed do
   # apart from one about to succeed. The pid is killed directly rather than through
   # `Task.shutdown/2`, which wants a `%Task{}` this feed never kept; `:flush` on the
   # demonitor stops the resulting `:DOWN` being counted as a second, separate failure.
+  # The bootstrap is still running, and whoever is waiting on it would outlive their own
+  # `GenServer.call` if it went on waiting — see the moduledoc's "A caller waiting on the
+  # bootstrap is answered before its call times out". They are answered now. What they asked
+  # for is already in `wanted` and is applied when the route settles. The bootstrap itself
+  # carries on.
+  def handle_info(
+        {:bootstrap_reply_due, ref},
+        %{route_bootstrap: %{ref: ref, waiting: [_first | _rest] = waiting} = bootstrap} = state
+      ) do
+    Enum.each(
+      waiting,
+      &GenServer.reply(&1, {:error, {:route_pending, state.bootstrap_reply_ms}})
+    )
+
+    {:noreply, %{state | route_bootstrap: %{bootstrap | waiting: []}}}
+  end
+
   def handle_info(
         {:route_bootstrap_timeout, ref},
         %{route_bootstrap: %{ref: ref, pid: pid}} = state
@@ -999,8 +1047,10 @@ defmodule DpExchange.Schwab.Feed do
 
   # A bootstrap is already in flight: join its reply list. Starting a second one would open
   # two Streamer connections for a consumer that merely called `subscribe/2` twice quickly.
-  defp start_route_bootstrap(%{route_bootstrap: %{waiting: waiting} = bootstrap} = state, more),
-    do: %{state | route_bootstrap: %{bootstrap | waiting: waiting ++ more}}
+  defp start_route_bootstrap(%{route_bootstrap: %{waiting: waiting} = bootstrap} = state, more) do
+    arm_bootstrap_reply(state, bootstrap.ref, more)
+    %{state | route_bootstrap: %{bootstrap | waiting: waiting ++ more}}
+  end
 
   defp start_route_bootstrap(state, waiting) do
     credentials = state.credentials
@@ -1014,7 +1064,17 @@ defmodule DpExchange.Schwab.Feed do
       state.route_bootstrap_timeout_ms
     )
 
+    arm_bootstrap_reply(state, task.ref, waiting)
     %{state | route_bootstrap: %{ref: task.ref, pid: task.pid, waiting: waiting}}
+  end
+
+  # Armed once per caller that joins, so the last to arrive is covered too. Nothing to arm
+  # for an upgrade, which nobody waits on.
+  defp arm_bootstrap_reply(_state, _ref, []), do: :ok
+
+  defp arm_bootstrap_reply(state, ref, _joining) do
+    Process.send_after(self(), {:bootstrap_reply_due, ref}, state.bootstrap_reply_ms)
+    :ok
   end
 
   # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE

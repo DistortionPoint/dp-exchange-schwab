@@ -107,6 +107,36 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
     # no claim about the plug. Whether the wedged plug was entered before the budget expired
     # or not, the feed must answer its caller and say why — so there is nothing here for a
     # slow schedule to break.
+    test "callers waiting on a slow bootstrap are answered before their own call times out" do
+      # The bootstrap may take 95s and a caller's `GenServer.call` gives up at 15s, so every
+      # waiting caller used to EXIT. See `Feed`'s moduledoc, "A caller waiting on the
+      # bootstrap is answered before its call times out". The bootstrap budget here is far
+      # longer than the reply deadline, so only the reply deadline can answer in time.
+      feed =
+        start_feed(
+          plug: fn conn ->
+            Process.sleep(:infinity)
+            conn
+          end,
+          limiter: permissive_limiter(),
+          route_bootstrap_timeout_ms: 60_000,
+          bootstrap_reply_ms: 200
+        )
+
+      callers =
+        for symbol <- ["AAPL", "MSFT"] do
+          Task.async(fn -> Feed.subscribe(feed, [symbol]) end)
+        end
+
+      for caller <- callers do
+        assert {:ok, {:error, {:route_pending, 200}}} = Task.yield(caller, 2_000)
+      end
+
+      # Recorded, not refused: the symbols are wanted, and the bootstrap is still running.
+      assert Enum.sort(Feed.wanted(feed)) == ["AAPL", "MSFT"]
+      assert %{waiting: []} = :sys.get_state(feed).route_bootstrap
+    end
+
     test "the timeout is armed from the configured budget, and names it" do
       feed =
         start_feed(
