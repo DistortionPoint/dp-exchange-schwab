@@ -1047,9 +1047,16 @@ defmodule DpExchange.Schwab.Feed do
 
   # A bootstrap is already in flight: join its reply list. Starting a second one would open
   # two Streamer connections for a consumer that merely called `subscribe/2` twice quickly.
+  # Joining an in-flight bootstrap means a route is now NEEDED: a crashed route asking for
+  # a new one, or a caller on a feed with none. So a background upgrade that is joined stops
+  # being one, and settles through the ordinary path, which falls back to the poll on
+  # failure. Left an upgrade, its failure would "stay on" a poll that no longer exists, and
+  # leave this feed with no route and nothing to start one. See the moduledoc's "The
+  # fallback is not permanent".
   defp start_route_bootstrap(%{route_bootstrap: %{waiting: waiting} = bootstrap} = state, more) do
     arm_bootstrap_reply(state, bootstrap.ref, more)
-    %{state | route_bootstrap: %{bootstrap | waiting: waiting ++ more}}
+    joined = %{bootstrap | waiting: waiting ++ more} |> Map.delete(:upgrade?)
+    %{state | route_bootstrap: joined}
   end
 
   defp start_route_bootstrap(state, waiting) do

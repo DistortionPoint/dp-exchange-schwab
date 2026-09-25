@@ -40,10 +40,28 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     plug = fn conn ->
       bootstrap? = String.contains?(conn.request_path, "userPreference")
 
-      {body, status} =
+      answer =
         Agent.get_and_update(agent, fn %{answer: answer, calls: calls} = held ->
           {answer, %{held | calls: if(bootstrap?, do: calls + 1, else: calls)}}
         end)
+
+      # `{:hang, test_pid}` holds a bootstrap open until the test releases it with an answer,
+      # so the test can act while the bootstrap is in flight.
+      {body, status} =
+        case answer do
+          {:hang, notify} when bootstrap? ->
+            send(notify, {:hanging, self()})
+
+            receive do
+              {:release, body, status} -> {body, status}
+            end
+
+          {:hang, _notify} ->
+            {%{"error" => "unavailable"}, 503}
+
+          settled ->
+            settled
+        end
 
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
@@ -143,6 +161,36 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     assert Process.alive?(poller)
     assert %{route: :internal_poll} = Feed.status(feed)
     refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+  end
+
+  test "a poller that crashes during an upgrade is replaced, not lost with it" do
+    # The crash asks for a route and joins the in-flight upgrade. Left an upgrade, its
+    # failure "stayed on" a poll that no longer existed, leaving no route and nothing to
+    # start one. See `Feed`'s `start_route_bootstrap/2`.
+    {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    feed = start_feed(plug: plug, retry_attempts: 0)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+    poller = :sys.get_state(feed).poller
+
+    # Captured out here: inside `Agent.update/2`'s function, `self()` is the agent.
+    test_pid = self()
+    Agent.update(agent, &%{&1 | answer: {:hang, test_pid}})
+    send(feed, :resubscribe)
+    assert_receive {:hanging, request}, 2_000
+
+    Process.exit(poller, :kill)
+    wait_until(fn -> :sys.get_state(feed).poller == nil end)
+
+    send(request, {:release, %{"error" => "unavailable"}, 503})
+
+    wait_until(fn ->
+      replacement = :sys.get_state(feed).poller
+      is_pid(replacement) and replacement != poller and Process.alive?(replacement)
+    end)
+
+    assert %{route: :internal_poll} = Feed.status(feed)
   end
 
   test "a REFUSED credential is not retried on the tick, only when credentials change" do

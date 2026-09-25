@@ -31,6 +31,17 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A poller crash during a background return to the Streamer could leave the feed with
+  no route at all.** When the fallback poller crashed while an upgrade bootstrap (added in
+  0.2.50) was in flight, the request for a new route joined that bootstrap and kept its
+  upgrade flag. If the bootstrap then failed, it "stayed on" a poll that no longer existed,
+  so the feed had no route and nothing that would start one until a consumer called
+  `subscribe/2` again. Joining an in-flight bootstrap now always makes it an ordinary one,
+  which falls back to a fresh poll on failure. Break-verified: the new test fails on the
+  previous code.
+
 ## [0.2.51] - 2026-09-25
 
 ### Fixed
