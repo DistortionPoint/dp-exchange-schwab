@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.52] - 2026-09-25
+
 ### Fixed
 
 - **A poller crash during a background return to the Streamer could leave the feed with
