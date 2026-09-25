@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.51] - 2026-09-25
+
 ### Fixed
 
 - **A slow Streamer bootstrap crashed every caller waiting on it.** The first
