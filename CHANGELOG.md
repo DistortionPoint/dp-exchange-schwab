@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.53] - 2026-09-25
+
 ### Fixed
 
 - **Candles kept whatever order the venue sent.** `get_historical_prices/5` returned the
