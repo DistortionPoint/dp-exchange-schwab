@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.55] - 2026-09-26
+
 ### Fixed
 
 - **A Streamer frame whose `response` or `content` entries were not objects crashed the
