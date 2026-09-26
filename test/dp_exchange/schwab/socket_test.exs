@@ -79,6 +79,26 @@ defmodule DpExchange.Schwab.SocketTest do
     end
   end
 
+  describe "a malformed frame does not take the connection down" do
+    # Found by mutating real frames, 2026-09-26: a non-object `response` or `content` entry
+    # raised inside `handle_frame/2`, and a raise there drops the connection.
+    test "a response entry that is not an object is skipped" do
+      for bad <- [true, [%{}], nil, "x"] do
+        assert {:ok, _state} = Socket.handle_frame(frame(%{"response" => [bad]}), state())
+      end
+    end
+
+    test "a data content entry that is not an object is skipped" do
+      data = %{
+        "data" => [
+          %{"service" => "LEVELONE_EQUITIES", "command" => "SUBS", "content" => [nil, [%{}], 0]}
+        ]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+    end
+  end
+
   describe "liveness — a dead connection is found by pinging it" do
     # See the moduledoc's "A dead connection is found by pinging it".
     defp checked(heard_ms_ago) do

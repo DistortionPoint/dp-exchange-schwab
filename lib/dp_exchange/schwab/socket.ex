@@ -606,7 +606,7 @@ defmodule DpExchange.Schwab.Socket do
     end
   end
 
-  defp handle_response(response, state) do
+  defp handle_response(response, state) when is_map(response) do
     unless StreamerProtocol.succeeded?(response) do
       notify(
         state,
@@ -621,6 +621,11 @@ defmodule DpExchange.Schwab.Socket do
 
     state
   end
+
+  # A `response` or `content` entry that is not an object. Reading one as a map raised in
+  # this process and dropped the connection. Found by mutating real frames, 2026-09-26.
+  # There is nothing in it to act on, so it is skipped, like an unrecognised frame.
+  defp handle_response(_unreadable, state), do: state
 
   defp handle_data(%{"service" => service, "content" => content}, state)
        when is_list(content) do
@@ -638,6 +643,8 @@ defmodule DpExchange.Schwab.Socket do
   end
 
   defp handle_data(_entry, state), do: state
+
+  defp emit(row, _service, _field_map, _observed_at, state) when not is_map(row), do: state
 
   defp emit(row, service, field_map, observed_at, state) do
     fields = StreamerProtocol.rename(row, field_map)

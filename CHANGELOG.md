@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Streamer frame whose `response` or `content` entries were not objects crashed the
+  socket.** Both were read as maps, and a raise in `handle_frame/2` drops the connection.
+  Found by mutating every value of real frames into wrong shapes. Such entries are now
+  skipped, like an unrecognised frame. Break-verified: both new tests fail on the previous
+  code.
+
 ## [0.2.54] - 2026-09-25
 
 ### Fixed
