@@ -226,9 +226,30 @@ defmodule DpExchange.Schwab.Socket do
   @spec connection_opts(keyword()) :: keyword()
   def connection_opts(opts) do
     opts
-    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
+    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout, :ssl_options])
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
+    |> Keyword.put_new_lazy(:ssl_options, &verified_tls/0)
+  end
+
+  # **Certificate verification, which `websockex` does not do unless told to.** Its
+  # `WebSockex.Conn` starts with `insecure: true`, which is `verify: :verify_none`
+  # (`deps/websockex/lib/websockex/conn.ex:24`). No socket in this family passed TLS options,
+  # so every `wss://` connection accepted any certificate from anyone. Measured 2026-09-27:
+  # against a local TLS server presenting a certificate from a CA nothing trusts, the TLS
+  # handshake completed and the client went on to send its upgrade request. Anyone able to
+  # sit on the path could have impersonated the venue and read everything sent after the
+  # upgrade, credentials included. HTTP was never affected, because Mint verifies by default.
+  #
+  # The operating system's trust store (`:public_key.cacerts_get/0`, which OTP caches after
+  # the first read) and the HTTPS hostname rules, so a venue's wildcard certificate matches.
+  # A caller can still pass its own `:ssl_options`, which replace these entirely.
+  defp verified_tls do
+    [
+      verify: :verify_peer,
+      cacerts: :public_key.cacerts_get(),
+      customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+    ]
   end
 
   @doc """

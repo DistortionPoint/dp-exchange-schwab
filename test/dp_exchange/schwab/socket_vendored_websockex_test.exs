@@ -83,6 +83,35 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     assert Process.alive?(socket_pid)
   end
 
+  test "a wss peer whose certificate nothing trusts is refused" do
+    # websockex's own default is `verify: :verify_none`. Against this server, the TLS
+    # handshake used to complete and the upgrade request went out.
+    key = [key: {:rsa, 2048, 65_537}]
+
+    %{server_config: server} =
+      :public_key.pkix_test_data(%{
+        server_chain: %{root: key, intermediates: [], peer: key},
+        client_chain: %{root: key, intermediates: [], peer: key}
+      })
+
+    {:ok, listen_socket} = :ssl.listen(0, [:binary, active: false, reuseaddr: true] ++ server)
+    on_exit(fn -> :ssl.close(listen_socket) end)
+    {:ok, {_address, port}} = :ssl.sockname(listen_socket)
+    test_pid = self()
+
+    spawn(fn ->
+      {:ok, transport} = :ssl.transport_accept(listen_socket, 10_000)
+      send(test_pid, {:server_handshake, elem(:ssl.handshake(transport, 5_000), 0)})
+    end)
+
+    opts = Keyword.put(socket_opts(port), :url, "wss://localhost:#{port}/")
+
+    assert {:error, %WebSockex.ConnError{original: {:tls_alert, _alert}}} =
+             Socket.start_link(opts)
+
+    assert_receive {:server_handshake, :error}, 5_000
+  end
+
   defp socket_opts(port) do
     [
       url: "ws://127.0.0.1:#{port}/",

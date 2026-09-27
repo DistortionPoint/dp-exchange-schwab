@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Security
+
+- **The WebSocket now verifies the venue's TLS certificate.** websockex defaults to
+  `insecure: true`, which is `verify: :verify_none`, and this package passed no TLS
+  options. So its `wss://` connection accepted any certificate, from anyone able to sit
+  on the network path, who then received everything sent after the upgrade, credentials
+  included. Measured 2026-09-27: against a local TLS server with a certificate from a CA
+  nothing trusts, the handshake completed and the upgrade request went out. The socket
+  now defaults `:ssl_options` to `verify: :verify_peer`, the operating system's trust
+  store (`:public_key.cacerts_get/0`) and HTTPS hostname matching. A caller may pass its
+  own `:ssl_options`. This venue's live endpoints (`streamer-api.schwab.com`) were checked the same day
+  and verify under these options. HTTP requests were never affected, because Mint
+  verifies by default.
+
 ## [0.2.61] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

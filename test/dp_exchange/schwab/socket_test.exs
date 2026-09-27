@@ -733,7 +733,14 @@ defmodule DpExchange.Schwab.SocketTest do
     test "unrelated opts never leak into the connection options" do
       opts = Socket.connection_opts(url: "wss://x", subscriber: self(), access_token: "t")
 
-      assert Enum.sort(Keyword.keys(opts)) == [:socket_connect_timeout, :socket_recv_timeout]
+      assert Enum.sort(Keyword.keys(opts)) == [
+               :socket_connect_timeout,
+               :socket_recv_timeout,
+               :ssl_options
+             ]
+
+      # Verified TLS by default; websockex's own default is `verify: :verify_none`.
+      assert opts[:ssl_options][:verify] == :verify_peer
     end
   end
 
