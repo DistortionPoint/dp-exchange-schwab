@@ -882,12 +882,17 @@ defmodule DpExchange.Schwab.Rest do
           {:halt, {:error, {:unreadable_chain_strike, strike_key}}}
 
         strike ->
-          rows =
-            contracts
-            |> List.wrap()
-            |> Enum.map(&to_contract(&1, underlying, expiry, strike, right))
+          contracts = List.wrap(contracts)
 
-          {:cont, {:ok, acc ++ rows}}
+          # A contract entry that is not an object is unreadable, and refuses the chain the
+          # way an unreadable strike key does. It used to raise in `Access`, inside the
+          # caller's process. Found by mutating real response bodies, 2026-09-27.
+          if Enum.all?(contracts, &is_map/1) do
+            rows = Enum.map(contracts, &to_contract(&1, underlying, expiry, strike, right))
+            {:cont, {:ok, acc ++ rows}}
+          else
+            {:halt, {:error, :unexpected_response_shape}}
+          end
       end
     end)
   end
@@ -1086,10 +1091,24 @@ defmodule DpExchange.Schwab.Rest do
 
   defp account_positions(_account), do: []
 
-  defp to_position(row) do
+  # A row, or an `instrument`, that is not an object is a row this package cannot read, and
+  # refuses the reply as the comment above says such a row must. Both used to raise in
+  # `Access`, inside the caller's process. Found by mutating real response bodies, 2026-09-27.
+  defp to_position(%{} = row) do
+    case row["instrument"] do
+      instrument when is_map(instrument) or is_nil(instrument) ->
+        to_position(row, instrument || %{})
+
+      _unreadable ->
+        {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp to_position(_unreadable_row), do: {:error, :unexpected_response_shape}
+
+  defp to_position(row, instrument) do
     long = decimal(row["longQuantity"])
     short = decimal(row["shortQuantity"])
-    instrument = row["instrument"] || %{}
 
     case position_side(long, short) do
       nil ->
@@ -1141,6 +1160,12 @@ defmodule DpExchange.Schwab.Rest do
 
   # Two fields, not one signed number. A row with both zero is a closed position the venue
   # still lists — skipped rather than reported as an open position of size nothing.
+  # Absent is an empty balances object, as it always was. Present and not an object is
+  # unreadable: it used to raise `BadMapError` inside the caller's process.
+  defp current_balances(nil), do: {:ok, %{}}
+  defp current_balances(%{} = current), do: {:ok, current}
+  defp current_balances(_unreadable), do: {:error, :unexpected_response_shape}
+
   defp position_side(long, short) do
     cond do
       not is_nil(long) and Decimal.positive?(long) -> {:long, long}
@@ -1390,9 +1415,8 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   defp balances(%{"securitiesAccount" => account}) when is_map(account) do
-    current = account["currentBalances"] || %{}
-
-    with {:ok, total} <- balance_total(account["type"], current) do
+    with {:ok, current} <- current_balances(account["currentBalances"]),
+         {:ok, total} <- balance_total(account["type"], current) do
       {:ok,
        [
          %DpExchange.Core.Types.Balance{

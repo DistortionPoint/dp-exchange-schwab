@@ -48,6 +48,33 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
     end
   end
 
+  describe "a response value of the wrong type is refused, never raised on" do
+    # Found by mutating real response bodies, 2026-09-27. Each raised inside the CALLER's
+    # process.
+    test "a currentBalances that is not an object refuses the balances" do
+      body = %{"securitiesAccount" => %{"type" => "MARGIN", "currentBalances" => [%{}]}}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a position row, or its instrument, that is not an object refuses the positions" do
+      for position <- [true, %{"instrument" => true, "longQuantity" => 1.0}] do
+        body = [%{"securitiesAccount" => %{"positions" => [position]}}]
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "a chain contract that is not an object refuses the chain" do
+      body = %{"callExpDateMap" => %{"2026-03-20:15" => %{"200.0" => [true]}}}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_option_chain("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+    end
+  end
+
   describe "the market-data reads that were missing" do
     test "a single-symbol quote uses a path segment, not a query list" do
       me = self()

@@ -31,6 +31,21 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A response value of the wrong type raised inside the caller's process.** Found by
+  mutating every value of real response bodies into wrong shapes, across ten read calls:
+  - `get_balances/3`: a `currentBalances` that was not an object raised `BadMapError`.
+  - `get_positions/2`: a position row, or its `instrument`, that was not an object raised
+    in `Access`.
+  - `get_option_chain/3`: a contract entry that was not an object raised in `Access`.
+
+  Each is now refused as `{:error, :unexpected_response_shape}`, following the policy the
+  code already states: a row this package cannot read refuses the reply rather than being
+  dropped, so a missing entry is never read as "none held". An absent `currentBalances`
+  is still an empty one. 0 raising mutations remain. Break-verified: all three new tests
+  fail on the previous code.
+
 ## [0.2.56] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
