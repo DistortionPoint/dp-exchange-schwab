@@ -96,6 +96,24 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
     assert %OrderLeg{side: :sell, ratio: 2} = second
   end
 
+  test "a leg quantity with a huge exponent answers at once, with no ratio from it" do
+    # `Decimal.integer?/1` accepts `"1E999999999"`, and `Decimal.to_integer/1` then built a
+    # billion-digit integer in the caller's process.
+    [first, second] = @limit_buy["orderLegCollection"] ++ @limit_buy["orderLegCollection"]
+
+    spread = %{
+      @limit_buy
+      | "orderLegCollection" => [first, Map.put(second, "quantity", "1E999999999")]
+    }
+
+    task = Task.async(fn -> Orders.from_venue(spread) end)
+
+    assert {:ok, {:ok, %Order{legs: legs}}} =
+             Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+
+    refute Enum.any?(List.wrap(legs), &is_integer(&1.ratio))
+  end
+
   test "an order with no id is refused, and so is a list containing one" do
     assert {:error, {:missing_required_field, :id}} =
              Orders.from_venue(Map.delete(@limit_buy, "orderId"))

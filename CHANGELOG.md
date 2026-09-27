@@ -35,6 +35,15 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **A spread leg with a huge-exponent quantity no longer stalls order decoding.**
+  `Decimal.integer?/1` accepts a quantity such as `"1E999999999"`, and
+  `Decimal.to_integer/1` then builds the whole integer. At `1E10000000` that already took
+  longer than 4 seconds in the caller's process (measured 2026-09-27). The magnitude is
+  now compared first. A leg above 10^12, a bound that was chosen rather than measured,
+  gets no ratio, the same result a fractional quantity already gives.
+
+### Fixed
+
 - **A token response with an extreme `expires_in` no longer stalls `refresh/2`.** The
   value went straight to `DateTime.add/3`. That function computes a date for any offset,
   and for 10^24 seconds it took longer than 4 seconds in the caller's process (measured

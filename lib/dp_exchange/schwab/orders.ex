@@ -428,8 +428,19 @@ defmodule DpExchange.Schwab.Orders do
 
   defp number(_absent), do: nil
 
+  # **Compared before it is expanded.** `Decimal.to_integer/1` builds the whole integer, so a
+  # venue quantity of `"1E999999999"`, which `Decimal.integer?/1` accepts, meant computing a
+  # number with a billion digits. `1E10000000` already took longer than 4 seconds (measured
+  # 2026-09-27), and it ran inside `list_from_venue/1` in the caller's process.
+  # `Decimal.compare/2` works on coefficient and exponent and returns at once.
+  # `@max_leg_quantity` is chosen, not measured: a trillion contracts is more than any
+  # order leg, and a leg past it gets the same `nil` as a fractional one.
+  @max_leg_quantity Decimal.new("1E12")
+
   defp whole(%Decimal{} = value) do
-    if Decimal.integer?(value), do: Decimal.to_integer(value), else: nil
+    if Decimal.compare(Decimal.abs(value), @max_leg_quantity) != :gt and Decimal.integer?(value),
+      do: Decimal.to_integer(value),
+      else: nil
   end
 
   defp whole(_other), do: nil
