@@ -450,7 +450,7 @@ defmodule DpExchange.Schwab do
     feed = feed(opts)
 
     if alive?(feed) do
-      Feed.subscribe(feed, symbols, opts)
+      feed_call(fn -> Feed.subscribe(feed, symbols, opts) end, {:error, :feed_not_started})
     else
       {:error, :feed_not_started}
     end
@@ -459,19 +459,19 @@ defmodule DpExchange.Schwab do
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.unsubscribe(feed, symbols), else: :ok
+    feed_call(fn -> Feed.unsubscribe(feed, symbols) end, :ok)
   end
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.update_symbols(feed, symbols), else: {:error, :feed_not_started}
+    feed_call(fn -> Feed.update_symbols(feed, symbols) end, {:error, :feed_not_started})
   end
 
   @impl true
   def coverage(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.coverage(feed), else: %{}
+    if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
   end
 
   @doc """
@@ -491,7 +491,7 @@ defmodule DpExchange.Schwab do
   @spec wanted(keyword()) :: [String.t()]
   def wanted(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.wanted(feed), else: []
+    if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
   end
 
   @doc """
@@ -529,7 +529,7 @@ defmodule DpExchange.Schwab do
         }
   def coverage_by_kind(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+    if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
 
   @doc """
@@ -549,7 +549,7 @@ defmodule DpExchange.Schwab do
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.status(feed), else: %{}
+    if alive?(feed), do: feed_read(fn -> Feed.status(feed) end, %{}), else: %{}
   end
 
   @doc """
@@ -589,7 +589,7 @@ defmodule DpExchange.Schwab do
   @impl true
   def subscribe_notices(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.subscribe_notices(feed, opts), else: {:error, :feed_not_started}
+    feed_call(fn -> Feed.subscribe_notices(feed, opts) end, {:error, :feed_not_started})
   end
 
   @doc """
@@ -614,7 +614,11 @@ defmodule DpExchange.Schwab do
     feed = feed(opts)
 
     if alive?(feed),
-      do: Feed.update_credentials(feed, credentials),
+      do:
+        feed_call(
+          fn -> Feed.update_credentials(feed, credentials) end,
+          {:error, :feed_not_started}
+        ),
       else: {:error, :feed_not_started}
   end
 
@@ -661,6 +665,32 @@ defmodule DpExchange.Schwab do
   defp alive?(name) when is_atom(name), do: is_pid(Process.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
   defp alive?(_other), do: false
+
+  # **A streaming call answers; it does not exit in the caller's process.** Every
+  # streaming callback's spec is a value (`:ok | {:error, term()}`, or a map). A bare
+  # `GenServer.call/3` into `Feed` exits the caller instead: with `:noproc` when no `Feed` is
+  # running, and with `:timeout` when one is too busy to answer within its call budget.
+  # This facade checked `alive?/1` first, which covered a `Feed` never started. Three
+  # sibling venues did not, and exited `:noproc` there (measured 2026-09-27). But the check
+  # still raced a `Feed` that died between it and the call, and did nothing for a busy
+  # one, so the exit is caught at the call itself. A reply that arrives after a timeout is
+  # dropped by OTP's call aliases, so it cannot reach the caller's mailbox later.
+  defp feed_call(call, not_running) do
+    call.()
+  catch
+    :exit, {:noproc, _call} -> not_running
+    :exit, {:timeout, _call} -> {:error, :feed_timeout}
+    :exit, {reason, _call} -> {:error, {:feed_exited, reason}}
+  end
+
+  # `coverage/1` and `coverage_by_kind/1` return a map, with no room for an error. Any
+  # failure is the empty answer, which says "not observed" and never claims delivery nobody
+  # confirmed.
+  defp feed_read(call, empty) do
+    call.()
+  catch
+    :exit, _reason -> empty
+  end
 
   # --- Declared but not yet implemented -----------------------------------
   #

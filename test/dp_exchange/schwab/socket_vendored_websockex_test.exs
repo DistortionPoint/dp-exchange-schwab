@@ -104,7 +104,12 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
       send(test_pid, {:server_handshake, elem(:ssl.handshake(transport, 5_000), 0)})
     end)
 
-    opts = Keyword.put(socket_opts(port), :url, "wss://localhost:#{port}/")
+    # Generous timeouts: this asserts a TLS refusal, and a 2048-bit RSA handshake on a loaded
+    # machine can outlast the 500 ms handshake deadline the other tests here use.
+    opts =
+      socket_opts(port)
+      |> Keyword.merge(url: "wss://localhost:#{port}/", socket_connect_timeout: 10_000)
+      |> Keyword.put(:socket_recv_timeout, 10_000)
 
     assert {:error, %WebSockex.ConnError{original: {:tls_alert, _alert}}} =
              Socket.start_link(opts)
