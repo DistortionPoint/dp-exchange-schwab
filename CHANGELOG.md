@@ -181,8 +181,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   The fake's `get_orders/2` now answers one order rather than `[]`, which made every check
   over its elements vacuous.
 
-### Fixed
-
 - **Both option endpoints raised on an array.** `get_option_chain/2` read
   `body["callExpDateMap"]` and raised `ArgumentError` from `Access` on a list;
   `get_option_expirations/2` raised `BadMapError`. Both now refuse a non-object body with
@@ -273,8 +271,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   The floor is on the arithmetic, never on the declaration. `capabilities/0` keeps saying what
   this application was actually registered for.
 
-### Fixed
-
 - **An order price or size could go onto the wire in scientific notation.**
   `Decimal.to_string/1` defaults to `:scientific`, and `to_string/1` on a `%Decimal{}`
   reaches that same default through `String.Chars` — so a value carrying an exponent was
@@ -320,8 +316,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   **A transport failure on an order write now means the outcome is unknown**, which it
   always did — it was simply being hidden by an automatic second attempt. `usage-rules.md`
   says so, and says to read your open orders rather than placing again.
-
-### Fixed
 
 - **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
   became 1970.** The time helpers used `DateTime.from_unix!/2`, which handles neither case.
@@ -652,6 +646,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
 
   `Rest.to_candle/3`, the REST arm of the same type, already guarded all four. This was the
   copy that did not.
+
 ## [0.2.23] - 2026-09-12
 ### Changed
 
@@ -665,6 +660,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   A consumer matching only `{:ok, _}` needs no change. One that enumerates error reasons now
   has them, each with whether retrying is worth anything — which is the part that decides
   what a caller does next, and the part a bare list of atoms would leave out.
+
 ## [0.2.22] - 2026-09-12
 
 ### Fixed
@@ -1006,6 +1002,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   the defect either of them was written to catch.
 
   No vendor drift: every cited documentation source resolves exactly as recorded.
+
 ## [0.2.10] - 2026-09-11
 
 ### Changed
