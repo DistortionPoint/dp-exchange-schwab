@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.58] - 2026-09-27
+
 ### Fixed
 
 - **A token response with an extreme `expires_in` no longer stalls `refresh/2`.** The
