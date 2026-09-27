@@ -31,6 +31,27 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The WebSocket opening handshake now has a deadline: `socket_connect_timeout` plus
+  `socket_recv_timeout`.** websockex bounds each `recv` of the HTTP upgrade response
+  separately, and every chunk restarts that timer. So a peer that trickled the response
+  held a start open indefinitely, which blocked `Feed` inside a `handle_call/3` and queued
+  every other consumer's call behind it. It could do the same to a reconnect, where the
+  socket delivered nothing and its silence check could not run. Measured 2026-09-27
+  against a local server sending one byte every 200 ms: still connecting at 12 s. The
+  attempt now ends at the deadline with `%WebSockex.ConnError{original: :timeout}`, the
+  error a timed-out `recv` already produced.
+- **A malformed WebSocket close frame no longer crashes the socket.** websockex 0.5.1
+  raised `CaseClauseError` on a close frame with an invalid status code, before
+  `handle_disconnect/2` could run. `dp_exchange_webull` found this live, and its fix is now
+  here as well. The frame now disconnects and reconnects like any other close.
+- Both fixes come from `DpExchange.Schwab.Vendor.WebSockex`, a private patched fork of
+  websockex 0.5.1's process loop, carried from `dp_exchange_webull`. The `websockex`
+  dependency is pinned `== 0.5.1`, up from `~> 0.4`, because the fork calls that
+  release's internals.
+
+
 ## [0.2.59] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

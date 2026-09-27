@@ -117,10 +117,17 @@ defmodule DpExchange.Schwab.Socket do
   short of tearing the whole feed down and starting over.
   """
 
-  use WebSockex
-
   alias DpExchange.Core.{Config, Notice, Telemetry}
   alias DpExchange.Schwab.{Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
+
+  # `use`, `start_link/4` and `cast/2` go to this package's vendored fork, never the real
+  # `WebSockex`, whose `open_loop/3` has no handshake deadline and whose `websocket_loop/3`
+  # crashes on a malformed close frame. See `DpExchange.Schwab.Vendor.WebSockex`. Aliased
+  # as `VendoredWebSockex`, never over `WebSockex`, so `WebSockex.Conn` and the rest still
+  # name the real dependency's modules.
+  alias DpExchange.Schwab.Vendor.WebSockex, as: VendoredWebSockex
+
+  use VendoredWebSockex
 
   require Logger
 
@@ -137,6 +144,11 @@ defmodule DpExchange.Schwab.Socket do
   # 3s + 2s leaves real room for the login and first subscribe. Both stay overridable, and
   # setting them changes no failure semantics: `start_link/1` still returns
   # `{:error, reason}` synchronously exactly as before.
+  #
+  # Their sum is also the whole handshake's deadline. `socket_recv_timeout` alone bounds
+  # each `recv` of the upgrade response, not the response, so a peer that trickled it kept
+  # a start or a reconnect open indefinitely. The vendored `WebSockex` now ends the
+  # handshake at connect plus recv. See `DpExchange.Schwab.Vendor.WebSockex`, item 3.
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 
@@ -197,7 +209,7 @@ defmodule DpExchange.Schwab.Socket do
       last_top: %{}
     }
 
-    WebSockex.start_link(
+    VendoredWebSockex.start_link(
       Config.opt(opts, :url, info.socket_url),
       __MODULE__,
       state,
@@ -230,7 +242,7 @@ defmodule DpExchange.Schwab.Socket do
   @spec subscribe(pid(), String.t(), String.t(), [String.t()], keyword()) ::
           :ok | {:error, term()}
   def subscribe(socket, service, command, keys, opts \\ []) do
-    WebSockex.cast(socket, {:subscribe, service, command, keys, opts})
+    VendoredWebSockex.cast(socket, {:subscribe, service, command, keys, opts})
     :ok
   catch
     :exit, _reason -> {:error, :send_timeout}
@@ -251,7 +263,7 @@ defmodule DpExchange.Schwab.Socket do
   """
   @spec update_access_token(pid(), String.t()) :: :ok | {:error, term()}
   def update_access_token(socket, access_token) when is_binary(access_token) do
-    WebSockex.cast(socket, {:update_access_token, access_token})
+    VendoredWebSockex.cast(socket, {:update_access_token, access_token})
     :ok
   catch
     :exit, _reason -> {:error, :send_timeout}

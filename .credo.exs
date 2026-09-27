@@ -13,7 +13,7 @@
           "apps/*/test/",
           "apps/*/web/"
         ],
-        excluded: [~r"/_build/", ~r"/deps/", ~r"/node_modules/", ~r"/docs/"]
+        excluded: [~r"/_build/", ~r"/deps/", ~r"/node_modules/", ~r"/docs/", ~r"/lib/vendor/"]
       },
       plugins: [],
       requires: [],

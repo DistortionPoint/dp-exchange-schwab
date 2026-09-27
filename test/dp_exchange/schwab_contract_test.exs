@@ -8,6 +8,10 @@ defmodule DpExchange.SchwabContractTest do
     fake: DpExchange.Schwab.Fake,
     symbol_format: DpExchange.Schwab.SymbolFormat,
     sample_pairs: ~w(AAPL MSFT GOOGL),
+    # `lib/vendor/` is third-party code, a patched websockex fork (see
+    # `DpExchange.Schwab.Vendor.WebSockex`). The scanning assertions are written for this
+    # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
+    package_root: "lib/dp_exchange",
     credentials: %{access_token: "test-token"},
     # The options this venue's own endpoints require before its fake will answer at all.
     #
