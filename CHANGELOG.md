@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.57] - 2026-09-27
+
 ### Fixed
 
 - **A response value of the wrong type raised inside the caller's process.** Found by
