@@ -123,6 +123,26 @@ defmodule DpExchange.Schwab.AuthTest do
       assert renewed.expires_at == ~U[2026-08-31 12:30:00Z]
     end
 
+    test "an expires_in no venue gives is no claim, answered at once rather than hanging" do
+      # `DateTime.add/3` computes a date for any offset; 10^24 seconds kept this call running
+      # in the caller's process with no answer.
+      now = ~U[2026-08-31 12:00:00Z]
+
+      for seconds <- [1_000_000_000_000_000_000_000_000, 86_401] do
+        body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => seconds}
+
+        task =
+          Task.async(fn ->
+            Auth.refresh(@creds, plug: responding(body), retry_attempts: 0, now: now)
+          end)
+
+        assert {:ok, {:ok, renewed}} =
+                 Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+
+        refute Map.has_key?(renewed, :expires_at)
+      end
+    end
+
     test "every refresh mints a new refresh token, and it replaces the old one" do
       # The token sent is SPENT by this call. The one returned is its only replacement,
       # and carries a fresh seven days — which is why a host refreshing every half hour

@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A token response with an extreme `expires_in` no longer stalls `refresh/2`.** The
+  value went straight to `DateTime.add/3`. That function computes a date for any offset,
+  and for 10^24 seconds it took longer than 4 seconds in the caller's process (measured
+  2026-09-27). The venue documents 1800 seconds. Anything above one day, a bound that was
+  chosen rather than measured, is now read as no expiry claim, which an absent
+  `expires_in` already was: the credential refreshes on a 401.
+
 ## [0.2.57] - 2026-09-27
 
 ### Fixed

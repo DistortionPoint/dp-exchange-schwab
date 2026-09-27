@@ -262,8 +262,17 @@ defmodule DpExchange.Schwab.Auth do
 
   defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
 
-  defp put_expiry(renewed, seconds, now) when is_integer(seconds) and seconds > 0,
-    do: Map.put(renewed, :expires_at, DateTime.add(now, seconds, :second))
+  # **Bounded, because `DateTime.add/3` is not.** It computes a date for any offset, and for
+  # an extreme one it took longer than 4 seconds (measured 2026-09-27 at 10^20 seconds and
+  # above). So an `expires_in` of 10^24 kept `refresh/2` running in the caller's process with
+  # no answer. The venue documents 1800 seconds for an access token. `@max_expires_in_s` is
+  # one day, chosen rather than measured. A claim past it is not one this venue makes, and it
+  # is read as no claim, which the clause below already handles by refreshing on a 401.
+  @max_expires_in_s 86_400
+
+  defp put_expiry(renewed, seconds, now)
+       when is_integer(seconds) and seconds > 0 and seconds <= @max_expires_in_s,
+       do: Map.put(renewed, :expires_at, DateTime.add(now, seconds, :second))
 
   # No `expires_in` means no expiry claim. `needs_refresh?/2` treats an absent expiry as
   # "cannot tell", which falls back to refreshing on a 401 — correct, and better than
