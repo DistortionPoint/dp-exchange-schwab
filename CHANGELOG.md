@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.69] - 2026-09-28
+
 ### Fixed
 
 - **The Streamer socket no longer keeps every subscription it has ever sent.** Each
