@@ -27,8 +27,8 @@
 #     conformance test (or, for `dp_exchange_core` itself, which defines that suite
 #     rather than consuming it, the full test suite) — not a blanket `mix test`. Some
 #     venue packages' lower-level socket/feed tests reach the real, live venue (found in
-#     `dp_exchange_coinbase`'s `feed_test.exs` while designing this check — a separate,
-#     pre-existing issue, filed but deliberately not fixed here). The conformance test
+#     `dp_exchange_coinbase`'s `feed_test.exs` while designing this check. Fixed 2026-09-27:
+#     every venue's tier-1 suite now opens no connection off the machine). The conformance test
 #     alone already calls `capabilities/0` under a fully offline Fake, which is exactly
 #     the shape of two of the four known incidents (a struct field the floor doesn't have
 #     yet; a Types module the floor doesn't ship yet) without opening a socket. The other
