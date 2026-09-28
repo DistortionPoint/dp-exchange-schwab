@@ -62,6 +62,11 @@ cd "$SCRATCH"
 # both, so this stays the portable common denominator.
 sed -i.bak -E '
   /^[[:space:]]*\{:[a-zA-Z_]+,/ {
+    # An `or` requirement pins to its FIRST clause, which is its floor. Without these two
+    # lines `"~> 2.0 or ~> 3.0"` (decimal, since 2026-09-27) matched neither pattern below,
+    # stayed unpinned, resolved the newest 3.x, and the 2.0 floor went untested.
+    /only:/! s/"~> ([0-9]+\.[0-9]+\.[0-9]+) or [^"]*"/"== \1"/g
+    /only:/! s/"~> ([0-9]+\.[0-9]+) or [^"]*"/"== \1.0"/g
     /only:/! s/"~> ([0-9]+\.[0-9]+\.[0-9]+)"/"== \1"/g
     /only:/! s/"~> ([0-9]+\.[0-9]+)"/"== \1.0"/g
   }
