@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.71] - 2026-09-28
+
 ### Fixed
 
 - **A frame arriving after `unsubscribe/2` is no longer delivered or counted.** A venue
