@@ -450,7 +450,10 @@ defmodule DpExchange.Schwab do
     feed = feed(opts)
 
     if alive?(feed) do
-      feed_call(fn -> Feed.subscribe(feed, symbols, opts) end, {:error, :feed_not_started})
+      feed_call(
+        fn -> Feed.subscribe(feed, canonical_case(symbols), opts) end,
+        {:error, :feed_not_started}
+      )
     else
       {:error, :feed_not_started}
     end
@@ -459,13 +462,17 @@ defmodule DpExchange.Schwab do
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     feed = feed(opts)
-    feed_call(fn -> Feed.unsubscribe(feed, symbols) end, :ok)
+    feed_call(fn -> Feed.unsubscribe(feed, canonical_case(symbols)) end, :ok)
   end
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
     feed = feed(opts)
-    feed_call(fn -> Feed.update_symbols(feed, symbols) end, {:error, :feed_not_started})
+
+    feed_call(
+      fn -> Feed.update_symbols(feed, canonical_case(symbols)) end,
+      {:error, :feed_not_started}
+    )
   end
 
   @impl true
@@ -691,6 +698,18 @@ defmodule DpExchange.Schwab do
   catch
     :exit, _reason -> empty
   end
+
+  # **Symbols are upper-cased on the way in.** Canonical symbols are upper case, and `Feed`
+  # drops a payload whose symbol it does not want. So a caller who subscribed `btc-usd` got
+  # nothing at all, because the venue delivers `BTC-USD`. Until 2026-09-27 that same caller
+  # was delivered to, because nothing compared the two. Measured 2026-09-28:
+  # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
+  # Case is the one difference normalised here. Anything else that is not canonical is the
+  # caller's to fix.
+  defp canonical_case(symbols) when is_list(symbols),
+    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+
+  defp canonical_case(other), do: other
 
   # --- Declared but not yet implemented -----------------------------------
   #

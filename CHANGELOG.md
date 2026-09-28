@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A lower-case symbol subscribes under its canonical form again.** `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` now upper-case their symbols. The previous release
+  made `Feed` drop a payload for a symbol it does not want. The venue delivers the
+  canonical upper-case symbol, so a `btc-usd` subscription received nothing, where before
+  it had received data. Measured 2026-09-28: `update_symbols(["btc-usd"])`, then a
+  `BTC-USD` quote, and `coverage/1` was `%{}`. Case is the only difference normalised.
+
 ## [0.2.71] - 2026-09-28
 
 ### Fixed

@@ -923,4 +923,17 @@ defmodule DpExchange.SchwabTest do
       assert DpExchange.Schwab.subscribe(["AAPL"], feed: name) == {:error, {:feed_exited, :boom}}
     end
   end
+
+  describe "symbols are upper-cased on the way in" do
+    # `Feed` drops a payload for a symbol it does not want, and the venue delivers `AAPL`,
+    # so an `aapl` subscription left untouched would receive nothing at all.
+    test "a lower-case symbol is wanted under its canonical form" do
+      name = :"case_feed_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = Feed.start_link(name: name, symbols: [], start_delay_ms: 60_000)
+
+      Schwab.update_symbols(["aapl"], feed: name)
+
+      assert Schwab.wanted(feed: name) == ["AAPL"]
+    end
+  end
 end
