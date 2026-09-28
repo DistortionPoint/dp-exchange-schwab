@@ -936,4 +936,16 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.wanted(feed: name) == ["AAPL"]
     end
   end
+
+  describe "the fake, with a lower-case subscription" do
+    # The real facade upper-cases symbols on the way in. The fake has to give the same
+    # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
+    test "is delivered under the canonical symbol, as the real package does" do
+      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
+
+      assert :ok = DpExchange.Schwab.Fake.subscribe(["aapl"], opts)
+      assert_receive {:dp_exchange, _venue, %{symbol: "AAPL"}}, 2_000
+      assert Map.has_key?(DpExchange.Schwab.Fake.coverage(opts), "AAPL")
+    end
+  end
 end

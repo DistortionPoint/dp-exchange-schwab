@@ -458,6 +458,7 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def subscribe(symbols, opts \\ []) do
+    symbols = canonical_case(symbols)
     to = Config.opt(opts, :to, self())
     covered = Enum.filter(symbols, &(&1 in @listed))
 
@@ -473,12 +474,14 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
+    symbols = canonical_case(symbols)
     Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
     :ok
   end
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
+    symbols = canonical_case(symbols)
     Process.put(__MODULE__, [])
     subscribe(symbols, opts)
   end
@@ -842,4 +845,12 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+
+  # Upper-cased on the way in, as the real facade does, so a lower-case subscription gets
+  # the same answer here as against the venue. Without it the fake delivered nothing for
+  # `btc-usd` while the real package delivered `BTC-USD` (checked 2026-09-28).
+  defp canonical_case(symbols) when is_list(symbols),
+    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+
+  defp canonical_case(other), do: other
 end
