@@ -35,7 +35,6 @@ defmodule DpExchange.Schwab.SocketTest do
         subscriber: self(),
         logged_in?: false,
         request_id: 1,
-        subscriptions: MapSet.new(),
         login_failures: 0,
         logged_in_once?: false,
         held: [],
@@ -147,7 +146,6 @@ defmodule DpExchange.Schwab.SocketTest do
                )
 
       assert held.held == [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []}]
-      assert held.subscriptions == MapSet.new()
       refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
     end
 
@@ -173,7 +171,6 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert after_login.logged_in?
       assert after_login.held == []
-      assert MapSet.size(after_login.subscriptions) == 2
       assert_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
     end
 
@@ -236,7 +233,7 @@ defmodule DpExchange.Schwab.SocketTest do
     end
 
     test "a subscribe after login goes out" do
-      assert {:reply, {:text, raw}, new_state} =
+      assert {:reply, {:text, raw}, _new_state} =
                Socket.handle_cast(
                  {:subscribe, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL MSFT), []},
                  state(%{logged_in?: true})
@@ -246,7 +243,24 @@ defmodule DpExchange.Schwab.SocketTest do
       assert request["service"] == "LEVELONE_EQUITIES"
       assert request["command"] == "SUBS"
       assert request["parameters"]["keys"] == "AAPL,MSFT"
-      assert MapSet.size(new_state.subscriptions) == 1
+    end
+
+    test "repeated subscribes do not grow the socket's state" do
+      # It used to add every `{service, keys}` it sent to a set nothing read, and only a
+      # reconnect emptied it, so every change of symbol set held another whole key list for
+      # the life of the connection.
+      subscribe = fn state, keys ->
+        {:reply, _frame, next} =
+          Socket.handle_cast({:subscribe, "LEVELONE_EQUITIES", "SUBS", keys, []}, state)
+
+        next
+      end
+
+      once = subscribe.(state(%{logged_in?: true}), ~w(AAPL))
+      many = Enum.reduce(1..500, once, fn n, acc -> subscribe.(acc, ["SYM#{n}", "AAPL"]) end)
+
+      assert :erts_debug.flat_size(%{many | request_id: 0}) ==
+               :erts_debug.flat_size(%{once | request_id: 0})
     end
 
     test "an invalid subscribe is reported rather than sent" do
@@ -421,16 +435,15 @@ defmodule DpExchange.Schwab.SocketTest do
   end
 
   describe "reconnection is not resubscription" do
-    test "a disconnect clears the session and the subscriptions" do
+    test "a disconnect clears the session" do
       # A socket that kept believing it was subscribed would report a healthy feed that
       # receives nothing.
       before =
-        state(%{logged_in?: true, subscriptions: MapSet.new([{"LEVELONE_EQUITIES", ~w(AAPL)}])})
+        state(%{logged_in?: true})
 
       assert {:reconnect, cleared} = Socket.handle_disconnect(%{reason: :closed}, before)
 
       refute cleared.logged_in?
-      assert cleared.subscriptions == MapSet.new()
       assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
     end
 
@@ -911,7 +924,7 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert_received {:dp_exchange, :schwab, %TopOfBook{}}
 
-      # `handle_disconnect/2` already clears `subscriptions` because the venue's session is
+      # `handle_disconnect/2` already clears `logged_in?` because the venue's session is
       # gone. A book carried across that boundary would be this package asserting a level
       # from a session the venue no longer has.
       {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, state)

@@ -62,11 +62,11 @@ defmodule DpExchange.Schwab.Socket do
 
   ## Reconnection is not resubscription
 
-  `handle_disconnect/2` reconnects and **clears the logged-in flag and the subscriptions**.
-  The venue's session is gone; a socket that kept believing it was subscribed would report a
-  healthy feed that receives nothing. The `:link_down` notice is what tells a consumer to
-  expect the gap, and `:link_up` follows only after login succeeds again — not merely when
-  the TCP connection returns.
+  `handle_disconnect/2` reconnects and **clears the logged-in flag**, because the venue's
+  subscriptions went with its session. A socket that kept believing it was subscribed would
+  report a healthy feed that receives nothing. The `:link_down` notice is what tells a
+  consumer to expect the gap, and `:link_up` follows only after login succeeds again — not
+  merely when the TCP connection returns.
 
   ## A rejected LOGIN is not a network blip, and the reconnect backs off
 
@@ -186,9 +186,6 @@ defmodule DpExchange.Schwab.Socket do
       subscriber: Keyword.fetch!(opts, :subscriber),
       logged_in?: false,
       request_id: 1,
-      # What the caller asked for, so a reconnect can report what was lost rather than
-      # pretending it is still live.
-      subscriptions: MapSet.new(),
       # Consecutive rejected LOGINs, reset to 0 on the next success. Drives
       # `reconnect_delay_ms/1` — see the moduledoc's "A rejected LOGIN is not a network
       # blip" section.
@@ -425,10 +422,10 @@ defmodule DpExchange.Schwab.Socket do
 
     # The venue's session is gone. A socket that kept `logged_in?` would send subscriptions
     # the venue ignores and report a healthy feed that receives nothing.
-    # `last_top` goes with the subscriptions, and for the same reason. A book carried across
+    # `last_top` goes with the session, and for the same reason. A book carried across
     # this boundary would be this package continuing to assert a level on behalf of a session
     # the venue no longer has; the fresh session re-states what is true when it resubscribes.
-    {:reconnect, %{state | logged_in?: false, subscriptions: MapSet.new(), last_top: %{}}}
+    {:reconnect, %{state | logged_in?: false, last_top: %{}}}
   end
 
   @impl true
@@ -463,8 +460,7 @@ defmodule DpExchange.Schwab.Socket do
         {:reply, {:text, frame},
          %{
            state
-           | request_id: state.request_id + 1,
-             subscriptions: MapSet.put(state.subscriptions, {service, keys})
+           | request_id: state.request_id + 1
          }}
 
       {:error, reason} ->
@@ -570,8 +566,7 @@ defmodule DpExchange.Schwab.Socket do
         {[request | requests],
          %{
            state
-           | request_id: state.request_id + 1,
-             subscriptions: MapSet.put(state.subscriptions, {service, keys})
+           | request_id: state.request_id + 1
          }}
       end)
 

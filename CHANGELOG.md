@@ -31,6 +31,16 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Streamer socket no longer keeps every subscription it has ever sent.** Each
+  subscribe added `{service, keys}` to a set in the socket's state, keyed by the whole
+  symbol list, and nothing ever read it. Only a reconnect emptied it, so every change of
+  symbol set held another full key list for the life of the connection. Measured
+  2026-09-27: 500 subscribes left 501 entries, and the state grew from 108 to 11,011
+  words. The field is gone. A test pins that repeated subscribes leave the state the same
+  size.
+
 ## [0.2.68] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
