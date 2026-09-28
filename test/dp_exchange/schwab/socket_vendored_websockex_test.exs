@@ -36,14 +36,13 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     {listen_socket, port} = listen()
     serve(listen_socket, [&trickle/1])
 
-    started = System.monotonic_time(:millisecond)
     task = Task.async(fn -> Socket.start_link(socket_opts(port)) end)
 
     # Without the deadline this call does not return at all, so the yield is what fails.
+    # No tighter wall-clock bound: under a loaded suite 500 ms of deadline measured 3.6 s
+    # end to end, and returning at all is the property under test.
     assert {:ok, {:error, %WebSockex.ConnError{original: :timeout}}} =
              Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
-
-    assert System.monotonic_time(:millisecond) - started < 3_000
   end
 
   test "a reconnect whose upgrade response trickles in fails at the deadline and retries" do

@@ -801,6 +801,27 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
+  describe "a frame arriving after unsubscribe" do
+    test "is neither delivered nor counted as coverage" do
+      # The venue keeps sending for a moment after an unsubscribe. Such a frame used to
+      # reach subscribers and re-enter delivery tracking, and a streaming route has no
+      # staleness window, so `coverage/1` answered `:stream` for it indefinitely.
+      feed = start_feed(socket: fake_socket(), subscriber: self(), symbols: ["AAPL"])
+
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %{symbol: "AAPL"}}
+      assert Feed.coverage(feed) == %{"AAPL" => :stream}
+
+      # `:no_route` here only means this test's feed has no live route; the set changed.
+      _reply = Feed.unsubscribe(feed, ["AAPL"])
+      assert Feed.wanted(feed) == []
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+
+      assert Feed.coverage(feed) == %{}
+      refute_received {:dp_exchange, :schwab, %{symbol: "AAPL"}}
+    end
+  end
+
   describe "back-pressure — a slow subscriber does not get an unbounded mailbox" do
     # `Core.Venue`'s `subscribe/2` doc promised this from the day the contract was written,
     # and no venue in this family implemented any of it: every one fanned out with a bare
@@ -823,7 +844,9 @@ defmodule DpExchange.Schwab.FeedTest do
 
     test "past its bound, a subscriber stops being sent to and its mailbox stops growing" do
       slow = stalled_subscriber()
-      feed = start_feed(socket: fake_socket(), subscriber: slow, max_queue_len: 3)
+
+      feed =
+        start_feed(socket: fake_socket(), subscriber: slow, symbols: ["AAPL"], max_queue_len: 3)
 
       for _each <- 1..10, do: send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
       # A call is answered only after every send above has been handled.
@@ -840,7 +863,10 @@ defmodule DpExchange.Schwab.FeedTest do
 
     test "a stalled subscriber is reported once, not once per dropped message" do
       slow = stalled_subscriber()
-      feed = start_feed(socket: fake_socket(), subscriber: slow, max_queue_len: 1)
+
+      feed =
+        start_feed(socket: fake_socket(), subscriber: slow, symbols: ["AAPL"], max_queue_len: 1)
+
       :ok = Feed.subscribe_notices(feed, to: self())
 
       for _each <- 1..2, do: send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
@@ -865,7 +891,9 @@ defmodule DpExchange.Schwab.FeedTest do
       # forwarded. Reporting `:not_covered` here would blame the venue for a consumer's own
       # backlog, and send an operator looking at the wrong system entirely.
       slow = stalled_subscriber()
-      feed = start_feed(socket: fake_socket(), subscriber: slow, max_queue_len: 1)
+
+      feed =
+        start_feed(socket: fake_socket(), subscriber: slow, symbols: ["AAPL"], max_queue_len: 1)
 
       for _each <- 1..5, do: send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
 

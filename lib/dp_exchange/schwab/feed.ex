@@ -877,9 +877,20 @@ defmodule DpExchange.Schwab.Feed do
   # reports what the VENUE delivered to this package, not what this package forwarded — a
   # symbol whose frames are being dropped for a stalled consumer is still arriving, and
   # reporting it as `:not_covered` would blame the venue for a consumer's own backlog.
+  #
+  # **A payload for a symbol no longer wanted is dropped, not delivered or counted.** A venue
+  # keeps sending for a moment after an unsubscribe, and those frames used to reach the
+  # subscribers who had just asked to stop. Worse, they re-entered delivery tracking, which
+  # `unsubscribe/2` had just pruned, and a streaming route has no staleness window. So one
+  # late frame left `coverage/1` answering `:stream` for an unsubscribed symbol
+  # indefinitely. Found 2026-09-27 by reading the path, the same shape `Core.PollingFeed`
+  # had for an in-flight fetch.
   def handle_info({:dp_exchange, :schwab, value} = message, state) do
-    state = state |> deliver(message) |> record_delivery(value)
-    {:noreply, state}
+    if unwanted?(value, state.wanted) do
+      {:noreply, state}
+    else
+      {:noreply, state |> deliver(message) |> record_delivery(value)}
+    end
   end
 
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
@@ -1577,4 +1588,10 @@ defmodule DpExchange.Schwab.Feed do
       {:dp_exchange, :schwab, notice}
     )
   end
+
+  # See the `{:dp_exchange, :schwab, value}` clause of `handle_info/2`.
+  defp unwanted?(%{symbol: symbol}, wanted) when is_binary(symbol),
+    do: not MapSet.member?(wanted, symbol)
+
+  defp unwanted?(_payload, _wanted), do: false
 end

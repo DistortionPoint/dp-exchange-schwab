@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A frame arriving after `unsubscribe/2` is no longer delivered or counted.** A venue
+  keeps sending for a moment after an unsubscribe. Those frames used to reach the
+  subscribers who had just asked to stop, and they re-entered delivery tracking, which
+  `unsubscribe/2` had just pruned. A streaming route has no staleness window, so one late
+  frame left `coverage/1` answering `:stream` for an unsubscribed symbol indefinitely.
+  `Feed` now drops a payload whose symbol it no longer wants.
+
 ## [0.2.70] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
