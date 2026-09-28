@@ -251,7 +251,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
         if String.contains?(conn.request_path, "userPreference") do
           send(test_pid, :bootstrap_started)
           # Stands in for a slow venue. The real budget is ~90s; 2s keeps the test quick
-          # while still being far longer than the 500ms this asserts a read answers within.
+          # while still being longer than the 1.5 s this asserts a read answers within.
           Process.sleep(2_000)
           Plug.Conn.resp(conn, 401, "no")
         else
@@ -269,13 +269,17 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
         )
 
       subscriber = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
-      assert_receive :bootstrap_started, 1_000
+      # A wait for an event, not the property: under a loaded suite the signed request took
+      # longer than one second to reach the plug (2026-09-28), so this waits five.
+      assert_receive :bootstrap_started, 5_000
 
       reader = Task.async(fn -> Feed.coverage(feed) end)
-      result = Task.yield(reader, 500) || Task.shutdown(reader, :brutal_kill)
+      # 1.5 s, still well inside the 2 s the bootstrap is held: an answer within it can only
+      # come from a feed that is not waiting on that call.
+      result = Task.yield(reader, 1_500) || Task.shutdown(reader, :brutal_kill)
 
       assert match?({:ok, _}, result),
-             "coverage/1 did not answer within 500ms while a subscribe was establishing " <>
+             "coverage/1 did not answer within 1.5 s while a subscribe was establishing " <>
                "the route — the Feed is blocked inside handle_call. got: #{inspect(result)}"
 
       # The subscribe still gets its own answer once the route settles; deferring the reply
