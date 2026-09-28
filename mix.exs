@@ -101,7 +101,9 @@ defmodule DpExchangeSchwab.MixProject do
       # "What stayed a dependency, and why".
       {:websockex, "== 0.5.1"},
       {:jason, "~> 1.4"},
-      {:decimal, "~> 2.0"},
+      # `or ~> 3.0`: decimal 3 makes the CVE-2026-32686 limits the default. This package's
+      # suite and its REST and frame fuzz pass on 3.1.1 (2026-09-27).
+      {:decimal, "~> 2.0 or ~> 3.0"},
 
       # Dev/Test
       {:usage_rules, "~> 1.2", only: :dev},

@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`decimal` may now resolve to 3.x** (`~> 2.0 or ~> 3.0`), alongside `dp_exchange_core`
+  0.3.41, which widened the same way. Decimal 3.0 makes the mitigations for
+  CVE-2026-32686 the default, so an input such as `1e1000000000` is rejected rather than
+  materialised. This package's full suite, its REST mutation fuzz and its socket frame
+  fuzz were run on 3.1.1 first, with numbers of more than 34 digits added to the fuzz
+  values, since 3.x refuses to parse those. All pass with no raise and no hang.
+
 ## [0.2.64] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
