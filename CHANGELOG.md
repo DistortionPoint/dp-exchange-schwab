@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.82] - 2026-09-29
+
 ### Fixed
 
 - `get_symbols/2` skips an instrument row that is not an object, or whose `symbol` is not a
