@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.81] - 2026-09-29
+
 ### Fixed
 
 - A quote whose `lastPrice` is `0`, an instrument that has not traded, falls back to `mark`
