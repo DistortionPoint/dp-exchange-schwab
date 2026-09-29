@@ -803,7 +803,7 @@ defmodule DpExchange.Schwab.Rest do
   def get_instrument(cusip, credentials, opts) when is_binary(cusip) do
     path = "/instruments/" <> URI.encode(cusip)
 
-    with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: {:ok, body}
+    with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
   end
 
   @doc """
@@ -1357,14 +1357,20 @@ defmodule DpExchange.Schwab.Rest do
   One transaction by id — `GET /accounts/{accountNumber}/transactions/{transactionId}`.
 
   The id is Schwab's own integer, from a row `get_transactions/3` returned.
+
+  **The venue documents an array here**, not one object: the OpenAPI response is `type:
+  array` of `Transaction`. The body is returned as sent in either shape; anything that is
+  neither an object nor a list is refused. The spec said `map()` while the documented shape
+  is a list, which is the wrong promise to make to a caller pattern-matching on it.
   """
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
-          {:ok, map()} | {:error, term()} | {:refused, term()}
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts)
       when is_binary(account_hash) do
     path = "/accounts/" <> account_hash <> "/transactions/" <> to_string(transaction_id)
 
-    with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts), do: {:ok, body}
+    with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
+         do: object_or_list(body)
   end
 
   @doc """
@@ -1375,14 +1381,21 @@ defmodule DpExchange.Schwab.Rest do
   carries the account nicknames, the default account, and the display preferences a caller
   may want.
 
+  **The venue documents an array** of `UserPreference`; this package's fixtures have always
+  used a single object. Both are returned as sent, and `StreamerInfo` reads both. Anything
+  else is refused.
+
   Takes no parameters.
   """
   @spec get_user_preference(map(), keyword()) ::
-          {:ok, map()} | {:error, term()} | {:refused, term()}
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_user_preference(credentials, opts) do
     with {:ok, body} <- get(trader_url(opts) <> "/userPreference", credentials, opts),
-         do: {:ok, body}
+         do: object_or_list(body)
   end
+
+  defp object_or_list(body) when is_map(body) or is_list(body), do: {:ok, body}
+  defp object_or_list(_other), do: {:error, :unexpected_response_shape}
 
   # Only the parameters the caller actually gave. An empty query string is no `?` at all,
   # because a bare `?` is a different URL and this venue signs nothing, so the only cost of

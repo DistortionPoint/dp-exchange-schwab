@@ -31,6 +31,18 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- The streaming bootstrap reads the `/userPreference` response in the shape the vendor's
+  OpenAPI documents, an array of `UserPreference`. `StreamerInfo.from_user_preference/1`
+  accepted only a single object and answered `:no_streamer_info` for the array, so a feed
+  given the documented shape fell back to polling every time. A one-element array is read as
+  its element. More than one is `{:error, :ambiguous_user_preference}`, which falls back to
+  polling rather than guessing which preference is the signed-in user's.
+- `get_user_preference/2` and `get_transaction/4` specs now say `map() | [map()]`, as the
+  vendor documents both as arrays, and either refuses a body that is neither.
+  `get_instrument/3` refuses a body that is not an object, as its spec already promised.
+
 ## [0.2.77] - 2026-09-29
 
 ### Fixed

@@ -46,8 +46,21 @@ defmodule DpExchange.Schwab.StreamerInfo do
   A `LOGIN` sent without `SchwabClientCorrelId` is refused by the venue with a message
   about the connection rather than about the field, and a package that let the `nil` through
   would surface that as a connection fault.
+
+  **Both the documented shape and the one this package was written against are read.** The
+  vendor's OpenAPI answers `/userPreference` with an *array* of `UserPreference`, while every
+  fixture here, and this function, assumed one object. Given the documented array, this
+  answered `:no_streamer_info`, and the feed fell back to polling every time without ever
+  saying streaming was available. A one-element array is read as its element. More than one
+  is refused rather than guessing which preference is the signed-in user's: the result is a
+  poll fallback, which is slower, not wrong.
   """
-  @spec from_user_preference(map()) :: {:ok, t()} | {:error, term()}
+  @spec from_user_preference(map() | [map()]) :: {:ok, t()} | {:error, term()}
+  def from_user_preference([%{} = preference]), do: from_user_preference(preference)
+
+  def from_user_preference([_first, _second | _rest]),
+    do: {:error, :ambiguous_user_preference}
+
   def from_user_preference(%{"streamerInfo" => [info | _rest]}), do: build(info)
   def from_user_preference(%{"streamerInfo" => %{} = info}), do: build(info)
   def from_user_preference(_body), do: {:error, :no_streamer_info}

@@ -95,6 +95,28 @@ defmodule DpExchange.Schwab.StreamerTest do
     test "a response with no streamerInfo is an error" do
       assert {:error, :no_streamer_info} = StreamerInfo.from_user_preference(%{})
     end
+
+    test "the documented array shape is read, not reported as no streamer info" do
+      # The vendor's OpenAPI answers `/userPreference` with an array of `UserPreference`.
+      # Given it, this said `:no_streamer_info` and the feed never streamed.
+      preference = %{
+        "streamerInfo" => [
+          %{
+            "streamerSocketUrl" => "wss://streamer-api.schwab.com/ws",
+            "schwabClientCustomerId" => "cust-1",
+            "schwabClientCorrelId" => "corr-1",
+            "schwabClientChannel" => "IO",
+            "schwabClientFunctionId" => "APIAPP"
+          }
+        ]
+      }
+
+      assert {:ok, %{socket_url: "wss://streamer-api.schwab.com/ws"}} =
+               StreamerInfo.from_user_preference([preference])
+
+      assert {:error, :ambiguous_user_preference} =
+               StreamerInfo.from_user_preference([preference, preference])
+    end
   end
 
   # The fifteen documented services, asserted through the module's real behaviour
