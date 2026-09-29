@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A quote whose `lastPrice` is `0`, an instrument that has not traded, falls back to `mark`
+  as when `lastPrice` is absent. The `||` chain stopped at the `0` and delivered a price of
+  zero. A zero `nAV` with no other price is refused.
+- A `quoteTime` of `0` is no time: `tradeTime` is used, or the venue time is `nil`. A zero
+  became a venue time of 1970-01-01, which every staleness check reads as decades old.
+
 ## [0.2.80] - 2026-09-29
 
 ### Fixed

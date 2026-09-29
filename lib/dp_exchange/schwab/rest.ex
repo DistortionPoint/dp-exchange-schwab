@@ -308,10 +308,24 @@ defmodule DpExchange.Schwab.Rest do
   # `LEVELONE_EQUITIES`'s `previous_close` is refused for elsewhere in this package. Absent
   # here, this still fails closed exactly as the equity path does.
   defp quoted_price(row) do
-    case row["lastPrice"] || row["mark"] || row["nAV"] do
+    case Enum.find(["lastPrice", "mark", "nAV"], &stated_price?(row[&1])) do
       nil -> {:error, :unexpected_response_shape}
-      "" -> {:error, :unexpected_response_shape}
-      price -> {:ok, price}
+      field -> {:ok, row[field]}
+    end
+  end
+
+  # **Zero is not a price.** `row["lastPrice"] || row["mark"] || ...` stopped at the first
+  # value that was not `nil`, and `0` is not `nil`: an instrument that has not traded, whose
+  # quote carries `"lastPrice": 0`, came back as a price of zero, and the `mark` this chain
+  # exists to fall back to was never reached. The same `||`-on-a-number mistake read every
+  # short position's P/L as zero (see `pnl_for_side/2`). A readable zero or negative is
+  # skipped like an absent field.
+  defp stated_price?(value) do
+    case decimal(value) do
+      %Decimal{} = price -> Decimal.positive?(price)
+      # Absent is skipped. Present but unreadable is NOT skipped: it is selected, and
+      # `required_decimal/2` then refuses it by name, rather than falling past it to `mark`.
+      nil -> value not in [nil, ""]
     end
   end
 
@@ -326,13 +340,27 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # A zero epoch is "not stated", not 1970. `quoteTime || tradeTime` stopped at `0` exactly as
+  # `quoted_price/1` stopped at a zero price, and `DateTime.from_unix(0)` answered a venue time
+  # of 1970-01-01, which every staleness check then reads as fifty years old. The first
+  # POSITIVE time is used; with none, the time is unstated.
   defp venue_time(row) do
-    case row["quoteTime"] || row["tradeTime"] do
+    case Enum.find([row["quoteTime"], row["tradeTime"]], &positive_epoch?/1) do
       nil -> {:error, :missing_venue_timestamp}
-      "" -> {:error, :missing_venue_timestamp}
       raw -> parse_time(raw)
     end
   end
+
+  defp positive_epoch?(value) when is_integer(value), do: value > 0
+
+  defp positive_epoch?(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {epoch, ""} -> epoch > 0
+      _not_an_epoch -> value != ""
+    end
+  end
+
+  defp positive_epoch?(_absent), do: false
 
   defp parse_time(value) when is_integer(value) and value > 100_000_000_000,
     do: DateTime.from_unix(value, :millisecond)

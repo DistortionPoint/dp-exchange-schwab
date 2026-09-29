@@ -93,6 +93,27 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
     end
 
+    test "a zero last price is no price: the mark is used, as when last is absent" do
+      # `lastPrice || mark` stopped at `0`, which is not nil, so an untraded instrument
+      # quoted at zero and the mark was never reached.
+      body = quote_body(%{"lastPrice" => 0, "mark" => 101.5})
+
+      assert {:ok, quote} =
+               Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(quote.price, Decimal.from_float(101.5))
+    end
+
+    test "a zero quote time is no time: the trade time is used, never 1970" do
+      body =
+        quote_body(%{"lastPrice" => 227.5, "quoteTime" => 0, "tradeTime" => 1_787_936_147_000})
+
+      assert {:ok, quote} =
+               Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert quote.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+    end
+
     test "a quote the venue did not date still delivers its price" do
       # This asserted `{:error, :missing_venue_timestamp}` until 2026-09-13. That refused a
       # real, guarded traded price over a field `Core.Types.Quote` does not enforce — it

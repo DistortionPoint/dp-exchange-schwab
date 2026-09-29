@@ -151,20 +151,18 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert top.venue_time == DateTime.from_unix!(1_644_854_683_672, :millisecond)
     end
 
-    test "the same MultiCriteriaSearch example's AAAIX row is a mutual fund: nAV, not lastPrice",
+    test "the same MultiCriteriaSearch example's AAAIX row, a placeholder fund, is refused",
          %{body: body} do
-      assert {:ok, quoted} =
+      # The vendor's own example gives this fund `nAV: 0` and zero times. This test used to
+      # pin that as a quote of price 0 at venue time 1970-01-01, which is the `||`-on-zero
+      # bug `quoted_price/1` and `venue_time/1` now refuse: zero is no price and no time,
+      # and with no other price field the quote cannot be built.
+      assert {:error, :unexpected_response_shape} =
                Schwab.get_price("AAAIX",
                  credentials: @creds,
                  plug: responding(body),
                  retry_attempts: 0
                )
-
-      # nAV is 0 in the vendor's own example, and 0 is a real quoted value, not an
-      # absence — `quoted_price/1` only treats `nil`/`""` as absent.
-      assert Decimal.equal?(quoted.price, Decimal.new(0))
-      assert Decimal.equal?(quoted.volume, Decimal.new(0))
-      assert quoted.venue_time == DateTime.from_unix!(0)
 
       # QuoteMutualFund has no bidPrice/askPrice at all in the vendor's own schema — the
       # vendor's own MultiCriteriaSearch example agrees, and get_top_of_book/2 must refuse
