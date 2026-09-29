@@ -67,6 +67,11 @@ defmodule DpExchange.Schwab.Auth do
   password. Both return `{:refused, {:reauthorization_required, status, detail}}`, which
   names the remedy — a person, at a browser — rather than an error a caller would retry
   against a credential that can never succeed.
+
+  A refusal whose body says `invalid_client` is different, and returns
+  `{:refused, {:client_credentials_rejected, status, detail}}`: the app's `client_id` or
+  `client_secret` is wrong, the grant may be fine, and the remedy is configuration rather
+  than a login. Do not retry it either.
   """
 
   alias DpExchange.Core.{Config, HttpClient}
@@ -175,6 +180,9 @@ defmodule DpExchange.Schwab.Auth do
   - `{:refused, {:reauthorization_required, status, detail}}` — Schwab rejected the
     refresh token. **Terminal.** Seven days elapsed with no refresh, or the user reset
     their password. Only a person at a browser can fix it; a caller must not retry.
+  - `{:refused, {:client_credentials_rejected, status, detail}}` — the venue answered
+    `invalid_client`: the app's `client_id` or `client_secret` is wrong. The grant may be
+    intact; fix the configuration, and do not send a person to log in.
   - `{:error, :missing_rotated_refresh_token}` — Schwab accepted the refresh and returned
     an access token but no replacement refresh token. Treated as a failure rather than a
     success, because the old token is already spent and reporting success would hand back
@@ -235,7 +243,7 @@ defmodule DpExchange.Schwab.Auth do
              do: merge_tokens(credentials, decoded, opts)
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-        {:refused, {:reauthorization_required, status, detail(refusal_body(response))}}
+        refused_refresh(status, refusal_body(response))
 
       {:ok, %{status: status, body: response}} ->
         {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
@@ -244,6 +252,23 @@ defmodule DpExchange.Schwab.Auth do
         {:error, reason}
     end
   end
+
+  # **`invalid_client` names the app, not the grant.** RFC 6749 §5.2 gives the token endpoint
+  # that error code for exactly one case: the client pair failed to authenticate. Every refusal
+  # used to become `:reauthorization_required`, the terminal answer that sends a person to a
+  # browser. So a rotated or mistyped `client_secret` was reported as a dead grant, and the
+  # person who logged in again got the same refusal, because their grant had been fine all
+  # along. The blank-secret guard in `refresh/2` caught the empty case of this; a wrong
+  # non-blank secret still reached here.
+  #
+  # Only the explicit code is read. Schwab's reference does not enumerate its token errors, so
+  # this is the OAuth standard's wording, not a measured Schwab response. A refusal that does
+  # not say `invalid_client` keeps the terminal answer it always had.
+  defp refused_refresh(status, %{"error" => "invalid_client"} = body),
+    do: {:refused, {:client_credentials_rejected, status, detail(body)}}
+
+  defp refused_refresh(status, body),
+    do: {:refused, {:reauthorization_required, status, detail(body)}}
 
   # The venue's own `expires_in` is used rather than a constant of ours. The
   # documentation says 1800 seconds; if that ever changes, the response is right and a

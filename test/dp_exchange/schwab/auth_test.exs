@@ -270,6 +270,15 @@ defmodule DpExchange.Schwab.AuthTest do
                )
     end
 
+    test "a rejected client pair is not a dead grant" do
+      # RFC 6749 §5.2's `invalid_client`: the app's secret is wrong, and sending a person to
+      # log in again would not fix it.
+      body = %{"error" => "invalid_client", "error_description" => "client auth failed"}
+
+      assert {:refused, {:client_credentials_rejected, 401, "client auth failed"}} =
+               Auth.refresh(@creds, plug: responding(body, 401), retry_attempts: 0)
+    end
+
     test "a refusal whose body is not JSON still names the status" do
       plug = fn conn -> Plug.Conn.resp(conn, 401, "<html>gateway</html>") end
 

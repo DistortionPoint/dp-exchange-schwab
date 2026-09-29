@@ -215,6 +215,11 @@ carrying a fresh seven days. So:
 - `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. Seven days
   elapsed with no refresh, or the user reset their password. Send a person to the login
   page; do not retry.
+- `{:refused, {:client_credentials_rejected, _status, _detail}}` is **not** a dead grant.
+  The venue answered `invalid_client`: your app's `client_id` or `client_secret` is wrong
+  (rotated, mistyped, or from another app). Fix the configuration; a person logging in again
+  would get the same refusal. This code is the OAuth standard's (RFC 6749 §5.2); Schwab's
+  reference does not list its token errors, and it has not yet been observed from Schwab.
 
 Refreshing at least once a week means never needing a person again.
 

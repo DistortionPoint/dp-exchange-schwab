@@ -378,6 +378,8 @@ defmodule DpExchange.Schwab do
     carried is already spent by this call; the response's is its only replacement.
   - **`{:refused, {:reauthorization_required, status, detail}}` is terminal.** Only a person
     at a browser can fix it — do not retry.
+  - **`{:refused, {:client_credentials_rejected, status, detail}}`** means the venue said
+    `invalid_client`: the app's client pair is wrong, not the grant. Fix the configuration.
   - Never retried by this call itself, and cannot be made to retry through `opts`.
 
   This was previously reachable only by calling `Auth.refresh/2` directly, which meant

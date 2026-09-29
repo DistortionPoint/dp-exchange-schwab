@@ -31,6 +31,17 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A refresh refused with `invalid_client` now returns
+  `{:refused, {:client_credentials_rejected, status, detail}}` instead of
+  `{:refused, {:reauthorization_required, ...}}`. That error code means the app's client
+  pair is wrong, not that the grant is dead (RFC 6749 §5.2), so a rotated or mistyped
+  `client_secret` used to send a person to log in again, and the login did not help. Any
+  other refusal keeps the terminal answer. The code is the OAuth standard's and has not yet
+  been observed from Schwab.
+- Locked `dp_exchange_core` 0.3.47.
+
 ## [0.2.74] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
