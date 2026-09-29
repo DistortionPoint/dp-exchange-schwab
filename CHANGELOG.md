@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.80] - 2026-09-29
+
 ### Fixed
 
 - A short position's `unrealised_pnl` is read from `shortOpenProfitLoss`. It was
