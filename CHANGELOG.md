@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.77] - 2026-09-29
+
 ### Fixed
 
 - `get_option_expirations/3` refuses an `expirationList` that is not a list, instead of
