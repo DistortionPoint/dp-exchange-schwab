@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.79] - 2026-09-29
+
 ### Fixed
 
 Checked against the vendor's committed OpenAPI documents and Streamer guide.
