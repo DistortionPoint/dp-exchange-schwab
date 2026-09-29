@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A short position's `unrealised_pnl` is read from `shortOpenProfitLoss`. It was
+  `longOpenProfitLoss || shortOpenProfitLoss`, and `0` is truthy, so a short position whose
+  reply carried `"longOpenProfitLoss": 0`, the ordinary shape, reported zero P/L. The field
+  is now chosen by the position's side. Found by a spec-example test.
+
+### Added
+
+- Spec-example tests: every REST call and every Streamer service this package decodes,
+  driven with the vendor's documented examples (or cited schema-built instances, since the
+  trading document publishes none), with requests checked against the documented
+  parameters. Fixtures and their sources are under `test/fixtures/spec_examples/`.
+
 ## [0.2.79] - 2026-09-29
 
 ### Fixed

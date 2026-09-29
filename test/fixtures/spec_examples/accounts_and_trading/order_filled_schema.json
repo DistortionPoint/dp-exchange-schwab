@@ -1,0 +1,34 @@
+{
+  "session": "NORMAL",
+  "duration": "DAY",
+  "orderType": "LIMIT",
+  "complexOrderStrategyType": "NONE",
+  "quantity": 10,
+  "filledQuantity": 10,
+  "remainingQuantity": 0,
+  "price": 190.25,
+  "orderLegCollection": [
+    {
+      "orderLegType": "EQUITY",
+      "legId": 1,
+      "instrument": {
+        "assetType": "EQUITY",
+        "cusip": "037833100",
+        "symbol": "AAPL",
+        "description": "Apple Inc"
+      },
+      "instruction": "BUY",
+      "positionEffect": "OPENING",
+      "quantity": 10,
+      "quantityType": "SHARES"
+    }
+  ],
+  "orderStrategyType": "SINGLE",
+  "orderId": 1000000001,
+  "cancelable": false,
+  "editable": false,
+  "status": "FILLED",
+  "enteredTime": "2026-01-02T15:04:05+0000",
+  "closeTime": "2026-01-02T15:04:07+0000",
+  "accountNumber": 70123456
+}

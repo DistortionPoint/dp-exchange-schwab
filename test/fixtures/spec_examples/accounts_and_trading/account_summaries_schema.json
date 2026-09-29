@@ -1,0 +1,104 @@
+[
+  {
+    "securitiesAccount": {
+      "type": "MARGIN",
+      "accountNumber": "70123456",
+      "roundTrips": 0,
+      "isDayTrader": false,
+      "isClosingOnlyRestricted": false,
+      "pfcbFlag": false,
+      "positions": [
+        {
+          "shortQuantity": 0,
+          "longQuantity": 100,
+          "settledLongQuantity": 100,
+          "settledShortQuantity": 0,
+          "averagePrice": 150.25,
+          "currentDayProfitLoss": 25,
+          "currentDayProfitLossPercentage": 0.17,
+          "longOpenProfitLoss": 725,
+          "shortOpenProfitLoss": 0,
+          "marketValue": 22750,
+          "maintenanceRequirement": 6825,
+          "instrument": {
+            "assetType": "EQUITY",
+            "cusip": "037833100",
+            "symbol": "AAPL",
+            "description": "Apple Inc",
+            "instrumentId": 1,
+            "netChange": 0.25
+          }
+        },
+        {
+          "shortQuantity": 50,
+          "longQuantity": 0,
+          "settledLongQuantity": 0,
+          "settledShortQuantity": 50,
+          "averagePrice": 12.5,
+          "currentDayProfitLoss": -10,
+          "currentDayProfitLossPercentage": -1.6,
+          "longOpenProfitLoss": 0,
+          "shortOpenProfitLoss": -75,
+          "marketValue": 700,
+          "maintenanceRequirement": 350,
+          "instrument": {
+            "assetType": "EQUITY",
+            "cusip": "260505104",
+            "symbol": "BAC",
+            "description": "Bank Of America Corp",
+            "instrumentId": 2,
+            "netChange": -0.5
+          }
+        }
+      ],
+      "initialBalances": {},
+      "currentBalances": {
+        "availableFunds": 15000,
+        "buyingPower": 30000,
+        "equity": 45825,
+        "longMarginValue": 22750,
+        "maintenanceRequirement": 6825,
+        "sma": 15000
+      },
+      "projectedBalances": {}
+    }
+  },
+  {
+    "securitiesAccount": {
+      "type": "CASH",
+      "accountNumber": "70998877",
+      "roundTrips": 0,
+      "isDayTrader": false,
+      "isClosingOnlyRestricted": false,
+      "pfcbFlag": false,
+      "positions": [
+        {
+          "shortQuantity": 0,
+          "longQuantity": 0,
+          "averagePrice": 0,
+          "currentDayProfitLoss": 0,
+          "currentDayProfitLossPercentage": 0,
+          "longOpenProfitLoss": 0,
+          "shortOpenProfitLoss": 0,
+          "marketValue": 0,
+          "instrument": {
+            "assetType": "EQUITY",
+            "cusip": "78462F103",
+            "symbol": "SPY",
+            "description": "SPDR S&P 500 ETF Trust",
+            "instrumentId": 3,
+            "netChange": 0
+          }
+        }
+      ],
+      "initialBalances": {},
+      "currentBalances": {
+        "cashAvailableForTrading": 5000,
+        "cashAvailableForWithdrawal": 5000,
+        "totalCash": 5000,
+        "unsettledCash": 0
+      },
+      "projectedBalances": {}
+    }
+  }
+]

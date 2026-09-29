@@ -1,0 +1,38 @@
+{
+  "securitiesAccount": {
+    "type": "CASH",
+    "accountNumber": "70998877",
+    "roundTrips": 0,
+    "isDayTrader": false,
+    "isClosingOnlyRestricted": false,
+    "pfcbFlag": false,
+    "positions": [
+      {
+        "shortQuantity": 0,
+        "longQuantity": 0,
+        "averagePrice": 0,
+        "currentDayProfitLoss": 0,
+        "currentDayProfitLossPercentage": 0,
+        "longOpenProfitLoss": 0,
+        "shortOpenProfitLoss": 0,
+        "marketValue": 0,
+        "instrument": {
+          "assetType": "EQUITY",
+          "cusip": "78462F103",
+          "symbol": "SPY",
+          "description": "SPDR S&P 500 ETF Trust",
+          "instrumentId": 3,
+          "netChange": 0
+        }
+      }
+    ],
+    "initialBalances": {},
+    "currentBalances": {
+      "cashAvailableForTrading": 5000,
+      "cashAvailableForWithdrawal": 5000,
+      "totalCash": 5000,
+      "unsettledCash": 0
+    },
+    "projectedBalances": {}
+  }
+}

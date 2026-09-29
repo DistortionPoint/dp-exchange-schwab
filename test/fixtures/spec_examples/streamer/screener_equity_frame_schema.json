@@ -1,0 +1,19 @@
+{
+  "0": "$DJI_PERCENT_CHANGE_UP_60",
+  "1": 1714949592301,
+  "2": "PERCENT_CHANGE_UP",
+  "3": 60,
+  "4": [
+    {
+      "description": "Dow jones",
+      "lastPrice": 100,
+      "marketShare": 0,
+      "netChange": 10,
+      "netPercentChange": 1.5,
+      "symbol": "$DJI",
+      "totalVolume": 100,
+      "trades": 5,
+      "volume": 100
+    }
+  ]
+}

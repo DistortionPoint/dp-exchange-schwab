@@ -1,0 +1,28 @@
+{
+  "accounts": [
+    {
+      "accountNumber": "70123456",
+      "primaryAccount": true,
+      "type": "MARGIN",
+      "nickName": "Trading",
+      "accountColor": "Green",
+      "displayAcctId": "...456",
+      "autoPositionEffect": false
+    }
+  ],
+  "streamerInfo": [
+    {
+      "streamerSocketUrl": "wss://streamer-api.schwab.com/ws",
+      "schwabClientCustomerId": "cust-1",
+      "schwabClientCorrelId": "corr-1",
+      "schwabClientChannel": "IO",
+      "schwabClientFunctionId": "APIAPP"
+    }
+  ],
+  "offers": [
+    {
+      "level2Permissions": true,
+      "mktDataPermission": "NP"
+    }
+  ]
+}

@@ -1286,13 +1286,29 @@ defmodule DpExchange.Schwab.Rest do
       mark_price: nil,
       notional_value: decimal(row["marketValue"]),
       realised_pnl: nil,
-      unrealised_pnl: decimal(row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]),
+      unrealised_pnl: decimal(pnl_for_side(row, side)),
       liquidation_price: nil,
       leverage: nil,
       venue_time: nil,
       provider: :schwab
     }
   end
+
+  # **Read by the side this row already is, not by an `||` fallback.** `Position`
+  # (AT:2123-2201) types `longOpenProfitLoss` and `shortOpenProfitLoss` as plain
+  # `number`s, with nothing in the schema that says the unused side's field is omitted
+  # rather than sent as `0` — and `0` is truthy in Elixir. So
+  # `row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]` read `0` for every SHORT
+  # position whose response carried `"longOpenProfitLoss": 0` (the ordinary shape for an
+  # account with no long leg in that instrument, not an edge case), and reported no
+  # unrealised P/L for a position that has one. `position_side/2` has already decided
+  # `:long` or `:short` from `longQuantity`/`shortQuantity` by the time this runs, so the
+  # correct field is known rather than guessed at by presence. Found by a spec-example
+  # test built from the vendor's own `Position` schema (test/fixtures/spec_examples/README.md),
+  # not by inspection — the schema does not forbid both fields carrying real numbers, and
+  # a short position with a non-zero `shortOpenProfitLoss` is exactly what exposed it.
+  defp pnl_for_side(row, :long), do: row["longOpenProfitLoss"]
+  defp pnl_for_side(row, :short), do: row["shortOpenProfitLoss"]
 
   # Two fields, not one signed number. A row with both zero is a closed position the venue
   # still lists — skipped rather than reported as an open position of size nothing.

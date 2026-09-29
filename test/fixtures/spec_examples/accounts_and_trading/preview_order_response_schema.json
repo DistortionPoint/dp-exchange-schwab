@@ -1,0 +1,64 @@
+{
+  "orderId": 0,
+  "orderStrategy": {
+    "accountNumber": "70123456",
+    "advancedOrderType": "NONE",
+    "orderStrategyType": "SINGLE",
+    "session": "NORMAL",
+    "status": "ACCEPTED",
+    "duration": "DAY",
+    "filledQuantity": 0,
+    "orderType": "LIMIT",
+    "orderValue": 6450,
+    "price": 6.45,
+    "quantity": 10,
+    "remainingQuantity": 10,
+    "orderLegs": [
+      {
+        "askPrice": 6.5,
+        "bidPrice": 6.4,
+        "lastPrice": 6.45,
+        "markPrice": 6.45,
+        "projectedCommission": 0,
+        "quantity": 10,
+        "finalSymbol": "XYZ   240315C00500000",
+        "legId": 1,
+        "assetType": "OPTION",
+        "instruction": "BUY_TO_OPEN"
+      }
+    ]
+  },
+  "orderValidationResult": {
+    "accepts": [
+      {
+        "activityMessage": "Order accepted"
+      }
+    ]
+  },
+  "commissionAndFee": {
+    "commission": {
+      "commissionLegs": [
+        {
+          "commissionValues": [
+            {
+              "value": 0,
+              "type": "COMMISSION"
+            }
+          ]
+        }
+      ]
+    },
+    "fee": {
+      "feeLegs": [
+        {
+          "feeValues": [
+            {
+              "value": 0,
+              "type": "OPT_REG_FEE"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

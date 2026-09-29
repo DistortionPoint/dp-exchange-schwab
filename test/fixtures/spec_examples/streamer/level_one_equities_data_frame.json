@@ -1,0 +1,53 @@
+{
+  "data": [
+    {
+      "service": "LEVELONE_EQUITIES",
+      "timestamp": 1714949592301,
+      "command": "SUBS",
+      "content": [
+        {
+          "1": 76.08,
+          "2": 76.49,
+          "3": 76.44,
+          "4": 3,
+          "5": 1,
+          "8": 5414735,
+          "10": 76.47,
+          "key": "SCHW",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "COE",
+          "cusip": "808513105"
+        },
+        {
+          "1": 183.75,
+          "2": 183.8,
+          "3": 183.8,
+          "4": 1,
+          "5": 2,
+          "8": 163224109,
+          "10": 187,
+          "key": "AAPL",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "COE",
+          "cusip": "037833100"
+        },
+        {
+          "1": 512.3,
+          "2": 512.32,
+          "3": 511.29,
+          "4": 8,
+          "5": 1,
+          "8": 72756709,
+          "10": 512.55,
+          "key": "SPY",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "78462F103"
+        }
+      ]
+    }
+  ]
+}

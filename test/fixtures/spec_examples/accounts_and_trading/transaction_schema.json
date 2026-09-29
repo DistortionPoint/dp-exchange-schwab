@@ -1,0 +1,31 @@
+[
+  {
+    "activityId": 900000001,
+    "time": "2026-01-02T15:05:00+0000",
+    "accountNumber": "70123456",
+    "type": "TRADE",
+    "status": "VALID",
+    "subAccount": "CASH",
+    "tradeDate": "2026-01-02T15:04:07+0000",
+    "settlementDate": "2026-01-04T00:00:00+0000",
+    "positionId": 55,
+    "orderId": 1000000001,
+    "netAmount": -1902.5,
+    "activityType": "EXECUTION",
+    "transferItems": [
+      {
+        "instrument": {
+          "assetType": "EQUITY",
+          "cusip": "037833100",
+          "symbol": "AAPL",
+          "description": "Apple Inc",
+          "type": "COMMON_STOCK"
+        },
+        "amount": 10,
+        "cost": -1902.5,
+        "price": 190.25,
+        "positionEffect": "OPENING"
+      }
+    ]
+  }
+]
