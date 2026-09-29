@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.78] - 2026-09-29
+
 ### Fixed
 
 - The streaming bootstrap reads the `/userPreference` response in the shape the vendor's
