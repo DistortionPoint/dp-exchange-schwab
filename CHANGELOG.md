@@ -31,6 +31,19 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_option_expirations/3` refuses an `expirationList` that is not a list, instead of
+  answering `{:ok, []}`, "no expirations". `get_screener/3` refuses a `screeners` that is not
+  a list, which raised in the caller's process before. A
+  screener row that is not an object is dropped like one with no symbol, instead of raising.
+- An order whose `orderLegCollection` holds a leg that is not an object, or is not a list, is
+  refused. Such legs were filtered out, and a two-leg spread with one unreadable leg came
+  back as a single-leg order carrying the other leg's symbol and side.
+- `get_movers/3` and `get_market/3` refuse a body that is not an object, as their specs
+  already promised. They returned the body as sent, so a list reached `get_screener/3`,
+  which read it as an object and raised.
+
 ## [0.2.76] - 2026-09-29
 
 ### Fixed

@@ -747,7 +747,9 @@ defmodule DpExchange.Schwab.Rest do
 
       path = "/movers/" <> URI.encode(universe) <> query
 
-      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: {:ok, body}
+      # `object/1`, so the `{:ok, map()}` in this spec is true. It returned the body as sent,
+      # and a list body reached `get_screener/3`, which reads it as an object.
+      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
     else
       {:error, {:unknown_movers_universe, universe}}
     end
@@ -777,7 +779,9 @@ defmodule DpExchange.Schwab.Rest do
       query = query_string(%{"date" => chain_value(Keyword.get(opts, :date))})
       path = "/markets/" <> market <> query
 
-      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: {:ok, body}
+      # `object/1`, so the `{:ok, map()}` in this spec is true. It returned the body as sent,
+      # and a caller reading market hours off a list got whatever the venue sent instead.
+      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
     else
       {:error, {:unknown_market, market}}
     end
@@ -967,11 +971,10 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_option_expirations(String.t(), map(), keyword()) ::
           {:ok, [Date.t()]} | {:error, term()} | {:refused, term()}
   def get_option_expirations(underlying, credentials, opts) when is_binary(underlying) do
-    with {:ok, body} <- get_expiration_chain(underlying, credentials, opts) do
+    with {:ok, body} <- get_expiration_chain(underlying, credentials, opts),
+         {:ok, rows} <- list_field(body, "expirationList") do
       dates =
-        body
-        |> Map.get("expirationList", [])
-        |> List.wrap()
+        rows
         |> Enum.map(&expiration_date/1)
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
@@ -990,6 +993,26 @@ defmodule DpExchange.Schwab.Rest do
 
   defp expiration_date(_row), do: nil
 
+  # **The list a reply is about, or a refusal — never a wrapped guess.** Both callers used
+  # `Map.get(body, key, []) |> List.wrap()`. A value that was not a list came back wrapped as
+  # a one-element list, and then:
+  #
+  #   * `get_option_expirations/3` found no date in it and answered `{:ok, []}`, "this
+  #     underlying has no expirations", from a reply that never listed them;
+  #   * `get_screener/3` read `row["symbol"]` off a string and raised in the caller's
+  #     process.
+  #
+  # Both callers hand this an object — a body that is not one is refused before it gets
+  # here — so there is no clause for anything else. An absent or `null` field is an empty
+  # list; the venue omits empty collections.
+  defp list_field(%{} = body, key) do
+    case Map.get(body, key) do
+      rows when is_list(rows) -> {:ok, rows}
+      nil -> {:ok, []}
+      _unreadable -> {:error, :unexpected_response_shape}
+    end
+  end
+
   @doc """
   A mover list as `Types.ScreenerResult` — `GET /movers/{symbol_id}`.
 
@@ -1003,11 +1026,10 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_screener(String.t(), map(), keyword()) ::
           {:ok, [ScreenerResult.t()]} | {:error, term()} | {:refused, term()}
   def get_screener(name, credentials, opts) do
-    with {:ok, body} <- get_movers(name, credentials, opts) do
+    with {:ok, body} <- get_movers(name, credentials, opts),
+         {:ok, screeners} <- list_field(body, "screeners") do
       rows =
-        body
-        |> Map.get("screeners", [])
-        |> List.wrap()
+        screeners
         |> Enum.with_index(1)
         # A row that cannot name its instrument is dropped rather than published under an
         # empty one. `Core.Types.ScreenerResult` enforces `:symbol` and `new/1` refuses a
@@ -1020,8 +1042,10 @@ defmodule DpExchange.Schwab.Rest do
         # returned it in. `rank` is that position and nothing else — closing the gap would
         # re-rank the list, which is what the ordering comment above already rules out.
         |> Enum.flat_map(fn {row, rank} ->
-          case row["symbol"] do
-            symbol when is_binary(symbol) and symbol != "" ->
+          # Matched on the row, not `row["symbol"]`: a row that is not an object raised in
+          # `Access`. It names no instrument, and is dropped like one that names none.
+          case row do
+            %{"symbol" => symbol} when is_binary(symbol) and symbol != "" ->
               [
                 %ScreenerResult{
                   symbol: symbol,

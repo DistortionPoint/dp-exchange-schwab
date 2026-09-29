@@ -404,6 +404,34 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert second.metrics["netPercentChange"] == 0.09
     end
 
+    test "an expiration list that is not a list is refused, not read as no expirations" do
+      for body <- [%{"expirationList" => "x"}, %{"expirationList" => %{"a" => 1}}] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_option_expirations("AAPL", @creds,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a screener list that is not a list, or a body that is not an object, is refused" do
+      # `"screeners": "x"` raised in `Access` in the caller's process. A list body is refused
+      # upstream, and stays refused.
+      for body <- [%{"screeners" => "x"}, [%{"symbol" => "AAPL"}]] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "a screener row that is not an object is dropped, not raised on" do
+      body = %{"screeners" => [%{"symbol" => "AAPL"}, "x", %{"symbol" => "TSLA"}]}
+
+      assert {:ok, results} =
+               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
+
+      assert Enum.map(results, &{&1.symbol, &1.rank}) == [{"AAPL", 1}, {"TSLA", 3}]
+    end
+
     test "a screener row with no symbol is dropped, never published as an empty one" do
       # `row["symbol"] || ""` satisfied `ScreenerResult`'s enforced `:symbol` while saying
       # nothing, and an empty string is worse than the `nil` it replaced: a `nil` is

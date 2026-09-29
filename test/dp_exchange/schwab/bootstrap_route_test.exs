@@ -315,7 +315,9 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
         )
 
       first = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
-      assert_receive :bootstrap_started, 1_000
+      # Five seconds, as the test above uses: the receive returns the moment the plug reports
+      # in, so this only matters under load, where one second failed the full suite.
+      assert_receive :bootstrap_started, 5_000
       second = Task.async(fn -> Feed.subscribe(feed, ["MSFT"]) end)
 
       assert Task.await(first, 5_000) in [:ok, {:error, :no_route}]

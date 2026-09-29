@@ -66,6 +66,28 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
              Orders.from_venue(odd)
   end
 
+  test "a spread with an unreadable leg is refused, not read as a single-leg order" do
+    # The unreadable leg was filtered out, and one leg left decides "single-leg": the order
+    # came back as an outright BUY of the surviving leg's symbol.
+    spread = %{
+      @limit_buy
+      | "orderLegCollection" => [
+          %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}},
+          "unreadable"
+        ]
+    }
+
+    assert {:error, :unexpected_response_shape} = Orders.from_venue(spread)
+
+    assert {:error, :unexpected_response_shape} =
+             Orders.from_venue(%{@limit_buy | "orderLegCollection" => "x"})
+  end
+
+  test "an order with no leg collection still decodes, with no symbol or side" do
+    assert {:ok, %Order{symbol: nil, side: nil, legs: []}} =
+             Orders.from_venue(Map.delete(@limit_buy, "orderLegCollection"))
+  end
+
   test "a spread reports its legs with ratios, and no single symbol or side" do
     spread = %{
       @limit_buy

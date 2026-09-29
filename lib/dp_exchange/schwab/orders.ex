@@ -304,29 +304,44 @@ defmodule DpExchange.Schwab.Orders do
   @spec from_venue(term()) :: {:ok, Order.t()} | {:error, term()}
   def from_venue(%{"orderId" => id} = order)
       when is_integer(id) or (is_binary(id) and id != "") do
-    legs = order |> Map.get("orderLegCollection") |> List.wrap() |> Enum.filter(&is_map/1)
-    {symbol, side, spread_legs} = leg_fields(legs)
+    with {:ok, legs} <- legs(order["orderLegCollection"]) do
+      {symbol, side, spread_legs} = leg_fields(legs)
 
-    {:ok,
-     %Order{
-       id: to_string(id),
-       symbol: symbol,
-       side: side,
-       order_type: @order_types_in[order["orderType"]],
-       time_in_force: @durations_in[order["duration"]],
-       quantity: number(order["quantity"]),
-       price: number(order["price"]),
-       stop_price: number(order["stopPrice"]),
-       filled_quantity: number(order["filledQuantity"]),
-       status: status(order["status"], number(order["filledQuantity"])),
-       legs: spread_legs,
-       created_at: timestamp(order["enteredTime"]),
-       provider: :schwab
-     }}
+      {:ok,
+       %Order{
+         id: to_string(id),
+         symbol: symbol,
+         side: side,
+         order_type: @order_types_in[order["orderType"]],
+         time_in_force: @durations_in[order["duration"]],
+         quantity: number(order["quantity"]),
+         price: number(order["price"]),
+         stop_price: number(order["stopPrice"]),
+         filled_quantity: number(order["filledQuantity"]),
+         status: status(order["status"], number(order["filledQuantity"])),
+         legs: spread_legs,
+         created_at: timestamp(order["enteredTime"]),
+         provider: :schwab
+       }}
+    end
   end
 
   def from_venue(%{} = _order), do: {:error, {:missing_required_field, :id}}
   def from_venue(_other), do: {:error, :unexpected_response_shape}
+
+  # **Every leg, or a refusal.** Legs that were not objects used to be filtered out, and the
+  # count of legs is what decides whether this is a single-leg order or a spread. A two-leg
+  # spread with one unreadable leg therefore came back as a SINGLE-leg order carrying the
+  # other leg's symbol and side: a caller reconciling it saw an outright position where it
+  # holds half of a spread. A collection that was not a list was wrapped into one leg the
+  # same way. An absent collection is still no legs.
+  defp legs(nil), do: {:ok, []}
+
+  defp legs(legs) when is_list(legs) do
+    if Enum.all?(legs, &is_map/1), do: {:ok, legs}, else: {:error, :unexpected_response_shape}
+  end
+
+  defp legs(_unreadable), do: {:error, :unexpected_response_shape}
 
   @doc """
   A list of venue orders, all or nothing.
