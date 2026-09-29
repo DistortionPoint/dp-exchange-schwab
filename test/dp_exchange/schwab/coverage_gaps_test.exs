@@ -67,6 +67,28 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       end
     end
 
+    test "an account whose positions cannot be read refuses the positions, not flat" do
+      # These used to contribute nothing, so the account read as holding nothing.
+      for account <- [
+            %{"securitiesAccount" => %{"positions" => "x"}},
+            %{"securitiesAccount" => "x"},
+            %{"notAnAccount" => true}
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_positions(@creds, plug: responding([account]), retry_attempts: 0)
+      end
+    end
+
+    test "an account with no positions field, or a null one, holds none" do
+      for account <- [
+            %{"securitiesAccount" => %{}},
+            %{"securitiesAccount" => %{"positions" => nil}}
+          ] do
+        assert {:ok, []} =
+                 Rest.get_positions(@creds, plug: responding([account]), retry_attempts: 0)
+      end
+    end
+
     test "a chain contract that is not an object refuses the chain" do
       body = %{"callExpDateMap" => %{"2026-03-20:15" => %{"200.0" => [true]}}}
 

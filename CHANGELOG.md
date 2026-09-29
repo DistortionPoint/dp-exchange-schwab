@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_positions/2` refuses a reply in which an account's `positions` is not a list, or an
+  entry has no `securitiesAccount` object. Either used to contribute nothing, so that account
+  read as holding no positions. An account with no `positions` field, or a `null` one, still
+  holds none.
+- Locked `dp_exchange_core` 0.3.48.
+
 ## [0.2.75] - 2026-09-29
 
 ### Fixed

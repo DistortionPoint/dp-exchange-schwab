@@ -1089,7 +1089,20 @@ defmodule DpExchange.Schwab.Rest do
        when is_list(positions),
        do: Enum.map(positions, &to_position/1)
 
-  defp account_positions(_account), do: []
+  # An account with no `positions` key holds none: the field is optional in the venue's
+  # `SecuritiesAccount` schema, and an account with nothing open has nothing to list.
+  defp account_positions(%{"securitiesAccount" => %{"positions" => nil}}), do: []
+
+  defp account_positions(%{"securitiesAccount" => account})
+       when is_map(account) and not is_map_key(account, "positions"),
+       do: []
+
+  # **Anything else is unreadable, and refuses the reply.** A `positions` that is not a list,
+  # or an entry with no `securitiesAccount` object, used to contribute nothing, so that
+  # account read as flat. A caller sizing risk from `get_positions/2` was told it held none
+  # of what that account holds. The error row reaches `collect_positions/1`, which refuses
+  # the whole reply for it.
+  defp account_positions(_account), do: [{:error, :unexpected_response_shape}]
 
   # A row, or an `instrument`, that is not an object is a row this package cannot read, and
   # refuses the reply as the comment above says such a row must. Both used to raise in
