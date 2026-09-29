@@ -204,16 +204,16 @@ logs in again on a fresh connection, presenting whatever token `update_credentia
 supplied. So a `:degraded` login notice means a retry is in progress, not a feed that has
 stopped for good. There is nothing to restart.
 
-**The refresh token is one-time use.** Every refresh spends the old one and returns a new one
-carrying a fresh seven days. So:
+**The refresh token is one-time use.** Every refresh spends the old one and returns a new
+one. So:
 
 - **Persist the returned credential before using it.** Refreshing and then crashing before
   storing costs the grant, and only a person at a browser can restore it.
 - **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
   token may already have been spent; try again with the credential you still hold, not the
   one you just sent.
-- `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. Seven days
-  elapsed with no refresh, or the user reset their password. Send a person to the login
+- `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. The refresh
+  token's seven days elapsed, or the user reset their password. Send a person to the login
   page; do not retry.
 - `{:refused, {:client_credentials_rejected, _status, _detail}}` is **not** a dead grant.
   The venue answered `invalid_client`: your app's `client_id` or `client_secret` is wrong
@@ -221,7 +221,13 @@ carrying a fresh seven days. So:
   would get the same refusal. This code is the OAuth standard's (RFC 6749 §5.2); Schwab's
   reference does not list its token errors, and it has not yet been observed from Schwab.
 
-Refreshing at least once a week means never needing a person again.
+**The vendor documents the refresh token as valid seven days after creation, full stop —
+three times, in the same words each time
+(`accounts-and-trading-production.txt:57,75,102`).** It does not say whether refreshing
+before expiry resets that clock forward from the new token's own creation, and this
+repository has no sandbox and no credential to test the difference. Plan for a person to
+re-authenticate at least once every seven days regardless of how often you refresh in
+between — the safe reading is the vendor's literal words, not the more convenient one.
 
 **If you hold a running feed (you called `subscribe/2` or started this package supervised),
 also call `DpExchange.Schwab.update_credentials/2` with the refreshed credential.** The
@@ -442,12 +448,21 @@ the venue to price against a number you chose.
 `{:error, {:missing_account_hash, :schwab}}` — the same atom every other account endpoint
 here uses. It answered `{:account_hash_required, :schwab}` until 2026-09-07: one condition
 with two spellings, so a consumer handling "you forgot the account hash" uniformly could
-not. There is no "all" in the venue's type enum —
-`DpExchange.Schwab.transaction_types/0` lists the fifteen, and passing all fifteen is how
-you ask for everything. A default here would hand you a real ledger missing whichever kinds
-it left out.
+not.
 
-`get_all_orders/2` needs both ends of a window for the same reason.
+**`:types` takes ONE type, not a list, and there is no "all".** The venue's own parameter
+is a scalar enum (`TransactionType`), not an array — `DpExchange.Schwab.transaction_types/0`
+lists the fifteen values it accepts, one at a time. Passing more than one is refused as
+`{:error, {:multiple_transaction_types, :schwab, types}}` rather than joined into one
+request or split into several merged ones; call this once per type and merge the results
+yourself if you want several. A single-element list (`types: ["TRADE"]`) is accepted as a
+convenience and treated the same as the bare string.
+
+`get_all_orders/2` and `get_orders/2` both need both ends of a window for the same reason
+`get_transactions/2` needs `:from`/`:to` — the venue requires `fromEnteredTime` and
+`toEnteredTime` on both its "every account" and its per-account orders read, and this
+package refuses locally with `{:error, {:from_and_to_required, :schwab}}` rather than
+picking one.
 
 ## 11. What this package does not implement
 

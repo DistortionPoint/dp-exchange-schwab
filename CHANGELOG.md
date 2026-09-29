@@ -31,6 +31,37 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Checked against the vendor's committed OpenAPI documents and Streamer guide.
+
+- `get_orders/2` sends the `fromEnteredTime`/`toEnteredTime` window the venue requires,
+  from `:from`/`:to`, and refuses locally with `{:error, {:from_and_to_required, :schwab}}`
+  without one. It sent no window, so per the vendor document it could not succeed.
+- A MARGIN account's balance total is read from `equity`. It was read from
+  `liquidationValue`, which `MarginBalance` does not carry, so every margin balance in the
+  documented shape was refused.
+- Order and transaction time filters are formatted `yyyy-MM-dd'T'HH:mm:ss.SSSZ` for any
+  `DateTime` precision. A sub-second `DateTime` produced `...00.123.000Z`.
+- `get_historical_prices/5` sends `startDate`/`endDate` for an explicit range. The range was
+  used only to size `period`, so the series ended at the previous close.
+- Option expirations read the schema's `expiration` as well as the example's
+  `expirationDate`; option contracts read `isMini`, `isNonStandard` and `isIndexOption`,
+  which were always `nil`.
+- `preview_order/4` sends the documented `PreviewOrder` body, with the order under
+  `orderStrategy` and legs as `orderLegs`.
+- `stopPriceOffset` is sent as a JSON number, without float rounding.
+- `get_transactions/3` sends a single `types` value; more than one is refused with
+  `{:error, {:multiple_transaction_types, :schwab, types}}`.
+- A per-symbol `QuoteError` (`invalidSymbols` and siblings) is read as not listed.
+- Streamer response codes 26-29 are success; they raised a false `:degraded` notice.
+- A position's open P/L is `unrealised_pnl`; it was reported as `realised_pnl`. The venue
+  publishes no realised figure, so that is `nil`. `MUTUAL_FUND` positions are `:fund`.
+- Level-one equity, futures and futures-option frames carry their venue time (fields 34/35
+  and 10/11); it was always `nil`.
+- The docs no longer claim that refreshing keeps a refresh token alive indefinitely. The
+  vendor states a refresh token is valid for 7 days after creation.
+
 ## [0.2.78] - 2026-09-29
 
 ### Fixed

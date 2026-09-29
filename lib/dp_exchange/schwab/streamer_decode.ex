@@ -18,12 +18,26 @@ defmodule DpExchange.Schwab.StreamerDecode do
   ## The venue's own time, and when it is absent
 
   `CHART_EQUITY` stamps each bar with `chart_time` in milliseconds, and that is the bar's
-  opening. `LEVELONE_*` frames carry no timestamp of their own in the fields this package
-  reads — so a quote decoded from one takes **the frame's arrival time**, which the socket
-  passes in, and a top of book records it as `observed_at` with `venue_time: nil`.
+  opening. Some `LEVELONE_*` services carry a venue timestamp of their own and some do
+  not, and it is per-service rather than a family-wide fact:
+
+  * `LEVELONE_EQUITIES` names field 34 "Quote Time in Long" and field 35 "Trade Time in
+    Long" (`market-data-production.txt:663-673`) — the last time a bid or ask updated, and
+    the last trade time, both milliseconds since epoch.
+  * `LEVELONE_FUTURES` and `LEVELONE_FUTURES_OPTIONS` name the same pair at fields 10 and
+    11 (`market-data-production.txt:1358-1366`, `:1730-1738`), already read as
+    `:quote_time`/`:trade_time` by `StreamerFields`.
+  * `LEVELONE_OPTIONS` and `LEVELONE_FOREX` name neither in the fields this package reads.
+
+  Where a service carries one, `to_quote/3` and `to_top_of_book/3` use it; where it does
+  not, or the frame did not include it, `venue_time` is `nil` and `observed_at` — the
+  frame's arrival time, which the socket passes in — is what stands in.
 
   `nil` there is not an oversight. It says the venue did not stamp this frame, which is the
-  difference between "quoted at 14:53:02" and "seen at 14:53:02".
+  difference between "quoted at 14:53:02" and "seen at 14:53:02". This used to say
+  `LEVELONE_*` carried no venue time in the fields this package reads at all — true when it
+  was written, false once `StreamerFields` started naming these fields for the services
+  that document them.
   """
 
   alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
@@ -35,7 +49,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
   ask are resting orders, and a quote built from one reports a price at which nothing
   traded.
 
-  `observed_at` is when the frame arrived, because these frames carry no venue time.
+  `observed_at` is when the frame arrived. `venue_time` is the venue's own trade time where
+  the service names one — see the moduledoc's table — and `nil` otherwise.
   """
   @spec to_quote(map(), String.t(), DateTime.t()) :: {:ok, Quote.t()} | {:error, term()}
   def to_quote(%{last: last} = fields, symbol, observed_at) when last != nil do
@@ -49,20 +64,27 @@ defmodule DpExchange.Schwab.StreamerDecode do
          # required: `:volume` is not enforced on `Core.Types.Quote`, so an unreadable size
          # is `nil` and the quote still stands.
          volume: decimal(Map.get(fields, :last_size)),
-         # **`nil`, and that is the fix.** `LEVELONE_*` frames carry no venue time in the
-         # fields this package reads, so there is nothing venue-stamped to put here — and
-         # `nil` says exactly that, which is a different fact from "quoted at 14:53:02".
+         # **The venue's own trade time, where the service names one — `nil` otherwise.**
+         # `LEVELONE_EQUITIES` field 35, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS`
+         # field 11 — "Trade Time in Long" / "Trade Time", the last trade time in
+         # milliseconds since epoch (see the moduledoc's table) — is the venue's own
+         # statement of when the `last` price this `Quote` reports actually traded, read in
+         # preference to the frame's arrival time whenever the frame carries it.
          #
-         # This used to be `timestamp: observed_at`: an arrival time in a field
-         # `Core.Types.Quote` documented as the venue's own, because the single `:timestamp`
-         # it had left no way to say the venue did not date the frame. Core 0.2.0 split that
-         # field for this reason (dp-exchange-core issue #31).
+         # This used to be unconditional `nil`, on the premise that no `LEVELONE_*` service
+         # carried a venue timestamp at all in the fields this package read — true for
+         # `LEVELONE_OPTIONS`/`LEVELONE_FOREX`, false for the two services above once
+         # `StreamerFields` started naming these fields. Before that, it was `timestamp:
+         # observed_at`: an arrival time in a field `Core.Types.Quote` documented as the
+         # venue's own, because the single `:timestamp` it had left no way to say the venue
+         # did not date the frame. Core 0.2.0 split that field for this reason
+         # (dp-exchange-core issue #31).
          #
          # `to_order_book/2` below is the counter-example and always was: it reads the
          # venue's `snapshot_time` and fails closed when absent, rather than substituting.
-         # The rule was always keepable where the venue cooperates; it was unkeepable here,
-         # and now it is sayable.
-         venue_time: nil,
+         # The rule was always keepable where the venue cooperates; it took naming the
+         # fields to see it was keepable here too, for two of the four services.
+         venue_time: field_time(fields, :trade_time),
          observed_at: observed_at,
          provider: :schwab
        }}
@@ -78,8 +100,11 @@ defmodule DpExchange.Schwab.StreamerDecode do
   so, and this package does not multiply by 100: a lot size is not universally 100, and a
   package guessing the multiplier would report a size the venue never sent.
 
-  `venue_time` is `nil` because these frames carry none; `observed_at` is when the frame
-  arrived, and the pair together is the only honest statement of freshness.
+  `venue_time` is the venue's own quote time where the service names one — `LEVELONE_EQUITIES`
+  field 34, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS` field 10, "the last time a bid or
+  ask updated" (see the moduledoc's table) — and `nil` where it does not (`LEVELONE_OPTIONS`,
+  `LEVELONE_FOREX`) or the frame did not carry it. `observed_at` is when the frame arrived
+  either way, and the pair together is the honest statement of freshness this type promises.
 
   ## This returns the frame's DELTA, and is not what crosses the facade
 
@@ -101,7 +126,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
        ask: decimal(Map.get(fields, :ask)),
        bid_size: decimal(Map.get(fields, :bid_size)),
        ask_size: decimal(Map.get(fields, :ask_size)),
-       venue_time: nil,
+       venue_time: field_time(fields, :quote_time),
        observed_at: observed_at,
        provider: :schwab
      }}
@@ -181,6 +206,27 @@ defmodule DpExchange.Schwab.StreamerDecode do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # Reads a `LEVELONE_*` service's own timestamp field — `:quote_time` or `:trade_time`,
+  # milliseconds since epoch on the services that name them (see `to_quote/3`'s and
+  # `to_top_of_book/3`'s docs) — and answers `nil` for anything that is not a usable
+  # instant: absent (the service does not name this field, or a Change-delivery frame did
+  # not carry it this time), non-positive, or out of `DateTime.from_unix/2`'s range. `nil`
+  # is not a decode fault here the way it is for `to_candle/3`'s prices or
+  # `to_order_book/2`'s snapshot time — a `LEVELONE_*` quote or top of book is valid
+  # without a venue timestamp, it just falls back to `observed_at`.
+  defp field_time(fields, key) do
+    case Map.get(fields, key) do
+      ms when is_integer(ms) and ms > 0 ->
+        case DateTime.from_unix(ms, :millisecond) do
+          {:ok, at} -> at
+          {:error, _out_of_range} -> nil
+        end
+
+      _absent_or_non_positive ->
+        nil
     end
   end
 

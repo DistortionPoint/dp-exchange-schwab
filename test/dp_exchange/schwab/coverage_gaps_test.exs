@@ -243,7 +243,13 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                 "symbol" => "AAPL  260320C00200000",
                 "multiplier" => 100.0,
                 "settlementType" => "P",
-                "nonStandard" => false,
+                # `"nonStandard"` used to be the fixture's key — a name that occurs nowhere
+                # in the vendor's document, so it pinned a field that could never actually
+                # be set from a real response. `OptionContract` (MD:5315) names `isMini`
+                # (MD:5441), `isNonStandard` (MD:5444) and `isIndexOption` (MD:5481).
+                "isMini" => false,
+                "isNonStandard" => true,
+                "isIndexOption" => false,
                 "lastTradingDay" => 1_774_060_800_000
               }
             ]
@@ -351,15 +357,50 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       call = chain.expiries[~D[2026-03-20]][Decimal.new("200.0")].call
       assert call.last_trading_day == ~D[2026-03-21]
     end
+
+    test "isMini, isNonStandard and isIndexOption are read, not stated nil" do
+      # The venue DOES name these three on a chain row — a comment here used to say it did
+      # not, and `non_standard` read the wrong key (`nonStandard` instead of
+      # `isNonStandard`), so all three were always `nil` regardless of what the venue sent.
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @creds,
+                 plug: responding(chain_body()),
+                 retry_attempts: 0
+               )
+
+      call = chain.expiries[~D[2026-03-20]][Decimal.new("200.0")].call
+      assert call.mini == false
+      assert call.non_standard == true
+      assert call.index_option == false
+    end
+
+    test "a contract with none of the three states nil, not false" do
+      body = %{
+        "callExpDateMap" => %{
+          "2026-03-20:15" => %{"200.0" => [%{"symbol" => "AAPL  260320C00200000"}]}
+        }
+      }
+
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @creds, plug: responding(body), retry_attempts: 0)
+
+      call = chain.expiries[~D[2026-03-20]][Decimal.new("200.0")].call
+      assert call.mini == nil
+      assert call.non_standard == nil
+      assert call.index_option == nil
+    end
   end
 
   describe "get_option_expirations/3 and get_screener/3" do
-    test "the expirations come back sorted and deduplicated" do
+    test "the expirations come back sorted and deduplicated, reading the schema's own key" do
+      # `expiration` is the `Expiration` schema's documented property (MD:5530,
+      # `docs/reference/schwab/openapi/market-data-production.openapi.json`) —
+      # `ExpirationChain.expirationList`, which this reads, is an array of it.
       body = %{
         "expirationList" => [
-          %{"expirationDate" => "2026-06-19"},
-          %{"expirationDate" => "2026-03-20"},
-          %{"expirationDate" => "2026-03-20"}
+          %{"expiration" => "2026-06-19"},
+          %{"expiration" => "2026-03-20"},
+          %{"expiration" => "2026-03-20"}
         ]
       }
 
@@ -372,11 +413,25 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert dates == [~D[2026-03-20], ~D[2026-06-19]]
     end
 
+    test "expirationDate is read too — the vendor's own worked example uses that name instead" do
+      # The vendor's document contradicts itself: the `Expiration` schema names the property
+      # `expiration` (MD:5530), but the worked `/expirationchain` example response earlier in
+      # the same document uses `expirationDate` throughout (MD:928 and on). Both are the
+      # vendor's own names for the same field, and both are read.
+      body = %{"expirationList" => [%{"expirationDate" => "2026-03-20"}]}
+
+      assert {:ok, [~D[2026-03-20]]} =
+               Rest.get_option_expirations("AAPL", @creds,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
     test "a date the venue sent that cannot be parsed is dropped rather than refused" do
       # An expiration chain has no strikes hanging off each date, so a missing entry is a
       # missing date and not a hole in a grid.
       body = %{
-        "expirationList" => [%{"expirationDate" => "soon"}, %{"expirationDate" => "2026-03-20"}]
+        "expirationList" => [%{"expiration" => "soon"}, %{"expiration" => "2026-03-20"}]
       }
 
       assert {:ok, [~D[2026-03-20]]} =
@@ -523,6 +578,63 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       refute Decimal.negative?(short.quantity)
     end
 
+    test "longOpenProfitLoss is unrealised, not realised — the venue publishes no realised P/L" do
+      # This used to read `longOpenProfitLoss`/`shortOpenProfitLoss` into `:realised_pnl`.
+      # "Open" P/L is a mark-to-market opinion on a position still held — the definition
+      # `Core.Types.Position`'s own moduledoc gives `:unrealised_pnl` — and `Position`
+      # (AT:2123-2201,
+      # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`), read
+      # in full, names no realised-P/L field at all. `currentDayProfitLoss` used to fill
+      # `:unrealised_pnl` in `longOpenProfitLoss`'s place — a third, different figure
+      # (today's change) with no slot of its own on `Core.Types.Position`, so it is dropped
+      # rather than put somewhere it does not belong.
+      body = [
+        %{
+          "securitiesAccount" => %{
+            "positions" => [
+              %{
+                "instrument" => %{"symbol" => "AAPL", "assetType" => "EQUITY"},
+                "longQuantity" => 100.0,
+                "shortQuantity" => 0.0,
+                "longOpenProfitLoss" => 250.5,
+                "currentDayProfitLoss" => -12.0
+              }
+            ]
+          }
+        }
+      ]
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
+
+      assert position.realised_pnl == nil
+      assert Decimal.equal?(position.unrealised_pnl, Decimal.from_float(250.5))
+    end
+
+    test "a MUTUAL_FUND asset type maps to :fund, the same as COLLECTIVE_INVESTMENT" do
+      # `AccountsInstrument`'s `assetType` enum (AT:2748-2757) lists `MUTUAL_FUND` as its
+      # own value, distinct from `COLLECTIVE_INVESTMENT`; Core's closest honest atom for
+      # either is `:fund`.
+      body = [
+        %{
+          "securitiesAccount" => %{
+            "positions" => [
+              %{
+                "instrument" => %{"symbol" => "SWPPX", "assetType" => "MUTUAL_FUND"},
+                "longQuantity" => 10.0,
+                "shortQuantity" => 0.0
+              }
+            ]
+          }
+        }
+      ]
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
+
+      assert position.instrument_type == :fund
+    end
+
     test "a row with both quantities zero is skipped" do
       # A closed position the venue still lists is not an open position of size nothing.
       body = [
@@ -647,7 +759,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                Rest.get_transactions(@creds, "hash-1",
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
-                 types: ["TRADE", "EVERYTHING"]
+                 types: "EVERYTHING"
                )
     end
 
@@ -670,20 +782,37 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert query =~ "symbol=AAPL"
     end
 
-    test "several types are joined for the venue" do
+    test "more than one type is refused rather than joined — the venue's parameter is a scalar" do
+      # AT:764-770 (`docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`)
+      # documents `types` as `$ref: TransactionType`, a single string enum value — not an
+      # array. This used to join a list with commas and send it as one parameter, which is
+      # not a shape the documented parameter takes.
+      exploding = fn _conn -> raise "a joined types list was sent" end
+
+      assert {:error, {:multiple_transaction_types, :schwab, ["TRADE", "DIVIDEND_OR_INTEREST"]}} =
+               Rest.get_transactions(@creds, "hash-1",
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 types: ["TRADE", "DIVIDEND_OR_INTEREST"],
+                 plug: exploding
+               )
+    end
+
+    test "a single-element list is accepted as the same convenience as a bare string" do
       me = self()
 
       assert {:ok, []} =
                Rest.get_transactions(@creds, "hash-1",
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
-                 types: ["TRADE", "DIVIDEND_OR_INTEREST"],
+                 types: ["TRADE"],
                  plug: capturing([], me),
                  retry_attempts: 0
                )
 
       assert_receive {:request, _path, query}
-      assert query =~ "types=TRADE%2CDIVIDEND_OR_INTEREST"
+      assert query =~ "types=TRADE"
+      refute query =~ ","
     end
 
     test "one transaction is fetched by id" do
@@ -763,6 +892,16 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
                  types: ["TRADE"]
+               )
+    end
+
+    test "the fake refuses more than one type too, matching Rest.get_transactions/3" do
+      assert {:error, {:multiple_transaction_types, :schwab, ["TRADE", "DIVIDEND_OR_INTEREST"]}} =
+               Fake.get_transactions(@creds,
+                 account_hash: "h",
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 types: ["TRADE", "DIVIDEND_OR_INTEREST"]
                )
     end
 

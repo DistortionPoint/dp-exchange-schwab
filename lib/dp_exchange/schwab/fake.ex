@@ -413,7 +413,12 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_get_orders(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts) do
+         {:ok, _hash} <- require_account(opts),
+         # The real venue refuses this call without both ends of a window
+         # (`Rest.get_orders/3`'s own `fromEnteredTime`/`toEnteredTime` requirement) — a fake
+         # that answered anyway would let a consumer's test suite go green calling this the
+         # one way the real facade cannot be called.
+         :ok <- require_window(opts) do
       # One order, not `[]`: an empty list makes every check over its elements vacuous, which
       # is the "third axis" `dp_exchange_core`'s assertion-coverage document records.
       Orders.list_from_venue([fake_order_body("fake-order-1")])
@@ -581,6 +586,18 @@ defmodule DpExchange.Schwab.Fake do
     case Keyword.get(opts, :account_hash) do
       hash when is_binary(hash) and hash != "" -> {:ok, hash}
       _absent -> {:error, {:missing_account_hash, :schwab}}
+    end
+  end
+
+  # The same `:from`/`:to` requirement `Rest.get_orders/3`, `Rest.get_all_orders/2` and
+  # `Rest.get_transactions/3` all enforce locally, because the venue requires both ends of
+  # the window on every one of those endpoints and none of them will pick one on a
+  # caller's behalf.
+  defp require_window(opts) do
+    if is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) do
+      {:error, {:from_and_to_required, :schwab}}
+    else
+      :ok
     end
   end
 
@@ -789,15 +806,22 @@ defmodule DpExchange.Schwab.Fake do
     # endpoint reports as `{:missing_account_hash, :schwab}`, and a consumer handling
     # "you forgot the account hash" uniformly cannot do it against two different atoms.
     with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts) do
-      cond do
-        is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) ->
-          {:error, {:from_and_to_required, :schwab}}
-
-        is_nil(Keyword.get(opts, :types)) ->
+         {:ok, _hash} <- require_account(opts),
+         :ok <- require_window(opts) do
+      case Keyword.get(opts, :types) do
+        nil ->
           {:error, {:types_required, :schwab}}
 
-        true ->
+        # The real venue's `types` is a scalar enum parameter, not a list — see
+        # `Rest.get_transactions/3`'s own @doc. A single-element list is accepted as the
+        # same convenience `Rest` accepts; more than one is refused the same way.
+        [_type] ->
+          {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
+
+        types when is_list(types) ->
+          {:error, {:multiple_transaction_types, :schwab, types}}
+
+        _one_type ->
           {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
       end
     end

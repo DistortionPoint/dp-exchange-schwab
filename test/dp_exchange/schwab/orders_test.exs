@@ -163,8 +163,17 @@ defmodule DpExchange.Schwab.OrdersTest do
 
       trailing = Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: 10})
 
-      assert {:ok, %{"orderType" => "TRAILING_STOP", "stopPriceOffset" => "10"}} =
+      assert {:ok, %{"orderType" => "TRAILING_STOP", "stopPriceOffset" => offset}} =
                Orders.build(trailing)
+
+      # `stopPriceOffset` is documented as a JSON number (AT:1935-1938,
+      # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`;
+      # `accounts-and-trading-production.txt:378`'s example agrees: `"stopPriceOffset": 10`,
+      # unquoted). This used to build `"10"`, a quoted string, off every input type. A
+      # `Jason.Fragment` cannot be asserted against by value — its `encode` field is a
+      # closure — so the proof is the encoded JSON itself: a bare `10`, not `"10"`.
+      assert %Jason.Fragment{} = offset
+      assert Jason.encode!(%{"stopPriceOffset" => offset}) == ~s({"stopPriceOffset":10})
     end
 
     test "a trailing stop without an offset is refused — that is not a trailing stop" do
@@ -271,6 +280,67 @@ defmodule DpExchange.Schwab.OrdersTest do
       assert {:ok, payload} = Orders.build(request)
 
       assert payload["price"] == "0.00000001"
+    end
+
+    test "a Decimal stopPriceOffset is a bare number too, not a scientific string" do
+      request =
+        @buy
+        |> Map.put(:order_type, :trailing_stop)
+        |> Map.put(:stop_price_offset, Decimal.normalize(Decimal.new("10.00")))
+
+      assert {:ok, payload} = Orders.build(request)
+      assert %Jason.Fragment{} = offset = payload["stopPriceOffset"]
+      assert Jason.encode!(%{"x" => offset}) == ~s({"x":10})
+    end
+  end
+
+  describe "to_preview/1 — the shape /previewOrder documents, not /orders'" do
+    test "the order is wrapped under orderStrategy, with orderLegs replacing orderLegCollection" do
+      assert {:ok, built} = Orders.build(@buy)
+      preview = Orders.to_preview(built)
+
+      assert %{"orderStrategy" => strategy} = preview
+      refute Map.has_key?(preview, "orderLegCollection")
+      refute Map.has_key?(strategy, "orderLegCollection")
+
+      assert strategy["orderType"] == "MARKET"
+      assert strategy["session"] == "NORMAL"
+      assert strategy["duration"] == "DAY"
+      assert strategy["orderStrategyType"] == "SINGLE"
+    end
+
+    test "each leg is flattened — assetType and finalSymbol, no nested instrument" do
+      assert {:ok, built} = Orders.build(@buy)
+      %{"orderStrategy" => %{"orderLegs" => [leg]}} = Orders.to_preview(built)
+
+      assert leg["instruction"] == "BUY"
+      assert leg["quantity"] == 15
+      assert leg["assetType"] == "EQUITY"
+      assert leg["finalSymbol"] == "AAPL"
+      refute Map.has_key?(leg, "instrument")
+    end
+
+    test "an option leg's assetType and symbol come through the same way" do
+      request = %{
+        symbol: "AAPL  260320C00200000",
+        side: :buy,
+        quantity: 1,
+        instruction: "BUY_TO_OPEN"
+      }
+
+      assert {:ok, built} = Orders.build(request)
+      %{"orderStrategy" => %{"orderLegs" => [leg]}} = Orders.to_preview(built)
+
+      assert leg["assetType"] == "OPTION"
+      assert leg["finalSymbol"] == "AAPL  260320C00200000"
+    end
+
+    test "price and other top-level fields ride along unchanged" do
+      request = @buy |> Map.put(:order_type, :limit) |> Map.put(:price, Decimal.new("150.00"))
+      assert {:ok, built} = Orders.build(request)
+      %{"orderStrategy" => strategy} = Orders.to_preview(built)
+
+      assert strategy["price"] == built["price"]
     end
   end
 end

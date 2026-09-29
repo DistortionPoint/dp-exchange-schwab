@@ -235,16 +235,35 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # `QuoteResponseObject` — the type of each value in the `/quotes` map keyed by symbol —
+  # is documented as a `oneOf` eight schemas: the seven per-asset-class quote shapes and
+  # `QuoteError` (MD:4508-4532,
+  # `docs/reference/schwab/openapi/market-data-production.openapi.json`). `QuoteError`'s
+  # only properties are `invalidCusips`, `invalidSSIDs` and `invalidSymbols` (MD:3082-3106)
+  # — there is no `errors` key anywhere in the document. This used to match `%{"errors" =>
+  # _}` instead, with no comment ever recording that shape as measured against a live
+  # response; replaced with the documented one rather than kept alongside an unverified
+  # guess.
   defp quote_row(body, native) when is_map(body) do
     case Map.get(body, native) do
       %{"quote" => quote_map} when is_map(quote_map) -> {:ok, quote_map}
-      %{"errors" => _errors} -> {:refused, :not_listed}
+      row when is_map(row) -> quote_error_or_unexpected(row)
       nil -> {:refused, :not_listed}
       _other -> {:error, :unexpected_response_shape}
     end
   end
 
   defp quote_row(_other, _native), do: {:error, :unexpected_response_shape}
+
+  @quote_error_keys ~w(invalidCusips invalidSSIDs invalidSymbols)
+
+  defp quote_error_or_unexpected(row) do
+    if Enum.any?(@quote_error_keys, &Map.has_key?(row, &1)) do
+      {:refused, :not_listed}
+    else
+      {:error, :unexpected_response_shape}
+    end
+  end
 
   # `venue_time` is read but not required. `Core.Types.Quote` enforces
   # `[:symbol, :price, :observed_at, :provider]` and not the venue's time, and `observed_at`
@@ -347,14 +366,15 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
          {:ok, period} <- fetch_period(timeframe, period_type, range) do
-      params = %{
-        "symbol" => native,
-        "periodType" => period_type,
-        "period" => period,
-        "frequencyType" => frequency_type,
-        "frequency" => frequency,
-        "needExtendedHoursData" => Keyword.get(opts, :extended_hours, false)
-      }
+      params =
+        %{
+          "symbol" => native,
+          "periodType" => period_type,
+          "frequencyType" => frequency_type,
+          "frequency" => frequency,
+          "needExtendedHoursData" => Keyword.get(opts, :extended_hours, false)
+        }
+        |> put_range_or_period(period, range)
 
       path = "/pricehistory?" <> URI.encode_query(params)
 
@@ -363,6 +383,39 @@ defmodule DpExchange.Schwab.Rest do
       end
     end
   end
+
+  # **This used to compute `period` from the caller's `range` and then never send the
+  # range itself.** `period` only says HOW FAR BACK to look from now, and `startDate`/
+  # `endDate` (MD:2073-2090, epoch milliseconds) say WHERE that window sits — different
+  # questions the vendor's document answers with different parameters, both optional. A
+  # caller asking for `range: [start: ~U[2026-06-01 00:00:00Z], end: ~U[2026-06-05
+  # 00:00:00Z]]` had that range used only to size `period` against `max_lookback_days/1`,
+  # then received the most recent `period`-sized window ending TODAY — the right length of
+  # history and the wrong dates, silently.
+  #
+  # So an explicit `:start` sends `startDate`/`endDate` instead of `period`, never both:
+  # the vendor's document does not say what happens if a relative lookback and an absolute
+  # window are sent together, and this package does not guess at an interaction it cannot
+  # measure. An `:end` is sent only when the caller gave one; omitted, the venue's own
+  # documented default applies — "the endDate will default to the market close of previous
+  # business day" (MD:2090) — which is the honest reading of "from start until now" a
+  # caller who named no end is asking for.
+  defp put_range_or_period(params, period, range) do
+    case Keyword.get(range, :start) do
+      %DateTime{} = start ->
+        params
+        |> Map.put("startDate", DateTime.to_unix(start, :millisecond))
+        |> put_end_date(Keyword.get(range, :end))
+
+      _no_explicit_range ->
+        Map.put(params, "period", period)
+    end
+  end
+
+  defp put_end_date(params, %DateTime{} = finish),
+    do: Map.put(params, "endDate", DateTime.to_unix(finish, :millisecond))
+
+  defp put_end_date(params, _absent), do: params
 
   defp fetch_candle(timeframe) do
     case Map.fetch(@candles, timeframe) do
@@ -915,6 +968,16 @@ defmodule DpExchange.Schwab.Rest do
 
   defp chain_strike(key), do: decimal(key)
 
+  # **The venue does name these three on a chain row** — the comment that used to sit here
+  # said it did not, which was false: `OptionContract` (MD:5315,
+  # `docs/reference/schwab/openapi/market-data-production.openapi.json`) documents
+  # `isMini` (MD:5441), `isNonStandard` (MD:5444) and `isIndexOption` (MD:5481), all three
+  # booleans. `non_standard` also used to read `row["nonStandard"]` — a key that does not
+  # occur anywhere in the vendor's document; only `isNonStandard` does — so it read `nil`
+  # off every real chain row regardless of what the venue actually said. `boolean_or_nil/1`
+  # keeps the same "not stated" reading for anything that is not literally `true` or
+  # `false`, since `Core.Types.OptionContract` types all three `boolean() | nil` and a
+  # value that is present but not a boolean is not a stronger claim than absent.
   defp to_contract(row, underlying, expiry, strike, right) do
     %OptionContract{
       underlying: underlying,
@@ -926,14 +989,15 @@ defmodule DpExchange.Schwab.Rest do
       settlement_type: row["settlementType"],
       expiration_type: row["expirationType"],
       last_trading_day: chain_last_trading_day(row["lastTradingDay"]),
-      # The venue does not name these three on a chain row. `nil` says "not stated"; `false`
-      # would say the venue told us it is not one.
-      index_option: nil,
-      mini: nil,
-      non_standard: row["nonStandard"],
+      index_option: boolean_or_nil(row["isIndexOption"]),
+      mini: boolean_or_nil(row["isMini"]),
+      non_standard: boolean_or_nil(row["isNonStandard"]),
       provider: :schwab
     }
   end
+
+  defp boolean_or_nil(value) when is_boolean(value), do: value
+  defp boolean_or_nil(_other), do: nil
 
   # The venue sends this as epoch milliseconds on a chain row, unlike the expiry key.
   defp chain_last_trading_day(value) when is_integer(value) do
@@ -984,14 +1048,29 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp expiration_date(%{"expirationDate" => date}) when is_binary(date) do
+  # **The vendor's own document contradicts itself on this field's name.** The
+  # `Expiration` schema — what `ExpirationChain.expirationList` (`expirationchain`'s
+  # response, which is what this reads) is documented to hold — names the property
+  # `expiration` (MD:5530, `docs/reference/schwab/openapi/market-data-production.openapi.json`).
+  # The worked example response body earlier in the same document uses `expirationDate`
+  # instead (MD:928 and on, every row in the `/expirationchain` example). Both are read:
+  # `expiration` first, since it is the schema's own name for the field this endpoint's
+  # response actually carries, `expirationDate` as a fallback for the shape the example
+  # shows — neither is guessed at, both are the vendor's own names for the same thing.
+  defp expiration_date(%{"expiration" => date}) when is_binary(date),
+    do: parse_expiration_date(date)
+
+  defp expiration_date(%{"expirationDate" => date}) when is_binary(date),
+    do: parse_expiration_date(date)
+
+  defp expiration_date(_row), do: nil
+
+  defp parse_expiration_date(date) do
     case Date.from_iso8601(date) do
       {:ok, parsed} -> parsed
       {:error, _reason} -> nil
     end
   end
-
-  defp expiration_date(_row), do: nil
 
   # **The list a reply is about, or a refusal — never a wrapped guess.** Both callers used
   # `Map.get(body, key, []) |> List.wrap()`. A value that was not a list came back wrapped as
@@ -1177,6 +1256,26 @@ defmodule DpExchange.Schwab.Rest do
     {:error, {:missing_required_field, :symbol}}
   end
 
+  # **`longOpenProfitLoss`/`shortOpenProfitLoss` are unrealised, not realised.** "Open"
+  # profit and loss is a mark-to-market opinion on a position still held — it moves with
+  # the next tick, which is the definition `Core.Types.Position`'s own moduledoc gives
+  # `:unrealised_pnl` — and this used to read it into `:realised_pnl` instead, which
+  # `Core.Types.Position` documents as "has happened". The two were also swapped with
+  # `currentDayProfitLoss` in `:unrealised_pnl`'s place, which is a different figure again
+  # (today's change, not the position's total open P/L).
+  #
+  # `Position` (AT:2123-2201,
+  # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`) — read in
+  # full — names no realised-P/L field at all: no `realizedProfitLoss`, no closed-lot gain,
+  # nothing. `:realised_pnl` is `nil` because the venue does not state one, which
+  # `Core.Types.Balance`'s own moduledoc calls a real answer rather than a gap to paper
+  # over: "available 1, total unknown" and "total equals available" are different claims,
+  # and the same reasoning applies here to a total the venue never sent.
+  #
+  # `currentDayProfitLoss` is dropped rather than carried anywhere. `Core.Types.Position`
+  # has no slot for "today's change" distinct from realised/unrealised, and putting a
+  # third kind of number into either of those two fields would be exactly the substitution
+  # this family exists to refuse.
   defp build_position(row, instrument, side, quantity) do
     %Position{
       symbol: instrument["symbol"],
@@ -1186,8 +1285,8 @@ defmodule DpExchange.Schwab.Rest do
       average_cost: decimal(row["averagePrice"]),
       mark_price: nil,
       notional_value: decimal(row["marketValue"]),
-      realised_pnl: decimal(row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]),
-      unrealised_pnl: decimal(row["currentDayProfitLoss"]),
+      realised_pnl: nil,
+      unrealised_pnl: decimal(row["longOpenProfitLoss"] || row["shortOpenProfitLoss"]),
       liquidation_price: nil,
       leverage: nil,
       venue_time: nil,
@@ -1214,6 +1313,14 @@ defmodule DpExchange.Schwab.Rest do
   defp position_instrument("EQUITY"), do: :equity
   defp position_instrument("OPTION"), do: :option
   defp position_instrument("COLLECTIVE_INVESTMENT"), do: :fund
+  # `AccountsInstrument`'s `assetType` enum (AT:2748-2757) lists `MUTUAL_FUND` as its own
+  # value, distinct from `COLLECTIVE_INVESTMENT` — both discriminate to their own schema
+  # (`AccountMutualFund` for the former, AT:2801, per `AccountsInstrument`'s discriminator
+  # mapping). Core's `Position.instrument_type` has no closer atom than `:fund` for either,
+  # and a fund a caller cannot distinguish from a collective investment by the one field
+  # this contract carries is still the closest honest reading — not `nil`, which would
+  # claim the venue named an instrument type this package could not place at all.
+  defp position_instrument("MUTUAL_FUND"), do: :fund
   defp position_instrument(_other), do: nil
   # --- the rest of accounts and trading ------------------------------------
 
@@ -1281,11 +1388,38 @@ defmodule DpExchange.Schwab.Rest do
   defp both_ends(nil, _to), do: {:error, {:from_and_to_required, :schwab}}
   defp both_ends(_from, nil), do: {:error, {:from_and_to_required, :schwab}}
   defp both_ends(from, to), do: {:ok, schwab_datetime(from), schwab_datetime(to)}
-  # Schwab's documented shape is `yyyy-MM-dd'T'HH:mm:ss.SSSZ`. A `DateTime` is rendered to
+  # Schwab's documented shape is `yyyy-MM-dd'T'HH:mm:ss.SSSZ` (AT:230, `fromEnteredTime`'s
+  # own description) — exactly three fractional digits, always. A `DateTime` is rendered to
   # it; anything else is passed through, because a caller holding the venue's own string
   # should not have it reformatted.
+  #
+  # **This used to build `.000Z` by string substitution rather than by formatting.** A
+  # `DateTime` truncated to millisecond precision still renders its OWN fraction when one
+  # is present — `DateTime.to_iso8601/1` on a microsecond- or second-precision value prints
+  # `14:05:31.120000Z` or `14:05:31Z`, not `14:05:31.120Z` or `14:05:31.000Z` — and
+  # `String.replace(_, "Z", ".000Z")` then appended a SECOND fraction onto whichever one was
+  # already there: `...31.120000.000Z`, six digits followed by three more, or correctly
+  # `...31.000Z` only when the input happened to already carry zero milliseconds by
+  # coincidence. Any `DateTime` built with `DateTime.utc_now/0` (microsecond precision by
+  # default) or read back from a store that keeps whole seconds would have broken every
+  # request this built a query string for.
+  #
+  # Built by hand from the truncated microsecond integer instead of `Calendar.strftime/2`'s
+  # `%3f` — measured, that directive does not zero-pad or clip to three digits; it prints
+  # the microsecond value's own width (`.0`, `.1`, `.123456`), which is the identical "not
+  # always three digits" defect in a different function. `DateTime.truncate/2` always
+  # yields a microsecond integer in `0..999_999` regardless of the input's original
+  # precision, so dividing by 1000 and zero-padding to three digits is exact for every
+  # precision — second, millisecond or microsecond alike.
   defp schwab_datetime(%DateTime{} = at) do
-    at |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601() |> String.replace("Z", ".000Z")
+    %{microsecond: {microsecond, _precision}} = truncated = DateTime.truncate(at, :millisecond)
+
+    millis = microsecond |> div(1000) |> Integer.to_string() |> String.pad_leading(3, "0")
+
+    truncated
+    |> Map.put(:microsecond, {0, 0})
+    |> DateTime.to_iso8601()
+    |> String.replace_suffix("Z", "." <> millis <> "Z")
   end
 
   defp schwab_datetime(value), do: value
@@ -1302,13 +1436,24 @@ defmodule DpExchange.Schwab.Rest do
   @doc """
   Transactions on one account — `GET /accounts/{accountNumber}/transactions`.
 
-  **Three parameters are required by the venue, and `types` is one of them.** There is no
-  "everything" value in its enum: the fifteen types are `TRADE`, `RECEIVE_AND_DELIVER`,
-  `DIVIDEND_OR_INTEREST`, the two ACH kinds, the two cash kinds, `ELECTRONIC_FUND`,
-  `WIRE_OUT`, `WIRE_IN`, `JOURNAL`, `MEMORANDUM`, `MARGIN_CALL`, `MONEY_MARKET` and
-  `SMA_ADJUSTMENT`. `transaction_types/0` lists them; passing all fifteen is how a caller
-  asks for everything, and this package does not do it on their behalf — a default would
-  return a real ledger that is missing whichever kinds it left out.
+  **Three parameters are required by the venue, and `types` is one of them — and `types`
+  is a single value, not a list.** The venue's own parameter schema is `$ref:
+  TransactionType` (AT:764-770,
+  `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`), a scalar
+  string enum, not an array — this used to accept a list and join it with commas, which is
+  not a shape the documented parameter takes. There is no "everything" value in the enum
+  either: the fifteen types are `TRADE`, `RECEIVE_AND_DELIVER`, `DIVIDEND_OR_INTEREST`, the
+  two ACH kinds, the two cash kinds, `ELECTRONIC_FUND`, `WIRE_OUT`, `WIRE_IN`, `JOURNAL`,
+  `MEMORANDUM`, `MARGIN_CALL`, `MONEY_MARKET` and `SMA_ADJUSTMENT` — `transaction_types/0`
+  lists them, and this package sends none of them on a caller's behalf.
+
+  `opts[:types]` takes one type, as a bare string (or a single-element list, accepted as
+  the same thing). **More than one is refused as `{:error, {:multiple_transaction_types,
+  :schwab, types}}` rather than joined or issued as several requests merged into one
+  answer** — the documented parameter has no room for a list, and turning one read into
+  several the venue never received as one is a decision this package does not make
+  silently on a caller's behalf. A caller that wants several types calls this once per
+  type and merges the results itself, knowing that is what it is doing.
 
   `opts[:symbol]` narrows to one instrument.
   """
@@ -1342,15 +1487,24 @@ defmodule DpExchange.Schwab.Rest do
       nil ->
         {:error, {:types_required, :schwab}}
 
+      [type] when is_binary(type) ->
+        validate_transaction_type(type)
+
+      # More than one is refused rather than joined — see the @doc on why a list has
+      # nowhere to go against a scalar query parameter, and why this does not turn one
+      # call into several on a caller's behalf either.
       types when is_list(types) ->
-        case Enum.reject(types, &(&1 in @transaction_types)) do
-          [] -> {:ok, Enum.join(types, ",")}
-          unknown -> {:error, {:unknown_transaction_types, unknown}}
-        end
+        {:error, {:multiple_transaction_types, :schwab, types}}
 
       type when is_binary(type) ->
-        transaction_type_param(Keyword.put(opts, :types, [type]))
+        validate_transaction_type(type)
     end
+  end
+
+  defp validate_transaction_type(type) do
+    if type in @transaction_types,
+      do: {:ok, type},
+      else: {:error, {:unknown_transaction_types, [type]}}
   end
 
   @doc """
@@ -1509,7 +1663,26 @@ defmodule DpExchange.Schwab.Rest do
   # MARGIN and CASH carry different fields. An account whose type the venue did not state
   # is unreadable rather than assumed to be either — reading a margin account as cash
   # would report a buying power of nil for an account that has one.
-  defp balance_total("MARGIN", current), do: fetch_balance(current, "liquidationValue")
+  #
+  # **`liquidationValue` is not a `MarginBalance` field.** It used to be read from a MARGIN
+  # account's `currentBalances` under that name, but the vendor's own schema puts
+  # `liquidationValue` on `MarginInitialBalance`
+  # (`docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`,
+  # AT:2354-2477) — the account's `initialBalances`, not `currentBalances` — while
+  # `MarginAccount.currentBalances` is `MarginBalance` (AT:2491-2589), which has no
+  # `liquidationValue` at all. So this always read `nil` off a key that was never there,
+  # collapsed by `fetch_balance/2`'s `nil -> :unexpected_response_shape` into refusing
+  # every margin balance this package ever decoded.
+  #
+  # `MarginBalance` carries no field the vendor documents as "total account value" the way
+  # `CashBalance.totalCash` is unambiguous — read the whole schema and there is no
+  # `liquidationValue`, `netLiquidationValue` or similarly-named total. `equity` (AT:2518,
+  # inside `MarginBalance`) is chosen instead: it is the schema's own field for the
+  # account's total equity — assets net of the margin loan — which is the closest honest
+  # reading of "the account's balance" a margin account states, as against `buyingPower`
+  # (AT:2502), which is what `available_balance` below already reads. Recorded as a
+  # documented choice, not a measured one — this repository holds no Schwab credential.
+  defp balance_total("MARGIN", current), do: fetch_balance(current, "equity")
   defp balance_total("CASH", current), do: fetch_balance(current, "totalCash")
   defp balance_total(_unknown, _current), do: {:error, :unexpected_response_shape}
 
@@ -1604,6 +1777,13 @@ defmodule DpExchange.Schwab.Rest do
   `orderStrategy`, `orderValidationResult` and `commissionAndFee`, none of which map onto
   anything the contract names — and inventing one would put a shape in `Core.Types` that
   exactly one venue can fill.
+
+  `payload` must already be shaped as `/previewOrder` documents — `PreviewOrder`
+  (AT:2037), the order under `orderStrategy` (`OrderStrategy`, AT:1372) with legs named
+  `orderLegs` (`OrderLeg`, AT:1471), not the `OrderRequest`/`orderLegCollection` shape
+  `place_order/4` and `replace_order/5` send. See `DpExchange.Schwab.Orders.to_preview/1`,
+  which builds it from the same `Orders.build/2` output those two functions use — this
+  function does not reshape it itself.
   """
   @spec preview_order(map(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -1705,14 +1885,37 @@ defmodule DpExchange.Schwab.Rest do
     get(trader_url(opts) <> path, credentials, opts)
   end
 
-  @doc "Orders for one account within a window the venue requires."
+  @doc """
+  Orders for one account within a window the venue requires.
+
+  **`fromEnteredTime` and `toEnteredTime` are both required here too.** `GET
+  /accounts/{accountNumber}/orders` documents them exactly as `GET /orders`
+  (`get_all_orders/2`) does — both `required: true`
+  (`docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`, the
+  `/accounts/{accountNumber}/orders` `get` operation's `parameters`) — and this endpoint
+  used to send neither, silently. Refused locally via `opts[:from]`/`opts[:to]` rather than
+  defaulted, for the same reason `get_all_orders/2` refuses: a window this package chose
+  would return a real list of orders over a period the caller did not ask about, and an
+  empty one would read as "no orders" rather than "no window given". `opts[:status]` and
+  `opts[:max_results]` are the venue's own optional filters, sent only when given.
+  """
   @spec get_orders(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, account_hash, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/orders"
+    with {:ok, from, to} <- order_window(opts) do
+      query =
+        query_string(%{
+          "fromEnteredTime" => from,
+          "toEnteredTime" => to,
+          "status" => Keyword.get(opts, :status),
+          "maxResults" => Keyword.get(opts, :max_results)
+        })
 
-    with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
-      if is_list(body), do: {:ok, body}, else: {:error, :unexpected_response_shape}
+      path = "/accounts/" <> URI.encode(account_hash) <> "/orders" <> query
+
+      with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
+        if is_list(body), do: {:ok, body}, else: {:error, :unexpected_response_shape}
+      end
     end
   end
 

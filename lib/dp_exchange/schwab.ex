@@ -27,8 +27,10 @@ defmodule DpExchange.Schwab do
   **The host authenticates; this package signs and refreshes.** The initial grant is
   three-legged OAuth through a browser and a person, which no library can do. Everything
   after is mechanical: the access token lives 30 minutes and `Auth.refresh/2` renews it,
-  minting a new refresh token each time with a fresh seven days. A host that keeps
-  refreshing never needs a person again.
+  minting a new refresh token each time. The vendor documents the refresh token itself as
+  valid seven days after creation and says nothing about whether refreshing resets that
+  clock — see `Auth`'s own moduledoc — so a host should plan for a person to
+  re-authenticate at least once every seven days regardless of how often it refreshes.
 
   **`get_order_book/2` is `:unsupported`, and the reason has now changed three times.** It
   first read "there is no order book and no socket" — a claim about the venue, and wrong.
@@ -272,14 +274,16 @@ defmodule DpExchange.Schwab do
   on this venue and reads are not, so a rejection found by previewing costs nothing while
   one found by placing costs a scarce write.
 
-  Builds the same payload `place_order/3` would, so a preview that passes describes the
-  order that would actually be sent.
+  Builds the same order `place_order/3` would through `Orders.build/2`, then reshapes it
+  into `/previewOrder`'s own documented request — `PreviewOrder`/`OrderStrategy`, not
+  `OrderRequest` — via `DpExchange.Schwab.Orders.to_preview/1`. A preview that passes
+  describes the order that would actually be sent.
   """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
          {:ok, payload} <- Orders.build(request, opts) do
-      Rest.preview_order(credentials, hash, payload, with_limiter(opts))
+      Rest.preview_order(credentials, hash, Orders.to_preview(payload), with_limiter(opts))
     end
   end
 

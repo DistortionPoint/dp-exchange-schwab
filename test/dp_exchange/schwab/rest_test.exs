@@ -127,7 +127,14 @@ defmodule DpExchange.Schwab.RestTest do
     end
 
     test "an unlisted symbol is refused, whether absent or returned as an error object" do
-      for body <- [%{}, %{"AAPL" => %{"errors" => [%{"detail" => "not found"}]}}] do
+      # The second fixture used to be `%{"errors" => [%{"detail" => "not found"}]}}` — a
+      # shape that occurs nowhere in the vendor's document and was never recorded as
+      # measured against a live response. Corrected to `QuoteError` (MD:3082-3106,
+      # `docs/reference/schwab/openapi/market-data-production.openapi.json`), the
+      # documented per-symbol error shape `QuoteResponseObject` names as one of its `oneOf`
+      # alternatives — `invalidSymbols`, `invalidCusips` and `invalidSSIDs` are its only
+      # properties.
+      for body <- [%{}, %{"AAPL" => %{"invalidSymbols" => ["AAPL"]}}] do
         assert {:refused, :not_listed} =
                  Rest.get_price("AAPL", @creds, plug: responding(body), retry_attempts: 0)
       end
@@ -364,6 +371,70 @@ defmodule DpExchange.Schwab.RestTest do
                )
     end
 
+    test "an explicit range sends startDate/endDate, not just a period-sized lookback" do
+      # This used to compute `period` from the caller's range only to decide whether the
+      # width could reach that far back, then send `period` alone — so a caller asking for
+      # a specific week in the past received the most recent `period`-sized window ending
+      # TODAY, the right length and the wrong dates. `startDate`/`endDate` (MD:2073-2090,
+      # `docs/reference/schwab/openapi/market-data-production.openapi.json`) are epoch
+      # milliseconds and name the actual window.
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, %{"candles" => []})
+      end
+
+      range = [start: ~U[2026-06-01 00:00:00Z], end: ~U[2026-06-05 00:00:00Z]]
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL", "5m", range, @creds,
+                 plug: capture,
+                 retry_attempts: 0
+               )
+
+      assert_received {:request, query}
+      assert query =~ "startDate=#{DateTime.to_unix(~U[2026-06-01 00:00:00Z], :millisecond)}"
+      assert query =~ "endDate=#{DateTime.to_unix(~U[2026-06-05 00:00:00Z], :millisecond)}"
+      refute query =~ "period="
+    end
+
+    test "an explicit start with no end sends only startDate, leaving the venue's own default" do
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, %{"candles" => []})
+      end
+
+      range = [start: DateTime.add(DateTime.utc_now(), -3, :day)]
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL", "5m", range, @creds,
+                 plug: capture,
+                 retry_attempts: 0
+               )
+
+      assert_received {:request, query}
+      assert query =~ "startDate="
+      refute query =~ "endDate="
+      refute query =~ "period="
+    end
+
+    test "no explicit range still sends period, not a date range" do
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, %{"candles" => []})
+      end
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds,
+                 plug: capture,
+                 retry_attempts: 0
+               )
+
+      assert_received {:request, query}
+      assert query =~ "period="
+      refute query =~ "startDate="
+      refute query =~ "endDate="
+    end
+
     test "the venue's own empty flag is a refusal, not zero candles" do
       # A caller must be able to tell "no data in this window" from "no such symbol".
       assert {:refused, :not_listed} =
@@ -450,11 +521,19 @@ defmodule DpExchange.Schwab.RestTest do
   end
 
   describe "balances read the account's declared type, never guessing" do
-    test "a margin account reports liquidation value and buying power" do
+    test "a margin account reports its total equity and buying power" do
+      # `"liquidationValue"` used to be the fixture's key, pinning a field that does not
+      # occur on `MarginBalance` (AT:2491-2589,
+      # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`) —
+      # only on `MarginInitialBalance` (AT:2354), a different schema this endpoint never
+      # returns as `currentBalances`. Every real margin balance this package ever decoded
+      # therefore refused as `:unexpected_response_shape`, which this fixture could not
+      # show because it invented the field the real venue does not send. Corrected to
+      # `"equity"` (AT:2518), the schema's own field for the account's total.
       body = %{
         "securitiesAccount" => %{
           "type" => "MARGIN",
-          "currentBalances" => %{"liquidationValue" => 50_000.0, "buyingPower" => 100_000.0}
+          "currentBalances" => %{"equity" => 50_000.0, "buyingPower" => 100_000.0}
         }
       }
 
@@ -620,15 +699,83 @@ defmodule DpExchange.Schwab.RestTest do
                )
     end
 
-    test "orders come back as a list, and a non-list is unreadable" do
-      assert {:ok, [%{"orderId" => 1}]} =
+    test "fromEnteredTime and toEnteredTime are required here too, and refused locally" do
+      # AT:228-247 (`docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`,
+      # the `/accounts/{accountNumber}/orders` `get` operation) marks both `required: true`,
+      # the same as `/orders` itself (`get_all_orders/2`). This endpoint used to send
+      # neither, silently — a request the venue would reject went out anyway.
+      exploding = fn _conn -> raise "a request with no window was sent" end
+
+      assert {:error, {:from_and_to_required, :schwab}} =
+               Rest.get_orders(@creds, "ABCDEF", plug: exploding)
+
+      assert {:error, {:from_and_to_required, :schwab}} =
+               Rest.get_orders(@creds, "ABCDEF", from: ~U[2026-08-01 00:00:00Z], plug: exploding)
+    end
+
+    test "the window is sent in the venue's documented format" do
+      capture = fn conn ->
+        send(self(), {:request, conn.request_path, conn.query_string})
+        Req.Test.json(conn, [])
+      end
+
+      assert {:ok, []} =
                Rest.get_orders(@creds, "ABCDEF",
-                 plug: responding([%{"orderId" => 1}]),
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 plug: capture,
                  retry_attempts: 0
                )
 
+      assert_received {:request, path, query}
+      assert String.ends_with?(path, "/accounts/ABCDEF/orders")
+      assert query =~ "fromEnteredTime=2026-08-01T00%3A00%3A00.000Z"
+      assert query =~ "toEnteredTime=2026-09-01T00%3A00%3A00.000Z"
+    end
+
+    test "a DateTime with sub-second precision is rendered with exactly three digits" do
+      # `DateTime.to_iso8601/1` prints a DateTime's OWN fraction — six digits for
+      # microsecond precision, none at all for second precision — so blindly appending
+      # ".000Z" after it used to produce `...31.123456.000Z` (a second fraction glued onto
+      # the first) for a microsecond-precision value, and only accidentally the right
+      # answer for a whole-second one. Both are exercised here: `DateTime.utc_now/0`
+      # defaults to microsecond precision, and a value built from `~U[...]` with no
+      # fraction has none at all — either reaching this function used to break the query
+      # string it built.
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, [])
+      end
+
+      assert {:ok, []} =
+               Rest.get_orders(@creds, "ABCDEF",
+                 from: ~U[2026-08-01 00:00:00.123456Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 plug: capture,
+                 retry_attempts: 0
+               )
+
+      assert_received {:request, query}
+      assert query =~ "fromEnteredTime=2026-08-01T00%3A00%3A00.123Z"
+      assert query =~ "toEnteredTime=2026-09-01T00%3A00%3A00.000Z"
+    end
+
+    test "orders come back as a list, and a non-list is unreadable" do
+      window = [from: ~U[2026-08-01 00:00:00Z], to: ~U[2026-09-01 00:00:00Z]]
+
+      assert {:ok, [%{"orderId" => 1}]} =
+               Rest.get_orders(
+                 @creds,
+                 "ABCDEF",
+                 window ++ [plug: responding([%{"orderId" => 1}]), retry_attempts: 0]
+               )
+
       assert {:error, :unexpected_response_shape} =
-               Rest.get_orders(@creds, "ABCDEF", plug: responding(%{}), retry_attempts: 0)
+               Rest.get_orders(
+                 @creds,
+                 "ABCDEF",
+                 window ++ [plug: responding(%{}), retry_attempts: 0]
+               )
     end
 
     test "one order is returned as the venue reports it" do

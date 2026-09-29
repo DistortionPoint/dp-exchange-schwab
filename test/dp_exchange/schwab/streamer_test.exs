@@ -254,6 +254,23 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert StreamerProtocol.failure_message(%{"content" => %{"msg" => "denied"}}) == "denied"
       assert StreamerProtocol.failure_message(%{"content" => %{"code" => 3}}) == nil
     end
+
+    test "26-29 (SUCCEEDED_COMMAND_SUBS/UNSUBS/ADD/VIEW) are success too, not just 0" do
+      # STR:176-190 (`docs/reference/schwab/documentation/market-data-production.txt`)
+      # names 26 SUCCEEDED_COMMAND_SUBS, 27 SUCCEEDED_COMMAND_UNSUBS, 28
+      # SUCCEEDED_COMMAND_ADD and 29 SUCCEEDED_COMMAND_VIEW explicitly, each "n/a -
+      # success". This used to check only for `0`, so a SUBS/UNSUBS/ADD/VIEW response
+      # answering its OWN success code read as a failure — `subscribe/4` would report
+      # `:degraded` for a subscription the venue had just confirmed.
+      for code <- [0, 26, 27, 28, 29] do
+        assert StreamerProtocol.succeeded?(%{"content" => %{"code" => code}}),
+               "code #{code} must be success"
+      end
+
+      # Adjacent failure codes stay failures — this is not "anything above 25".
+      refute StreamerProtocol.succeeded?(%{"content" => %{"code" => 22}})
+      refute StreamerProtocol.succeeded?(%{"content" => %{"code" => 30}})
+    end
   end
 
   describe "field numbers mean different things per service" do
@@ -391,6 +408,16 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert map["12"] == :previous_close
       refute map["12"] == :close
     end
+
+    test "LEVELONE_EQUITIES fields 34 and 35 are the venue's quote and trade times" do
+      # STR:665-673 — "Quote Time in Long" and "Trade Time in Long" — were absent from
+      # this map entirely; `StreamerDecode` said LEVELONE_* carried no venue timestamp at
+      # all, which was true only until these two fields were named.
+      {:ok, map} = StreamerFields.for_service("LEVELONE_EQUITIES")
+
+      assert map["34"] == :quote_time
+      assert map["35"] == :trade_time
+    end
   end
 
   describe "a LEVELONE frame is two facts, and only one is a traded price" do
@@ -440,6 +467,50 @@ defmodule DpExchange.Schwab.StreamerTest do
 
       assert top.venue_time == nil
       assert top.observed_at == @observed
+    end
+
+    test "trade_time IS read as venue_time on a Quote, when the frame carries it" do
+      # LEVELONE_EQUITIES field 35 "Trade Time in Long" and LEVELONE_FUTURES/
+      # LEVELONE_FUTURES_OPTIONS field 11 (STR:670, :1365, :1737,
+      # `docs/reference/schwab/documentation/market-data-production.txt`) name the last
+      # trade time. This used to be unconditional `nil` on the premise that no LEVELONE_*
+      # service carried a venue timestamp at all — false for these two.
+      fields = %{last: 10.55, trade_time: 1_787_936_147_000}
+
+      assert {:ok, quote_} = StreamerDecode.to_quote(fields, "AAPL", @observed)
+
+      assert quote_.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert quote_.observed_at == @observed
+    end
+
+    test "a Quote without trade_time still has nil venue_time, exactly as before" do
+      assert {:ok, quote_} = StreamerDecode.to_quote(%{last: 10.55}, "AAPL", @observed)
+      assert quote_.venue_time == nil
+    end
+
+    test "quote_time IS read as venue_time on a TopOfBook, when the frame carries it" do
+      # LEVELONE_EQUITIES field 34 "Quote Time in Long" (STR:665) and LEVELONE_FUTURES/
+      # LEVELONE_FUTURES_OPTIONS field 10 (STR:1358, :1730) name the last bid/ask update
+      # time.
+      fields = %{bid: 10.50, ask: 10.60, quote_time: 1_787_936_147_000}
+
+      assert {:ok, top} = StreamerDecode.to_top_of_book(fields, "AAPL", @observed)
+
+      assert top.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+    end
+
+    test "a non-positive or unreadable trade_time/quote_time is nil, not a raise or 1970" do
+      for bad <- [0, -1, "not a number"] do
+        assert {:ok, quote_} =
+                 StreamerDecode.to_quote(%{last: 1, trade_time: bad}, "AAPL", @observed)
+
+        assert quote_.venue_time == nil
+
+        assert {:ok, top} =
+                 StreamerDecode.to_top_of_book(%{bid: 1, quote_time: bad}, "AAPL", @observed)
+
+        assert top.venue_time == nil
+      end
     end
 
     test "an absent side is nil, not zero" do

@@ -140,6 +140,45 @@ defmodule DpExchange.Schwab.Orders do
     end
   end
 
+  @doc """
+  Wraps a payload `build/2` produced into the shape `/previewOrder` documents.
+
+  **`preview_order/4`'s request body is not `place_order/4`'s.** `POST
+  /accounts/{hash}/orders` takes `OrderRequest`, whose legs are `orderLegCollection` of
+  `OrderLegCollection` — that is the shape `build/2` returns, and it is correct for
+  placing. `POST /accounts/{hash}/previewOrder` takes `PreviewOrder` (AT:2037-2054,
+  `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`), which
+  carries the order under `orderStrategy` (`OrderStrategy`, AT:1372-1471) — a different
+  schema, whose legs are `orderLegs` of `OrderLeg` (AT:1471-1511), not `orderLegCollection`
+  of `OrderLegCollection`. `OrderLeg` has no nested `instrument` object either: it carries
+  `assetType` and `finalSymbol` as flat fields (AT:1503-1510), where `OrderLegCollection`
+  nests both under `instrument` (AT:2241-2243). This used to send the `OrderRequest` body
+  verbatim to `/previewOrder`, which is not the schema that endpoint documents.
+
+  `build/2`'s output is unchanged; this transforms it rather than building a second payload
+  by hand, so a preview describes the exact same order `place_order/4` would send.
+  """
+  @spec to_preview(map()) :: map()
+  def to_preview(order_request) when is_map(order_request) do
+    legs = order_request |> Map.get("orderLegCollection", []) |> Enum.map(&preview_leg/1)
+
+    strategy =
+      order_request
+      |> Map.delete("orderLegCollection")
+      |> Map.put("orderLegs", legs)
+
+    %{"orderStrategy" => strategy}
+  end
+
+  defp preview_leg(%{"instrument" => instrument} = leg) do
+    leg
+    |> Map.delete("instrument")
+    |> Map.put("assetType", instrument["assetType"])
+    |> Map.put("finalSymbol", instrument["symbol"])
+  end
+
+  defp preview_leg(leg), do: leg
+
   defp fetch(request, key) do
     case Map.get(request, key) do
       nil -> {:error, {:missing_order_field, key}}
@@ -244,6 +283,36 @@ defmodule DpExchange.Schwab.Orders do
 
   defp maybe_put(payload, _key, nil), do: payload
 
+  # **`stopPriceOffset` is documented as a JSON number** — `OrderRequest.stopPriceOffset`
+  # is `"type": "number", "format": "double"` (AT:1935-1938,
+  # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`), and the
+  # prose example agrees: `"stopPriceOffset": 10` with no quotes
+  # (`accounts-and-trading-production.txt:378`). This used to fall through to the generic
+  # clause below and go out as a quoted string via `to_string/1`, on every input type —
+  # matching neither the schema nor the example.
+  #
+  # `price` and `stopPrice` are NOT changed here even though the same schema types them as
+  # numbers too (AT:1795, AT:1925): the vendor's own prose examples send them BOTH ways —
+  # `"stopPrice": "37.03"` quoted (`accounts-and-trading-production.txt:292`) and
+  # `"stopPrice": 11.27` bare (`accounts-and-trading-production.txt:353`) — a contradiction
+  # inside the vendor's own document that this package cannot resolve by reading it more
+  # carefully. Left as a string, which is what every order this package has ever placed
+  # sent and what the venue has accepted; recorded here rather than silently changed
+  # alongside a field the documentation does not actually disagree about.
+  #
+  # `Jason.Fragment` carries the Decimal's own exact digits through unquoted — the same
+  # `Decimal.to_string(value, :normal)` this module already uses to avoid scientific
+  # notation on `price`/`stopPrice`, wrapped so Jason emits it as a bare number rather than
+  # a quoted one. `Decimal.to_float/1` is never called: that rounds, and a Decimal read
+  # from a caller's own money math is not this package's to round on the way out.
+  defp maybe_put(payload, "stopPriceOffset", %Decimal{} = value) do
+    Map.put(payload, "stopPriceOffset", Jason.Fragment.new(Decimal.to_string(value, :normal)))
+  end
+
+  defp maybe_put(payload, "stopPriceOffset", value) when is_number(value) do
+    Map.put(payload, "stopPriceOffset", Jason.Fragment.new(to_string(value)))
+  end
+
   # **`Decimal.to_string/1` defaults to SCIENTIFIC notation.** So a price carrying an
   # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue reads,
   # and a different order if it read one at all.
@@ -262,12 +331,22 @@ defmodule DpExchange.Schwab.Orders do
   defp maybe_put(payload, key, value), do: Map.put(payload, key, to_string(value))
   # --- reading an order back --------------------------------------------------
 
-  @order_types_in %{
-    "MARKET" => :market,
-    "LIMIT" => :limit,
-    "STOP" => :stop,
-    "STOP_LIMIT" => :stop_limit
-  }
+  # `Core.Types.Order.order_type/0` is `:market | :limit | :stop | :stop_limit |
+  # :post_only | :ioc | :fok` — this venue never builds the last three, and of the four it
+  # does build, only these four have a Core atom. `build/2`'s own `@order_types` above can
+  # also send `TRAILING_STOP`, `TRAILING_STOP_LIMIT`, `MARKET_ON_CLOSE` and
+  # `LIMIT_ON_CLOSE`, none of which Core names (see that map's own comment), so reading
+  # one of those back has nowhere honest to land but `nil`.
+  #
+  # Built FROM `@order_types` rather than a second hand-typed table, restricted to the
+  # types Core actually has an atom for — so an order type added to `@order_types` cannot
+  # silently drift from what comes back here the way two independently maintained tables
+  # could. `@durations_in` below does the same inversion for the same reason.
+  @core_order_types ~w(market limit stop stop_limit)a
+
+  @order_types_in @order_types
+                  |> Map.filter(fn {atom, _wire} -> atom in @core_order_types end)
+                  |> Map.new(fn {atom, wire} -> {wire, atom} end)
 
   # The inverse of `@durations`, which is what this module SENDS — so reading back an order
   # this package placed yields the same atom it was placed with.

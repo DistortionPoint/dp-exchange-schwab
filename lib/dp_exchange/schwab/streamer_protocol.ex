@@ -153,12 +153,22 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   @doc """
   Whether a `response` entry says the command succeeded.
 
-  **Code `0` is success and everything else is not.** The venue returns the code inside
-  `content`, so a package checking only that a response arrived would treat a rejected
-  LOGIN as a successful one and then wait forever for data that never comes.
+  **Code `0`, or one of the four `SUCCEEDED_COMMAND_*` codes, is success — everything else
+  is not.** The vendor's response-code table (`market-data-production.txt:176-190`) names
+  `26 SUCCEEDED_COMMAND_SUBS`, `27 SUCCEEDED_COMMAND_UNSUBS`, `28 SUCCEEDED_COMMAND_ADD`
+  and `29 SUCCEEDED_COMMAND_VIEW` explicitly — each row's own remedy column reads "n/a -
+  success". This used to check only for `0`, so a `SUBS`/`UNSUBS`/`ADD`/`VIEW` response
+  that reported one of its own dedicated success codes instead of `0` read as a failure:
+  `subscribe/4` would report `:degraded` for a subscription the venue had just confirmed.
+  The venue returns the code inside `content`, so a package checking only that a response
+  arrived would treat a rejected LOGIN as a successful one and then wait forever for data
+  that never comes.
   """
   @spec succeeded?(map()) :: boolean()
-  def succeeded?(%{"content" => %{"code" => 0}}), do: true
+  def succeeded?(%{"content" => %{"code" => code}})
+      when code == 0 or code in [26, 27, 28, 29],
+      do: true
+
   def succeeded?(_response), do: false
 
   @doc """

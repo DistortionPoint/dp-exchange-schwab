@@ -87,11 +87,13 @@ credential *use* — signing, session refresh, token rotation — belongs here.
 | | Lifetime | Renewed by |
 |---|---|---|
 | `access_token` | 30 minutes | `Auth.refresh/2` |
-| `refresh_token` | 7 days from its own creation | `Auth.refresh/2` — every call mints a new one, and the seven days restart |
+| `refresh_token` | 7 days after creation | `Auth.refresh/2` — every call mints a new one |
 
 **The refresh token is one-time use.** A refresh spends the token it was given and returns
-its replacement. So there is no weekly ceiling on unattended operation: a host refreshing
-every half hour rolls the window forward every half hour and never needs a person again.
+its replacement. The vendor documents the refresh token itself as valid seven days after
+creation and does not say whether refreshing before expiry resets that clock — see
+`DpExchange.Schwab.Auth`'s moduledoc. Plan for a person to re-authenticate at least once
+every seven days regardless of how often you refresh in between.
 
 **Persist the result of every refresh before using it.** Losing the returned token costs the
 grant, and recovering costs a person at a browser. `refresh/2` is never retried internally —

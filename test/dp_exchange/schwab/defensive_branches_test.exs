@@ -300,11 +300,14 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
   describe "balances on an account type the venue did not name" do
     test "available buying power is nil rather than invented" do
+      # `"liquidationValue"` used to be the fixture's key; it is not a `MarginBalance`
+      # field (AT:2491-2589) — see `Rest.balance_total/2`'s own comment. Corrected to
+      # `"equity"` (AT:2518), the schema's own total field.
       body = %{
         "securitiesAccount" => %{
           "type" => "MARGIN",
           "currentBalances" => %{
-            "liquidationValue" => 1.0
+            "equity" => 1.0
           }
         }
       }
@@ -524,9 +527,10 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       }
 
       base = [credentials: @creds, account_hash: "H"]
+      window = [from: ~U[2026-08-01 00:00:00Z], to: ~U[2026-09-01 00:00:00Z]]
 
       assert {:ok, [_balance]} = Schwab.get_balances(@creds, base ++ opts(responding(balances)))
-      assert {:ok, []} = Schwab.get_orders(@creds, base ++ opts(responding([])))
+      assert {:ok, []} = Schwab.get_orders(@creds, base ++ window ++ opts(responding([])))
       # This asserted `{:ok, %{}}` — an EMPTY OBJECT accepted as an order — which pinned the
       # facade returning the venue's raw map instead of the `Types.Order.t()` its `Core.Venue`
       # callback is typed as. An empty object has no `orderId` and is now refused; a
@@ -597,6 +601,32 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       end
 
       assert {:ok, "9"} = Schwab.replace_order(@creds, "1", request, base ++ opts(plug))
+    end
+
+    test "preview_order sends /previewOrder's own documented shape, not place_order's" do
+      # `PreviewOrder` (AT:2037) carries the order under `orderStrategy` (`OrderStrategy`,
+      # AT:1372), whose legs are `orderLegs` of `OrderLeg` (AT:1471) — flat `assetType`/
+      # `finalSymbol`, no nested `instrument`. This used to send `place_order/3`'s own
+      # `OrderRequest`/`orderLegCollection` body verbatim to `/previewOrder`.
+      capture = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(self(), {:preview_body, Jason.decode!(body)})
+        Req.Test.json(conn, %{"orderValidationResult" => %{}})
+      end
+
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+
+      assert {:ok, _preview} =
+               Schwab.preview_order(@creds, request, [account_hash: "H"] ++ opts(capture))
+
+      assert_received {:preview_body, body}
+      assert %{"orderStrategy" => strategy} = body
+      refute Map.has_key?(body, "orderLegCollection")
+
+      assert [leg] = strategy["orderLegs"]
+      assert leg["assetType"] == "EQUITY"
+      assert leg["finalSymbol"] == "AAPL"
+      refute Map.has_key?(leg, "instrument")
     end
 
     test "an invalid order never reaches the venue" do

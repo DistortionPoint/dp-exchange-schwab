@@ -746,9 +746,17 @@ defmodule DpExchange.SchwabTest do
                Fake.get_order(@creds, "1", account_hash: "H")
 
       # One decoded order now, not `[]` — an empty list made every check over its elements
-      # vacuous.
-      assert {:ok, [%DpExchange.Core.Types.Order{id: "fake-order-1"}]} =
+      # vacuous. The real venue requires `fromEnteredTime`/`toEnteredTime` on this endpoint
+      # too (`Rest.get_orders/3`), and the fake reproduces the refusal without them.
+      assert {:error, {:from_and_to_required, :schwab}} =
                Fake.get_orders(@creds, account_hash: "H")
+
+      assert {:ok, [%DpExchange.Core.Types.Order{id: "fake-order-1"}]} =
+               Fake.get_orders(@creds,
+                 account_hash: "H",
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z]
+               )
 
       assert {:ok, %{accounts: 1}} = Fake.test_connection(@creds)
     end

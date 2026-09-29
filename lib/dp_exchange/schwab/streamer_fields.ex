@@ -24,8 +24,8 @@ defmodule DpExchange.Schwab.StreamerFields do
   below is transcribed from a numbered table there.
   """
 
-  # LEVELONE_EQUITIES, from the vendor's field table. Fields 0–13 are transcribed; the
-  # service publishes more and this names what the package reads.
+  # LEVELONE_EQUITIES, from the vendor's field table. Fields 0–13, 34 and 35 are
+  # transcribed; the service publishes more and this names what the package reads.
   @level_one_equities %{
     "0" => :symbol,
     "1" => :bid,
@@ -43,7 +43,15 @@ defmodule DpExchange.Schwab.StreamerFields do
     # price… updated from the DB at 3:30 AM ET." Reading it as a current price would be a
     # yesterday's number wearing today's timestamp.
     "12" => :previous_close,
-    "13" => :exchange_id
+    "13" => :exchange_id,
+    # **This service DOES carry venue time**, on two separate fields the vendor documents
+    # by name (`market-data-production.txt:663-673`): field 34 "Quote Time in Long" —
+    # "Last time a bid or ask updated in milliseconds since Epoch" — and field 35 "Trade
+    # Time in Long" — "Last trade time in milliseconds since Epoch". `StreamerDecode` used
+    # to say this service carried none at all; it does, just not among fields 0-13, which
+    # is as far as this map went before these two were added.
+    "34" => :quote_time,
+    "35" => :trade_time
   }
 
   # LEVELONE_OPTIONS. **Numbered differently from LEVELONE_EQUITIES from field 1 onward** —

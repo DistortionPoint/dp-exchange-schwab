@@ -19,8 +19,9 @@ defmodule DpExchange.Schwab.Auth do
   for anything unattended. Refresh is a machine-to-machine `POST` with no human in it,
   and it is exactly the "session refresh, token rotation" §6.0 places on this side.
 
-  So: the host logs a person in once, and this package keeps that grant alive
-  indefinitely — for as long as it is refreshed at least once a week.
+  So: the host logs a person in once, and this package keeps that grant alive for as long
+  as the vendor's own seven-day ceiling allows — see below for what this package does and
+  does not know about extending it.
 
   ## The refresh token is one-time use, and every refresh issues a new one
 
@@ -30,14 +31,31 @@ defmodule DpExchange.Schwab.Auth do
   | | Lifetime | Renewed by |
   |---|---|---|
   | `access_token` | 30 minutes | `refresh/2`, from the refresh token |
-  | `refresh_token` | 7 days **from its own creation** | `refresh/2` — every call mints a new one, and the seven days restart with it |
+  | `refresh_token` | 7 days **after creation** | `refresh/2` — every call mints a new one |
 
   A refresh **spends** the token it was given. The old string is dead the moment the
-  request succeeds, and the response's `refresh_token` is its replacement with a fresh
-  seven days on it. So there is no weekly ceiling on unattended operation: a host
-  refreshing every thirty minutes rolls the seven-day window forward every thirty minutes
-  and never needs a person again. The clock only runs out if the package stops refreshing
-  for a week.
+  request succeeds, and the response's `refresh_token` is its replacement.
+
+  **What the seven days measures is a vendor claim this package states verbatim, not one it
+  has tested or extended.** The vendor's own documentation says it three times, in the same
+  words each time: *"A Trader API refresh token is valid for 7 days after creation. Upon
+  expiration, a new set refresh token must be recreated using the authorization_code Grant
+  Type authentication flow"* (`accounts-and-trading-production.txt:57`, repeated at `:75`
+  and `:102`). It does not say whether refreshing before expiry resets that seven days
+  forward from the new token's own creation, or whether the ceiling is fixed to the
+  original grant regardless of how often it is renewed — and this repository holds no
+  Schwab credential and has no sandbox to probe the difference (see this package's own
+  `CLAUDE.md`). This moduledoc used to state the generous reading as fact — "a host
+  refreshing every thirty minutes rolls the seven-day window forward... and never needs a
+  person again" — which is exactly the kind of claim `CLAUDE.md`'s "declare what you
+  measured, not what you assume" exists to catch: plausible, unlabelled, and not
+  something Schwab's document actually says.
+
+  **The safe assumption is the vendor's literal words: plan for a person to re-authenticate
+  at least once every seven days, regardless of how often `refresh/2` is called in
+  between.** If refreshing does extend the window, an operator who follows this rule loses
+  nothing but a browser visit that turned out to be unnecessary. If it does not, an
+  operator who assumed otherwise loses the grant.
 
   Three consequences, and the code enforces all three:
 
@@ -63,10 +81,10 @@ defmodule DpExchange.Schwab.Auth do
 
   ## What ends a grant for good
 
-  Only two things: seven days with no refresh, or the user resetting their Schwab
-  password. Both return `{:refused, {:reauthorization_required, status, detail}}`, which
-  names the remedy — a person, at a browser — rather than an error a caller would retry
-  against a credential that can never succeed.
+  Two things: the refresh token's seven days, or the user resetting their Schwab password.
+  Both return `{:refused, {:reauthorization_required, status, detail}}`, which names the
+  remedy — a person, at a browser — rather than an error a caller would retry against a
+  credential that can never succeed.
 
   A refusal whose body says `invalid_client` is different, and returns
   `{:refused, {:client_credentials_rejected, status, detail}}`: the app's `client_id` or
@@ -178,7 +196,7 @@ defmodule DpExchange.Schwab.Auth do
   - `{:error, {:missing_credentials, :schwab}}` — no refresh token, or no client
     credentials to authenticate the refresh with. Nothing was sent, and nothing is spent.
   - `{:refused, {:reauthorization_required, status, detail}}` — Schwab rejected the
-    refresh token. **Terminal.** Seven days elapsed with no refresh, or the user reset
+    refresh token. **Terminal.** The refresh token's seven days elapsed, or the user reset
     their password. Only a person at a browser can fix it; a caller must not retry.
   - `{:refused, {:client_credentials_rejected, status, detail}}` — the venue answered
     `invalid_client`: the app's `client_id` or `client_secret` is wrong. The grant may be
