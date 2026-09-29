@@ -198,6 +198,13 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Rest.get_symbols(@creds, opts(responding(body)) ++ [query: "A"])
     end
 
+    test "a row that is not an object, or a symbol that is not a string, is skipped, not raised on" do
+      body = %{"instruments" => [%{"symbol" => "aapl"}, "x", %{"symbol" => 42}]}
+
+      assert {:ok, ["AAPL"]} =
+               Rest.get_symbols(@creds, opts(responding(body)) ++ [query: "A"])
+    end
+
     test "the projection is selectable" do
       body = %{"instruments" => [%{"symbol" => "AAPL"}]}
 

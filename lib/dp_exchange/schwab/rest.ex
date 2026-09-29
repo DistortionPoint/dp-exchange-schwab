@@ -647,8 +647,14 @@ defmodule DpExchange.Schwab.Rest do
   defp instrument_symbols(%{"instruments" => rows}) when is_list(rows) do
     symbols =
       rows
-      |> Enum.map(& &1["symbol"])
-      |> Enum.reject(&is_nil/1)
+      # Only a string symbol on an object row. `& &1["symbol"]` raised on a row that was not an
+      # object (`Access` on a string), and a symbol that was not a string raised in
+      # `SymbolFormat`, both in the caller's process. Such a row names no instrument, and is
+      # skipped like one with no symbol.
+      |> Enum.flat_map(fn
+        %{"symbol" => symbol} when is_binary(symbol) -> [symbol]
+        _no_symbol -> []
+      end)
       |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
       |> Enum.sort()
 
