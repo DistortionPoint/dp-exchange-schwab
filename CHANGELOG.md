@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.75] - 2026-09-29
+
 ### Fixed
 
 - A refresh refused with `invalid_client` now returns
