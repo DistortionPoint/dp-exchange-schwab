@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.76] - 2026-09-29
+
 ### Fixed
 
 - `get_positions/2` refuses a reply in which an account's `positions` is not a list, or an
