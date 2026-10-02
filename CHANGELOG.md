@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Requires dp_exchange_core `~> 0.3.50`**, the first release whose `Quote` has the
+  `volume_window` field this package now sets. The old floor admitted core releases
+  without it, and a consumer resolving one would fail to compile. Locks 0.3.51, which also
+  stops a blocking request being metered twice: a feed pacing itself with
+  `rate_limit_blocking: true` had been running at half its declared ceiling.
+
 ## [0.2.85] - 2026-10-02
 
 ### Changed
