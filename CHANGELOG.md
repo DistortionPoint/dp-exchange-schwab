@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every `Quote` that carries a volume now says which quantity it is**, in
+  `volume_window` (dp_exchange_core 0.3.50, dp-exchange-core issue #42). The Streamer's
+  `last_size` is `:print`, one trade, to sum. The REST quote's `totalVolume` is
+  `:running_total`, the trading day's cumulative total, to difference. Both were in
+  `Quote.volume` with nothing to tell them apart.
+
 ## [0.2.84] - 2026-10-02
 
 ### Fixed

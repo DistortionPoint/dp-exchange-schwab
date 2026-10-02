@@ -131,6 +131,8 @@ defmodule DpExchange.Schwab.Fake do
          symbol: native,
          price: Decimal.new(price),
          volume: Decimal.new("1000000"),
+         # As the real `get_price/2`: the REST quote's `totalVolume`, a running total.
+         volume_window: :running_total,
          venue_time: @as_of,
          observed_at: @as_of,
          provider: :schwab

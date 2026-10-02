@@ -282,11 +282,18 @@ defmodule DpExchange.Schwab.Rest do
   defp build_quote(native, row) do
     with {:ok, raw_price} <- quoted_price(row),
          {:ok, price} <- required_decimal(raw_price, :price) do
+      # `totalVolume` is the trading day's cumulative volume, so it is a running total to
+      # difference, never one print to sum — dp-exchange-core issue #42. The Streamer's
+      # `Quote` carries the opposite (`last_size`, one print); `volume_window` is what lets a
+      # consumer tell the two apart.
+      volume = decimal(row["totalVolume"])
+
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
-         volume: decimal(row["totalVolume"]),
+         volume: volume,
+         volume_window: volume && :running_total,
          venue_time: venue_time_or_nil(row),
          observed_at: DateTime.utc_now(),
          provider: :schwab

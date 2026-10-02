@@ -55,15 +55,19 @@ defmodule DpExchange.Schwab.StreamerDecode do
   @spec to_quote(map(), String.t(), DateTime.t()) :: {:ok, Quote.t()} | {:error, term()}
   def to_quote(%{last: last} = fields, symbol, observed_at) when last != nil do
     with {:ok, price} <- required_decimal(last, :price) do
+      # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size` is
+      # the trade's own, so this quote's volume is one print, and says so in
+      # `volume_window` (dp-exchange-core issue #42). Read rather than required: `:volume`
+      # is not enforced on `Core.Types.Quote`, so an unreadable size is `nil`, the window
+      # with it, and the quote still stands.
+      volume = decimal(Map.get(fields, :last_size))
+
       {:ok,
        %Quote{
          symbol: symbol,
          price: price,
-         # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size`
-         # is the trade's own, and it is the one a Quote's volume means. Read rather than
-         # required: `:volume` is not enforced on `Core.Types.Quote`, so an unreadable size
-         # is `nil` and the quote still stands.
-         volume: decimal(Map.get(fields, :last_size)),
+         volume: volume,
+         volume_window: volume && :print,
          # **The venue's own trade time, where the service names one — `nil` otherwise.**
          # `LEVELONE_EQUITIES` field 35, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS`
          # field 11 — "Trade Time in Long" / "Trade Time", the last trade time in
