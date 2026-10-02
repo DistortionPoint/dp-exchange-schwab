@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.85] - 2026-10-02
+
 ### Changed
 
 - **Every `Quote` that carries a volume now says which quantity it is**, in
