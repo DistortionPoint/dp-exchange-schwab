@@ -31,6 +31,17 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Streamer LOGIN that is never answered now ends the connection instead of stalling
+  it.** Every command waits for the LOGIN response, so a server that answered pings but
+  not the LOGIN left the socket holding its subscriptions indefinitely while the ping
+  check reported it alive. The socket now gives each LOGIN 30 seconds. If nothing comes
+  back, it raises a `:degraded` notice with `details.reason: :login_unanswered` and
+  reconnects. The reconnect is not backed off, because the venue rejected nothing. The
+  same shape was measured on Gemini on 2026-10-02. The 30-second bound was not measured
+  against Schwab, because a LOGIN needs a credential this repo never holds.
+
 ## [0.2.83] - 2026-10-01
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

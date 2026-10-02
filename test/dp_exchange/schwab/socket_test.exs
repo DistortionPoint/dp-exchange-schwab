@@ -98,6 +98,60 @@ defmodule DpExchange.Schwab.SocketTest do
     end
   end
 
+  describe "an unanswered LOGIN — a connection that pongs but is not serving" do
+    # See `@login_timeout_ms`. Every command waits on the LOGIN response, so an unanswered
+    # LOGIN held this socket's subscriptions forever while pongs satisfied the ping check.
+    defp logging_in do
+      {:reply, _frame, sent} = Socket.handle_info(:login, state())
+      sent
+    end
+
+    defp login_answer(code) do
+      frame(%{
+        "response" => [
+          %{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => code}}
+        ]
+      })
+    end
+
+    test "a LOGIN still unanswered at its deadline is reported and the connection closed" do
+      sent = logging_in()
+
+      assert {:close, closed} = Socket.handle_info({:login_deadline, sent.login_deadline}, sent)
+      assert closed.login_deadline == nil
+      # The venue refused nothing, so the credential is not suspected and not backed off.
+      assert closed.login_failures == 0
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :degraded, details: %{reason: :login_unanswered}}}
+    end
+
+    test "an accepted LOGIN disarms the deadline" do
+      sent = logging_in()
+      {:ok, answered} = Socket.handle_frame(login_answer(0), sent)
+
+      assert answered.login_deadline == nil
+      assert {:ok, _state} = Socket.handle_info({:login_deadline, sent.login_deadline}, answered)
+      refute_received {:dp_exchange, :schwab, %Notice{details: %{reason: :login_unanswered}}}
+    end
+
+    test "a refused LOGIN is an answer too, reported as the refusal it is" do
+      sent = logging_in()
+      {_action, answered} = Socket.handle_frame(login_answer(3), sent)
+
+      assert answered.login_deadline == nil
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :credentials_rejected}}
+    end
+
+    test "a deadline from an earlier LOGIN does nothing once a new one is out" do
+      first = logging_in()
+      {:reply, _frame, second} = Socket.handle_info(:login, first)
+
+      assert {:ok, _state} = Socket.handle_info({:login_deadline, first.login_deadline}, second)
+      refute_received {:dp_exchange, :schwab, %Notice{details: %{reason: :login_unanswered}}}
+    end
+  end
+
   describe "liveness — a dead connection is found by pinging it" do
     # See the moduledoc's "A dead connection is found by pinging it".
     defp checked(heard_ms_ago) do

@@ -167,6 +167,15 @@ defmodule DpExchange.Schwab.Socket do
   @ping_every_ms 30_000
   @silence_ms 90_000
 
+  # How long a LOGIN may go unanswered before the connection is treated as not serving. The
+  # vendor documents a response to every LOGIN (`0` success, `3` denied), and every command
+  # sent before it is held, so an unanswered LOGIN left this socket holding its subscriptions
+  # forever while pongs kept the ping check satisfied. The same shape was measured on
+  # `dp_exchange_gemini` on 2026-10-02, where a restarting server answered pings and nothing
+  # else for three minutes. **Not measured against this venue**: the LOGIN needs a credential
+  # this repo never holds, so 30s is a generous bound, not an observed latency.
+  @login_timeout_ms 30_000
+
   @doc """
   Opens the Streamer for `info`, logging in with `access_token`.
 
@@ -200,6 +209,8 @@ defmodule DpExchange.Schwab.Socket do
       # check. See the moduledoc's "A dead connection is found by pinging it".
       last_heard_at: nil,
       liveness: nil,
+      # The pending LOGIN's deadline, cleared by any LOGIN response. See `@login_timeout_ms`.
+      login_deadline: nil,
       # The last book this socket published per symbol, because `LEVELONE_*` is Change
       # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
       # connection, and dropped wholesale on reconnect.
@@ -359,7 +370,29 @@ defmodule DpExchange.Schwab.Socket do
     login = StreamerProtocol.login(state.info, state.credentials.access_token, state.request_id)
     frame = Jason.encode!(StreamerProtocol.envelope([login]))
 
-    {:reply, {:text, frame}, %{state | request_id: state.request_id + 1}}
+    deadline = make_ref()
+    Process.send_after(self(), {:login_deadline, deadline}, @login_timeout_ms)
+
+    {:reply, {:text, frame},
+     Map.merge(state, %{request_id: state.request_id + 1, login_deadline: deadline})}
+  end
+
+  # See `@login_timeout_ms`. Any LOGIN response, accepted or refused, clears the deadline,
+  # and a reconnect's fresh LOGIN replaces its ref, so only a LOGIN still unanswered gets
+  # here. Not counted in `login_failures`: the venue rejected nothing, so the credential is
+  # not suspected and the reconnect is not backed off.
+  def handle_info({:login_deadline, deadline}, %{login_deadline: deadline} = state) do
+    notify(
+      state,
+      Notice.new(:degraded, :schwab,
+        message:
+          "LOGIN unanswered after #{@login_timeout_ms}ms while the connection still answers " <>
+            "pings — closing the connection and reconnecting",
+        details: %{reason: :login_unanswered}
+      )
+    )
+
+    {:close, %{state | login_deadline: nil}}
   end
 
   # See the moduledoc's "A dead connection is found by pinging it". A check whose ref is not
@@ -575,6 +608,9 @@ defmodule DpExchange.Schwab.Socket do
   end
 
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
+    # Answered, whatever the answer — see `@login_timeout_ms`.
+    state = Map.put(state, :login_deadline, nil)
+
     if StreamerProtocol.succeeded?(response) do
       notify(state, Notice.new(:link_up, :schwab))
 
