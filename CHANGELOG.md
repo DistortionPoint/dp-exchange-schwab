@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.86] - 2026-10-02
+
 ### Fixed
 
 - **Requires dp_exchange_core `~> 0.3.50`**, the first release whose `Quote` has the
