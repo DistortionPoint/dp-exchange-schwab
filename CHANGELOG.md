@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.84] - 2026-10-02
+
 ### Fixed
 
 - **A Streamer LOGIN that is never answered now ends the connection instead of stalling
