@@ -652,7 +652,10 @@ messages**, this package stops sending it events and emits a `Core.Notice`:
 }
 ```
 
-and a second one, `severity: :info`, when you catch up. **Those two notices bracket exactly
+and a second one, `severity: :info`, once you have drained below **half** the bound (5,000 by
+default). Not merely back under it: a mailbox hovering at the bound used to flip on every
+message, with a notice each time, into the same full mailbox. Now one stall costs one pair.
+**Those two notices bracket exactly
 the window you have to reconcile** from the pull endpoints — that is what the pair is for,
 and why the recovery notice exists at all rather than just the alarm.
 
