@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order request with no `:order_type` and a `:price` went out as a MARKET order.** It carried the
+  caller's `:price`, which a market order ignores. A type-less request with a price or stop price is now
+  `{:error, {:missing_order_field, :order_type}}`.
+- **An explicit `:instruction` silently overrode a contradicting `:side`.** `side: :sell,
+  instruction: "BUY"` sent BUY. The two must now agree, or the request is
+  `{:error, {:conflicting_order_fields, ...}}`.
+
 ## [0.2.90] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

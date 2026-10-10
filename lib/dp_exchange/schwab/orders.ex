@@ -201,12 +201,23 @@ defmodule DpExchange.Schwab.Orders do
   defp positive(quantity) when quantity > 0, do: {:ok, quantity}
   defp positive(quantity), do: {:error, {:invalid_quantity, quantity}}
 
+  # **No `:order_type` is a market order only when nothing says otherwise.** A request with
+  # no type and a `:price` went out as a MARKET order, the price ignored: a forgotten field
+  # became an order at any price. A price or a stop price says the caller meant something
+  # else, and which is not this package's to guess, so that is refused. A bare request still
+  # defaults to market, the venue's own documented example.
   defp fetch_order_type(request) do
-    type = Map.get(request, :order_type, :market)
+    case Map.get(request, :order_type) do
+      nil ->
+        if Map.get(request, :price) || Map.get(request, :stop_price),
+          do: {:error, {:missing_order_field, :order_type}},
+          else: {:ok, Map.fetch!(@order_types, :market)}
 
-    case Map.fetch(@order_types, type) do
-      {:ok, native} -> {:ok, native}
-      :error -> {:error, {:unsupported_order_type, type}}
+      type ->
+        case Map.fetch(@order_types, type) do
+          {:ok, native} -> {:ok, native}
+          :error -> {:error, {:unsupported_order_type, type}}
+        end
     end
   end
 
@@ -231,8 +242,23 @@ defmodule DpExchange.Schwab.Orders do
         {_other, side} -> side
       end
 
-    validate_instruction(instruction, native)
+    with :ok <- instruction_agrees(instruction, Map.get(request, :side)),
+         do: validate_instruction(instruction, native)
   end
+
+  # An explicit instruction that contradicts `:side` is refused: `side: :sell,
+  # instruction: "BUY"` sent BUY, and which of the two the caller meant is not this
+  # package's to choose.
+  defp instruction_agrees(instruction, side)
+       when is_binary(instruction) and side in [:buy, :sell] do
+    direction = if String.starts_with?(instruction, "BUY"), do: :buy, else: :sell
+
+    if direction == side,
+      do: :ok,
+      else: {:error, {:conflicting_order_fields, instruction: instruction, side: side}}
+  end
+
+  defp instruction_agrees(_instruction, _side), do: :ok
 
   defp validate_instruction(nil, _native), do: {:error, {:missing_order_field, :side}}
 

@@ -98,7 +98,9 @@ defmodule DpExchange.Schwab.OrdersTest do
   describe "the published instruction matrix is enforced before sending" do
     test "equity instructions are accepted on an equity" do
       for instruction <- Orders.equity_instructions() do
-        assert {:ok, payload} = Orders.build(Map.put(@buy, :instruction, instruction))
+        # The instruction alone, with no `:side` to agree or disagree with it.
+        request = @buy |> Map.delete(:side) |> Map.put(:instruction, instruction)
+        assert {:ok, payload} = Orders.build(request)
         assert [%{"instruction" => ^instruction}] = payload["orderLegCollection"]
       end
     end
@@ -106,7 +108,7 @@ defmodule DpExchange.Schwab.OrdersTest do
     test "an option instruction on an equity is refused, as the venue's table says" do
       for instruction <- Orders.option_instructions() do
         assert {:error, {:instruction_not_valid_for_asset, ^instruction, "EQUITY"}} =
-                 Orders.build(Map.put(@buy, :instruction, instruction))
+                 Orders.build(@buy |> Map.delete(:side) |> Map.put(:instruction, instruction))
       end
     end
 
@@ -341,6 +343,22 @@ defmodule DpExchange.Schwab.OrdersTest do
       %{"orderStrategy" => strategy} = Orders.to_preview(built)
 
       assert strategy["price"] == built["price"]
+    end
+  end
+
+  describe "fields the caller must state" do
+    test "a missing order_type beside a price is refused, not sent as a market order" do
+      # Defaulted to `:market`, a forgotten field became an order at any price, with the
+      # caller's `:price` ignored.
+      request = %{symbol: "AAPL", side: :buy, quantity: 15, price: 150}
+      assert {:error, {:missing_order_field, :order_type}} = Orders.build(request)
+    end
+
+    test "an instruction that contradicts the side is refused" do
+      request = Map.merge(@buy, %{side: :sell, instruction: "BUY"})
+
+      assert {:error, {:conflicting_order_fields, instruction: "BUY", side: :sell}} =
+               Orders.build(request)
     end
   end
 end
