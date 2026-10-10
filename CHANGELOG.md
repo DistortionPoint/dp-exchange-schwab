@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.89] - 2026-10-10
+
 ### Fixed
 
 - **Twelve facade reads skipped the supervised rate limiter.** `get_positions`,
