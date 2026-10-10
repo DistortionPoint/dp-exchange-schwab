@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.98] - 2026-10-10
+
 ### Fixed
 
 - **`get_option_chain/3` and `get_option_expirations/3` raised on a non-string
