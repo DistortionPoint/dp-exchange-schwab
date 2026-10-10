@@ -1157,4 +1157,33 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage(feed) == %{}
     end
   end
+
+  describe "the wanted set is spelled the way the venue delivers" do
+    # `SymbolFormat.validate/1` trims and upper-cases, so a padded or lower-case symbol was
+    # accepted and sent to the Streamer as `AAPL` while `wanted` kept the caller's spelling.
+    # Every frame then arrived as `AAPL`, matched nothing in `wanted`, and was dropped.
+    test "a padded lower-case subscription still receives the venue's upper-case symbol" do
+      feed = start_feed(socket: fake_socket())
+      assert Feed.subscribe(feed, [" aapl "]) == :ok
+      assert Feed.wanted(feed) == ["AAPL"]
+
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 2_000
+      assert Feed.coverage(feed) == %{"AAPL" => :stream}
+    end
+
+    test "unsubscribe removes a symbol however the caller spells it" do
+      feed = start_feed(socket: fake_socket())
+      assert Feed.subscribe(feed, ["AAPL", "MSFT"]) == :ok
+      assert Feed.unsubscribe(feed, [" msft"]) == :ok
+
+      assert Feed.wanted(feed) == ["AAPL"]
+    end
+
+    test "symbols given at start are normalised too" do
+      feed = start_feed(socket: fake_socket(), symbols: ["aapl"])
+
+      assert Feed.wanted(feed) == ["AAPL"]
+    end
+  end
 end

@@ -74,7 +74,13 @@ defmodule DpExchange.Schwab.StreamerFields do
     "12" => :expiration_year,
     "16" => :bid_size,
     "17" => :ask_size,
-    "18" => :last_size
+    "18" => :last_size,
+    # "Quote Time in Long" and "Trade Time in Long", both milliseconds since epoch
+    # (`market-data-production.txt`, LEVELONE_OPTIONS table, fields 38 and 39). These were
+    # left unnamed on the premise that the service carried no venue time, so every option
+    # quote reported `venue_time: nil` and was dated by its arrival.
+    "38" => :quote_time,
+    "39" => :trade_time
   }
 
   # LEVELONE_FUTURES. Fields 0–5 match LEVELONE_EQUITIES and then they diverge:
@@ -115,7 +121,11 @@ defmodule DpExchange.Schwab.StreamerFields do
     "4" => :bid_size,
     "5" => :ask_size,
     "6" => :total_volume,
-    "7" => :last_size
+    "7" => :last_size,
+    # "Quote Time" and "Trade Time", milliseconds since epoch (LEVELONE_FOREX table, fields
+    # 8 and 9). See the note on LEVELONE_OPTIONS 38 and 39.
+    "8" => :quote_time,
+    "9" => :trade_time
   }
 
   # NYSE_BOOK, NASDAQ_BOOK and OPTIONS_BOOK. **All three share one field table** — the

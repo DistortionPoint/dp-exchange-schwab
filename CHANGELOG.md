@@ -31,6 +31,38 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A delayed quote was delivered as a live one.** An account without real-time
+  entitlements is streamed rows marked `"delayed": true`; the flag was ignored, so a
+  15-minute-old quote and book reached the consumer stamped `observed_at: now`. Delayed
+  `LEVELONE_*` and `*_BOOK` rows are now withheld, with a `:degraded` notice once per symbol
+  per session naming the symbol, service and reason. `CHART_*` candles carry their own
+  bucket time and are still delivered.
+
+- **`session` is validated against the venue's enum.** A request or option `session:` went
+  onto the wire unchecked, and an atom encodes as its lower-case name, so a caller following
+  `capabilities().supported_sessions` and passing `session: :pre_market` sent `"pre_market"`
+  and spent a throttled order write on a rejection. `:regular`, `:pre_market`, `:post_market`
+  and `:extended` now map to `NORMAL`, `AM`, `PM` and `SEAMLESS`; the venue's own values are
+  accepted in any case; anything else is `{:error, {:unsupported_session, value}}`.
+- **Order numbers.** A float `price`/`stopPrice` below `1.0e-4` went out as `"1.0e-4"` (plain
+  notation now, as for a Decimal). A NaN or Infinity `Decimal` price or offset is refused as
+  `{:error, {:invalid_order_field, key, value}}` instead of being sent as `"NaN"`, and a NaN,
+  Infinity or out-of-range `Decimal` quantity is `{:invalid_quantity, _}` instead of raising
+  in `Decimal.to_float/1`.
+- **A feed subscription spelled differently from the venue's symbol delivered nothing.**
+  `Feed` validated `" aapl"` as `AAPL` and sent `AAPL` to the Streamer but kept `" aapl"` in
+  its wanted set, so every `AAPL` frame was dropped as unwanted, and `unsubscribe/2` could
+  not remove it. `subscribe`, `unsubscribe`, `update_symbols` and the `:symbols` start option
+  now store the canonical spelling.
+- **`LEVELONE_OPTIONS` and `LEVELONE_FOREX` quotes now carry the venue's own times.** Fields
+  38/39 (options) and 8/9 (forex) are documented as quote and trade time in milliseconds and
+  were left unnamed, so those quotes reported `venue_time: nil` though the venue stamped
+  them. `usage-rules.md` also wrongly said every streamed quote has `venue_time: nil`.
+- **A streamer row with no `key` and no symbol field** was decoded into a `Quote`, `Candle`
+  or `OrderBook` with `symbol: nil`; it is now dropped.
+
 ## [0.2.96] - 2026-10-10
 
 ### Changed

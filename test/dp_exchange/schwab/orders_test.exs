@@ -366,4 +366,58 @@ defmodule DpExchange.Schwab.OrdersTest do
                Orders.build(request)
     end
   end
+
+  describe "session is the venue's enum" do
+    test "Core's session atoms map to the venue's four values" do
+      for {core, native} <- [
+            regular: "NORMAL",
+            pre_market: "AM",
+            post_market: "PM",
+            extended: "SEAMLESS"
+          ] do
+        assert {:ok, %{"session" => ^native}} = Orders.build(Map.put(@buy, :session, core))
+      end
+    end
+
+    test "a venue value is accepted in any case, per request and per option" do
+      assert {:ok, %{"session" => "AM"}} = Orders.build(Map.put(@buy, :session, "am"))
+      assert {:ok, %{"session" => "PM"}} = Orders.build(@buy, session: :pm)
+    end
+
+    test "an unknown session is refused, never sent or defaulted to NORMAL" do
+      assert Orders.build(Map.put(@buy, :session, :overnight)) ==
+               {:error, {:unsupported_session, :overnight}}
+
+      assert Orders.build(Map.put(@buy, :session, "late")) ==
+               {:error, {:unsupported_session, "late"}}
+
+      assert Orders.build(@buy, session: 5) == {:error, {:unsupported_session, 5}}
+    end
+  end
+
+  describe "non-finite and float numbers" do
+    test "a NaN or Infinity quantity is refused rather than raising" do
+      for bad <- [Decimal.new("NaN"), Decimal.new("Infinity")] do
+        assert {:error, {:invalid_quantity, ^bad}} = Orders.build(%{@buy | quantity: bad})
+      end
+    end
+
+    test "a NaN or Infinity price is refused, not sent as a string" do
+      bad = Decimal.new("NaN")
+      request = Map.merge(@buy, %{order_type: :limit, price: bad})
+
+      assert {:error, {:invalid_order_field, :price, ^bad}} = Orders.build(request)
+
+      inf = Decimal.new("Infinity")
+      request = Map.merge(@buy, %{order_type: :stop, stop_price: inf})
+      assert {:error, {:invalid_order_field, :stop_price, ^inf}} = Orders.build(request)
+    end
+
+    test "a very small float price is plain notation, not 1.0e-4" do
+      request = @buy |> Map.put(:order_type, :limit) |> Map.put(:price, 0.0001)
+
+      assert {:ok, payload} = Orders.build(request)
+      assert payload["price"] == "0.0001"
+    end
+  end
 end

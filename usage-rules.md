@@ -43,11 +43,19 @@ expressible before, because there was no way to see which kind of time you had.
 without it.
 
 
-**When is `venue_time` `nil` on this venue? On every streamed quote.** `LEVELONE_*` frames
-carry no venue time in the fields this package reads, so a `Quote` from `subscribe/2` always
-has `venue_time: nil` and a real `observed_at`. That is not a gap — it is the fact the split
-exists to state, and before 0.2.0 this package put the frame's arrival time in a field
-documented as the venue's own.
+**When is `venue_time` `nil` on a streamed quote?** When the frame did not carry the venue's
+own trade time. `LEVELONE_EQUITIES` (field 35), `LEVELONE_OPTIONS` (39), `LEVELONE_FUTURES`
+and `LEVELONE_FUTURES_OPTIONS` (11) and `LEVELONE_FOREX` (9) name one, and a `Quote` reads it
+when the frame includes it. Otherwise `venue_time` is `nil` beside a real `observed_at`. That
+is not a gap — it is the fact the split exists to state, and before 0.2.0 this package put
+the frame's arrival time in a field documented as the venue's own.
+
+**A delayed quote is never delivered.** An account without real-time entitlements is
+streamed delayed rows (`"delayed": true`), and neither `Quote` nor `TopOfBook` can say so.
+Those `LEVELONE_*` and `*_BOOK` rows are withheld, and the first one per symbol per
+Streamer session raises a `:degraded` `Core.Notice` with `details.symbol`, `details.service`
+and the reason. A symbol that is subscribed and never delivers, with that notice, is an
+entitlement problem on the account, not a feed fault. `CHART_*` candles are still delivered.
 
 The **book** is the opposite and always was: `to_order_book/2` reads the venue's
 `snapshot_time` and fails closed without it, so an `OrderBook` always carries a real
@@ -366,7 +374,10 @@ rather than one.
 Every order carries a `session` — `NORMAL` unless you say otherwise. Pass `:session` in
 the request or `session:` in options. `supported_sessions` lists what the venue takes;
 this is the only venue in the family where the field is non-empty, because it is the only
-one whose market closes.
+one whose market closes. The atoms map `:regular` to `NORMAL`, `:pre_market` to `AM`,
+`:post_market` to `PM` and `:extended` to `SEAMLESS`; the venue's own `NORMAL`, `AM`, `PM`
+and `SEAMLESS` are accepted in any case. Anything else is
+`{:error, {:unsupported_session, value}}` before a request is sent, never `NORMAL`.
 
 Eight order types, not four: `:market`, `:limit`, `:stop`, `:stop_limit`,
 `:trailing_stop`, `:trailing_stop_limit`, `:market_on_close`, `:limit_on_close`.

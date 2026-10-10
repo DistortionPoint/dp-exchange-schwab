@@ -24,6 +24,11 @@ defmodule DpExchange.Schwab.Orders do
   stated here rather than hidden: it is the session a person placing an order by hand
   would get, and the alternative is refusing every order until Core grows the field.
 
+  An override is the venue's own `NORMAL`, `AM`, `PM` or `SEAMLESS` (any case), or one of
+  Core's `capabilities().supported_sessions` atoms: `:regular` is `NORMAL`, `:pre_market` is
+  `AM`, `:post_market` is `PM` and `:extended` is `SEAMLESS`. Anything else is
+  `{:error, {:unsupported_session, value}}`, never `NORMAL`.
+
   ## The instruction matrix is published, so a mismatch is refused locally
 
   Schwab documents which instructions each asset type accepts, and the table is
@@ -56,9 +61,10 @@ defmodule DpExchange.Schwab.Orders do
   # needs all three parts: what to trail (`stopPriceLinkBasis`), whether the offset is a
   # value, a percent or ticks (`stopPriceLinkType`), and the offset itself
   # (`stopPriceOffset`). Nothing in `Core`'s request vocabulary names them, so they are
-  # taken from the request under their venue names and **required** — a trailing stop
-  # missing its offset is not a trailing stop, and the venue would reject it after
-  # spending one of a small number of writes per minute.
+  # taken from the request under their venue names. Only the offset is **required** here: a
+  # trailing stop missing its offset is not a trailing stop, and the venue would reject it
+  # after spending one of a small number of writes per minute. The OpenAPI document marks no
+  # field of the three required, so the other two ride along when given and are not demanded.
   @trailing_types ["TRAILING_STOP", "TRAILING_STOP_LIMIT"]
 
   # `duration` is Schwab's name for time-in-force. `:gtd` is deliberately absent: Schwab
@@ -114,11 +120,13 @@ defmodule DpExchange.Schwab.Orders do
          {:ok, order_type} <- fetch_order_type(request),
          {:ok, duration} <- fetch_duration(request),
          {:ok, instruction} <- fetch_instruction(request, native),
+         {:ok, session} <- fetch_session(request, opts),
+         :ok <- check_finite(request),
          :ok <- check_prices(order_type, request) do
       {:ok,
        %{
          "orderType" => order_type,
-         "session" => session(request, opts),
+         "session" => session,
          "duration" => duration,
          "orderStrategyType" => "SINGLE",
          "orderLegCollection" => [
@@ -192,10 +200,81 @@ defmodule DpExchange.Schwab.Orders do
   defp fetch_quantity(request) do
     case Map.get(request, :quantity) do
       nil -> {:error, {:missing_order_field, :quantity}}
-      %Decimal{} = quantity -> positive(Decimal.to_float(quantity))
+      %Decimal{} = quantity -> decimal_quantity(quantity)
       quantity when is_number(quantity) -> positive(quantity)
       other -> {:error, {:invalid_quantity, other}}
     end
+  end
+
+  # `Decimal.to_float/1` raises on NaN, Infinity and anything past the float range, in the
+  # caller's process. A quantity the venue could never read is `:invalid_quantity`, like any
+  # other, and refused before a throttled write is spent on it.
+  defp decimal_quantity(quantity) do
+    if Decimal.nan?(quantity) or Decimal.inf?(quantity),
+      do: {:error, {:invalid_quantity, quantity}},
+      else: positive(Decimal.to_float(quantity))
+  rescue
+    _out_of_range in [ArgumentError, ArithmeticError] ->
+      {:error, {:invalid_quantity, quantity}}
+  end
+
+  # A NaN or Infinity price went out as the string `"NaN"` / `"Infinity"`. Every field the
+  # generic `maybe_put/3` stringifies is checked here, so a non-finite value is refused by
+  # name instead of being sent to the venue as a price.
+  defp check_finite(request) do
+    Enum.reduce_while([:price, :stop_price, :stop_price_offset], :ok, fn key, :ok ->
+      case Map.get(request, key) do
+        %Decimal{} = value ->
+          if Decimal.nan?(value) or Decimal.inf?(value),
+            do: {:halt, {:error, {:invalid_order_field, key, value}}},
+            else: {:cont, :ok}
+
+        _other ->
+          {:cont, :ok}
+      end
+    end)
+  end
+
+  # **`session` is the venue's enum, not whatever the caller typed.** The venue accepts
+  # `NORMAL`, `AM`, `PM` and `SEAMLESS` (`session` schema, AT:1130-1138). The value was sent
+  # through unchecked, and `Jason` encodes an atom as its lower-case name, so a caller who read
+  # `capabilities().supported_sessions` and passed `session: :pre_market` sent `"pre_market"`:
+  # a rejection that cost one of the throttled order writes.
+  #
+  # Core's four session atoms map to the venue's four values. `:extended` is `SEAMLESS`, the
+  # only session that includes the extended hours; it also includes the regular one. Anything
+  # else is refused, never defaulted to `NORMAL`.
+  @core_sessions %{
+    regular: "NORMAL",
+    pre_market: "AM",
+    post_market: "PM",
+    extended: "SEAMLESS"
+  }
+  @sessions ~w(NORMAL AM PM SEAMLESS)
+
+  defp fetch_session(request, opts) do
+    case Map.get(request, :session) || Keyword.get(opts, :session) do
+      nil -> {:ok, "NORMAL"}
+      session -> native_session(session)
+    end
+  end
+
+  defp native_session(session) when is_atom(session) do
+    case Map.fetch(@core_sessions, session) do
+      {:ok, native} -> {:ok, native}
+      :error -> native_session(Atom.to_string(session), session)
+    end
+  end
+
+  defp native_session(session) when is_binary(session), do: native_session(session, session)
+  defp native_session(session), do: {:error, {:unsupported_session, session}}
+
+  defp native_session(text, original) do
+    upcased = text |> String.trim() |> String.upcase()
+
+    if upcased in @sessions,
+      do: {:ok, upcased},
+      else: {:error, {:unsupported_session, original}}
   end
 
   defp positive(quantity) when quantity > 0, do: {:ok, quantity}
@@ -305,10 +384,6 @@ defmodule DpExchange.Schwab.Orders do
     end)
   end
 
-  defp session(request, opts) do
-    Map.get(request, :session) || Keyword.get(opts, :session) || "NORMAL"
-  end
-
   defp asset_type(native), do: if(SymbolFormat.option?(native), do: "OPTION", else: "EQUITY")
 
   defp maybe_put(payload, _key, nil), do: payload
@@ -358,7 +433,15 @@ defmodule DpExchange.Schwab.Orders do
   defp maybe_put(payload, key, %Decimal{} = value),
     do: Map.put(payload, key, Decimal.to_string(value, :normal))
 
+  # **`to_string/1` on a float is scientific below 1.0e-4.** `to_string(0.0001)` is
+  # `"1.0e-4"`, the same unreadable-price failure the Decimal clause above closes, reached
+  # through a float price instead. `Decimal.from_float/1` keeps the shortest round-trip digits
+  # and `:normal` writes them out in full.
+  defp maybe_put(payload, key, value) when is_float(value),
+    do: Map.put(payload, key, value |> Decimal.from_float() |> Decimal.to_string(:normal))
+
   defp maybe_put(payload, key, value), do: Map.put(payload, key, to_string(value))
+
   # --- reading an order back --------------------------------------------------
 
   # `Core.Types.Order.order_type/0` is `:market | :limit | :stop | :stop_limit |

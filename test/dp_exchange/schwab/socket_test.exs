@@ -97,6 +97,57 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
     end
+
+    test "a row naming no symbol is dropped, not published with symbol nil" do
+      data = %{
+        "data" => [
+          %{
+            "service" => "LEVELONE_EQUITIES",
+            "command" => "SUBS",
+            "content" => [%{"1" => 99.5, "2" => 100.5, "3" => 100.0}]
+          }
+        ]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      refute_received {:dp_exchange, :schwab, _payload}
+    end
+  end
+
+  describe "a delayed quote is not delivered as a live one" do
+    test "a delayed row is withheld, and reported once per symbol" do
+      row = %{"key" => "AAPL", "delayed" => true, "1" => 99.5, "2" => 100.5, "3" => 100.0}
+
+      data = %{
+        "data" => [
+          %{"service" => "LEVELONE_EQUITIES", "command" => "SUBS", "content" => [row, row]}
+        ]
+      }
+
+      assert {:ok, after_first} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{
+                         kind: :degraded,
+                         details: %{symbol: "AAPL", service: "LEVELONE_EQUITIES"}
+                       }}
+
+      refute_received {:dp_exchange, :schwab, _payload}
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), after_first)
+      refute_received {:dp_exchange, :schwab, _payload}
+    end
+
+    test "a real-time row is still delivered" do
+      row = %{"key" => "AAPL", "delayed" => false, "1" => 99.5, "2" => 100.5, "3" => 100.0}
+
+      data = %{
+        "data" => [%{"service" => "LEVELONE_EQUITIES", "command" => "SUBS", "content" => [row]}]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      assert_received {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}
+    end
   end
 
   describe "an unanswered LOGIN — a connection that pongs but is not serving" do

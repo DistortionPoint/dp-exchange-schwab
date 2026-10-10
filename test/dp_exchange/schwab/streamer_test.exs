@@ -336,6 +336,33 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert futures == futures_options
     end
 
+    test "options and forex name the venue's own quote and trade times" do
+      # LEVELONE_OPTIONS 38/39 and LEVELONE_FOREX 8/9, per the vendor's tables. They were
+      # unnamed, so these services' quotes reported `venue_time: nil` though the venue stamps.
+      observed = ~U[2026-01-01 00:00:00Z]
+
+      for {service, quote_key, trade_key, last_key, symbol} <- [
+            {"LEVELONE_OPTIONS", "38", "39", "4", "AAPL  260320C00150000"},
+            {"LEVELONE_FOREX", "8", "9", "3", "EUR/USD"}
+          ] do
+        {:ok, field_map} = StreamerFields.for_service(service)
+        assert field_map[quote_key] == :quote_time
+        assert field_map[trade_key] == :trade_time
+
+        renamed =
+          StreamerProtocol.rename(
+            %{last_key => 1.5, quote_key => 1_714_949_590_000, trade_key => 1_714_949_592_301},
+            field_map
+          )
+
+        assert {:ok, quote_} = StreamerDecode.to_quote(renamed, symbol, observed)
+        assert quote_.venue_time == DateTime.from_unix!(1_714_949_592_301, :millisecond)
+
+        assert {:ok, top} = StreamerDecode.to_top_of_book(renamed, symbol, observed)
+        assert top.venue_time == DateTime.from_unix!(1_714_949_590_000, :millisecond)
+      end
+    end
+
     test "CHART_FUTURES is numbered differently from CHART_EQUITY starting at field 1" do
       # Transcribed from the vendor's own "2. CHART_FUTURES" table
       # (market-data-production.txt, after line 2439): 0 key, 1 Chart Time (ms since

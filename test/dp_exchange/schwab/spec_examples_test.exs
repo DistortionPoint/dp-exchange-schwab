@@ -888,7 +888,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
   # ============================================================================
 
   describe "LEVELONE_OPTIONS — level_one_options_frame_schema.json (schema-derived)" do
-    test "to_quote/3 reads field 4 (Last Price), and this service carries no venue timestamp" do
+    test "to_quote/3 reads field 4 (Last Price); this fixture omits fields 38/39, so no venue timestamp" do
       fields = fixture!("streamer/level_one_options_frame_schema.json")
       observed = ~U[2026-01-01 00:00:00Z]
 
@@ -927,12 +927,12 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
   end
 
   # ============================================================================
-  # Streamer — LEVELONE_FOREX (schema-derived, market-data-production.txt:1930) — names no
+  # Streamer — LEVELONE_FOREX (schema-derived, market-data-production.txt:1930) — this fixture names no
   # venue timestamp field at all.
   # ============================================================================
 
   describe "LEVELONE_FOREX — level_one_forex_frame_schema.json (schema-derived)" do
-    test "to_quote/3 reads field 3 (Last Price) and never states a venue_time" do
+    test "to_quote/3 reads field 3 (Last Price); this fixture omits fields 8/9, so no venue_time" do
       fields = fixture!("streamer/level_one_forex_frame_schema.json")
       observed = ~U[2026-01-01 00:00:00Z]
 

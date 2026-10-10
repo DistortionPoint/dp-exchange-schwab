@@ -471,9 +471,10 @@ defmodule DpExchange.Schwab.Capabilities do
 
       # OAuth 2.0 authorization-code on every endpoint in both documents, market data
       # included. There is no anonymous surface. The access token lives 30 minutes, and
-      # `Auth.refresh/2` renews it in-package — minting a new refresh token each time,
-      # itself valid for a fresh seven days. So a host that keeps refreshing never needs a
-      # person again; only the initial grant needs a browser.
+      # `Auth.refresh/2` renews it in-package — minting a new refresh token each time.
+      # The vendor says a refresh token is valid "7 days after creation" and does not say
+      # whether refreshing extends that ceiling (`Auth`'s moduledoc), so plan for a person
+      # at a browser at least weekly; only the initial grant and that renewal need one.
       credential_benefit: :required,
 
       # No anonymous surface, so no public ceiling to declare. `nil` is the absence of a

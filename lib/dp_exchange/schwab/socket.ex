@@ -115,6 +115,18 @@ defmodule DpExchange.Schwab.Socket do
   token passed to `start_link/1` was the only one this process would ever hold: a 30-minute
   access token on a socket meant to stay up far longer than that had no path to renewal
   short of tearing the whole feed down and starting over.
+
+  ## A delayed quote is not delivered as a live one
+
+  An account without real-time entitlements is streamed "nfl/delayed quotes" (the LOGIN
+  table in `market-data-production.html`), and each such row says so: `"delayed": true`.
+  `Core.Types.Quote` and `TopOfBook` have no field to carry that, so a delayed row decoded
+  normally reached the consumer as the current price — a 15-minute-old book stamped
+  `observed_at: now`. Found 2026-10-10 by reading the spec against `emit/5`. A delayed
+  `LEVELONE_*` or `*_BOOK` row is now withheld, and the first one per symbol per session
+  raises a `:degraded` notice naming the symbol and the reason, so a missing feed is
+  explained rather than silent. `CHART_*` rows are still delivered: a candle carries its
+  own bucket time, so a late one is late, not mislabelled.
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -218,7 +230,10 @@ defmodule DpExchange.Schwab.Socket do
       # The last book this socket published per symbol, because `LEVELONE_*` is Change
       # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
       # connection, and dropped wholesale on reconnect.
-      last_top: %{}
+      last_top: %{},
+      # Symbols whose delayed rows this session has already reported. See the moduledoc's
+      # "A delayed quote is not delivered as a live one". Cleared with the session.
+      delayed_reported: MapSet.new()
     }
 
     VendoredWebSockex.start_link(
@@ -478,7 +493,10 @@ defmodule DpExchange.Schwab.Socket do
     # `last_top` goes with the session, and for the same reason. A book carried across
     # this boundary would be this package continuing to assert a level on behalf of a session
     # the venue no longer has; the fresh session re-states what is true when it resubscribes.
-    {:reconnect, %{state | logged_in?: false, last_top: %{}, subscribed: %{}}}
+    {:reconnect,
+     state
+     |> Map.merge(%{logged_in?: false, last_top: %{}, subscribed: %{}})
+     |> Map.put(:delayed_reported, MapSet.new())}
   end
 
   @impl true
@@ -815,11 +833,47 @@ defmodule DpExchange.Schwab.Socket do
 
   defp emit(row, service, field_map, observed_at, state) do
     fields = StreamerProtocol.rename(row, field_map)
-    symbol = Map.get(fields, :symbol) || row["key"]
-    {values, state} = decode(service, fields, symbol, observed_at, state)
 
-    Enum.each(values, &notify(state, &1))
-    state
+    # A row that names no symbol is not attributable to one. It used to be decoded anyway, and
+    # the `Quote`/`Candle` that came out carried `symbol: nil` to every subscriber.
+    case Map.get(fields, :symbol) || row["key"] do
+      symbol when is_binary(symbol) and symbol != "" ->
+        if row["delayed"] == true and not String.starts_with?(service, "CHART_") do
+          withhold_delayed(state, service, symbol)
+        else
+          {values, state} = decode(service, fields, symbol, observed_at, state)
+
+          Enum.each(values, &notify(state, &1))
+          state
+        end
+
+      _unnamed ->
+        state
+    end
+  end
+
+  # See the moduledoc's "A delayed quote is not delivered as a live one". Reported once per
+  # symbol per session: a delayed account sends one of these on every change, and a notice
+  # per frame would bury the one fact it carries.
+  defp withhold_delayed(state, service, symbol) do
+    reported = Map.get(state, :delayed_reported, MapSet.new())
+
+    if MapSet.member?(reported, symbol) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:degraded, :schwab,
+          details: %{
+            symbol: symbol,
+            service: service,
+            reason: "delayed quotes withheld: the account has no real-time entitlement"
+          }
+        )
+      )
+
+      Map.put(state, :delayed_reported, MapSet.put(reported, symbol))
+    end
   end
 
   # A LEVELONE frame is two facts at once, so both are emitted: the quote only when the

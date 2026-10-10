@@ -27,7 +27,10 @@ defmodule DpExchange.Schwab.StreamerDecode do
   * `LEVELONE_FUTURES` and `LEVELONE_FUTURES_OPTIONS` name the same pair at fields 10 and
     11 (`market-data-production.txt:1358-1366`, `:1730-1738`), already read as
     `:quote_time`/`:trade_time` by `StreamerFields`.
-  * `LEVELONE_OPTIONS` and `LEVELONE_FOREX` name neither in the fields this package reads.
+  * `LEVELONE_OPTIONS` names the pair at fields 38 and 39 and `LEVELONE_FOREX` at 8 and 9,
+    "Quote Time in Long" / "Trade Time in Long" and "Quote Time" / "Trade Time" (the
+    service tables in `market-data-production.txt`). A frame that does not carry them
+    still falls back as below.
 
   Where a service carries one, `to_quote/3` and `to_top_of_book/3` use it; where it does
   not, or the frame did not include it, `venue_time` is `nil` and `observed_at` — the
@@ -106,8 +109,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   `venue_time` is the venue's own quote time where the service names one — `LEVELONE_EQUITIES`
   field 34, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS` field 10, "the last time a bid or
-  ask updated" (see the moduledoc's table) — and `nil` where it does not (`LEVELONE_OPTIONS`,
-  `LEVELONE_FOREX`) or the frame did not carry it. `observed_at` is when the frame arrived
+  ask updated" (see the moduledoc's table) — and `nil` where the frame did not carry it. `observed_at` is when the frame arrived
   either way, and the pair together is the honest statement of freshness this type promises.
 
   ## This returns the frame's DELTA, and is not what crosses the facade

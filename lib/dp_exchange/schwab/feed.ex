@@ -621,7 +621,7 @@ defmodule DpExchange.Schwab.Feed do
       # which would arrive at the rate of the stream it already cannot keep up with.
       dropping: MapSet.new(),
       max_queue_len: Fanout.max_queue_len!(opts, :schwab),
-      wanted: MapSet.new(Config.opt(opts, :symbols, [])),
+      wanted: opts |> Config.opt(:symbols, []) |> canonical_symbols() |> MapSet.new(),
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),
@@ -653,6 +653,8 @@ defmodule DpExchange.Schwab.Feed do
   # answered `:ok` on the stream route while the poll route refused the same symbol, and the
   # venue's rejection arrived only as a generic `:degraded` notice.
   def handle_call({:subscribe, symbols, subscriber}, from, state) do
+    symbols = canonical_symbols(symbols)
+
     case invalid_symbols(symbols) do
       [] ->
         state = %{
@@ -670,6 +672,8 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
+    symbols = canonical_symbols(symbols)
+
     state = %{
       state
       | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
@@ -683,6 +687,8 @@ defmodule DpExchange.Schwab.Feed do
   def handle_call(:wanted, _from, state), do: {:reply, MapSet.to_list(state.wanted), state}
 
   def handle_call({:update_symbols, symbols}, from, state) do
+    symbols = canonical_symbols(symbols)
+
     case invalid_symbols(symbols) do
       [] -> update_wanted(state, symbols, from)
       invalid -> {:reply, {:error, {:invalid_symbols, invalid}}, state}
@@ -1490,6 +1496,22 @@ defmodule DpExchange.Schwab.Feed do
 
     settle_route(state, from)
   end
+
+  # **The wanted set holds the spelling the venue delivers under.** `validate/1` trims and
+  # upper-cases, so `" aapl"` was accepted and sent to the Streamer as `AAPL`, but `wanted`
+  # kept `" aapl"`. Every frame arrives keyed `AAPL`, `unwanted?/2` compared the two, and the
+  # feed dropped all of it: an accepted subscription that delivered nothing, with nothing
+  # raised. The same applied to `:symbols` at start and to `unsubscribe/2`, which could not
+  # remove what it was not spelled like. Non-binaries pass through so `invalid_symbols/1` still
+  # names them.
+  defp canonical_symbols(symbols) when is_list(symbols) do
+    Enum.map(symbols, fn
+      symbol when is_binary(symbol) -> SymbolFormat.to_canonical_symbol(symbol)
+      other -> other
+    end)
+  end
+
+  defp canonical_symbols(other), do: other
 
   defp invalid_symbols(symbols) do
     for symbol <- symbols, not match?({:ok, _native}, SymbolFormat.validate(symbol)), do: symbol
