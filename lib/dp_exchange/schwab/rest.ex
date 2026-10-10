@@ -118,7 +118,7 @@ defmodule DpExchange.Schwab.Rest do
 
   Minute widths are only reachable through `periodType=day`, whose largest legal `period`
   is 10. This is the number a caller needs before asking for a year of one-minute data,
-  and `get_historical_prices/4` refuses rather than truncating silently.
+  and `get_historical_prices/5` refuses rather than truncating silently.
   """
   @spec max_lookback_days(String.t()) :: {:ok, pos_integer()} | :error
   def max_lookback_days(timeframe) do
@@ -452,7 +452,7 @@ defmodule DpExchange.Schwab.Rest do
     plausible wrong answer.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
-          {:ok, [Quote.t()]} | {:error, term()} | {:refused, term()}
+          {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
     with {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
@@ -1003,7 +1003,7 @@ defmodule DpExchange.Schwab.Rest do
   @doc """
   One market's hours — `GET /markets/{market_id}`.
 
-  **Not `get_market_status/1` narrowed.** That reads `/markets` for every market at once;
+  **Not `market_status/2` narrowed.** That reads `/markets` for every market at once;
   this asks about one, and `opts[:date]` asks about a *different day* — which is the reason
   to reach for it: "is the bond market open on the 4th" is not answerable from today's
   status.
@@ -1926,10 +1926,13 @@ defmodule DpExchange.Schwab.Rest do
   different balance fields entirely, and the response says which through `type`. Both are
   read; neither is guessed at from the other.
 
-  Cash is reported as a `USD` balance. `available_balance` is the account's own
-  buying power for a margin account and its cash available for trading for a cash
-  account — which are the same *question* answered by different fields, and the venue
-  answers only the one that applies.
+  Cash is reported as a `USD` balance. `balance` is `equity` for a margin account and
+  `totalCash` for a cash account. `available_balance` is `availableFunds` for a margin
+  account and `cashAvailableForTrading` for a cash account — the same *question* answered
+  by different fields, and the venue answers only the one that applies. It is **not**
+  `buyingPower`: that is leveraged and can exceed the balance it would sit inside, and
+  `Core.Types.Balance` reads `available_balance` as part of the total, never more than it.
+  An available figure the venue did not state is `nil`, never invented.
   """
   @spec get_balances(map(), String.t(), keyword()) ::
           {:ok, [DpExchange.Core.Types.Balance.t()]} | {:error, term()} | {:refused, term()}

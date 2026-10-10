@@ -55,7 +55,7 @@ defmodule DpExchange.Schwab.OrderLimitTest do
       # Give the runtime a chance to actually unregister the name before asking — this
       # waits on the process's own exit, never a fixed sleep.
       ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2_000
 
       assert OrderLimit.status(name) == {:error, :not_started}
     end

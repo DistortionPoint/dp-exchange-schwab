@@ -47,7 +47,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
 
       # The caller gets an answer rather than hanging to its own call timeout, and the
       # answer is this venue's documented degraded mode.
-      assert_receive {:subscribed, _result}, 3_000
+      assert_receive {:subscribed, :ok}, 3_000
       assert :sys.get_state(feed).route_bootstrap == nil
       assert :sys.get_state(feed).route == :poll
       assert Process.alive?(feed)
@@ -86,7 +86,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       %{ref: ref} = :sys.get_state(feed).route_bootstrap
       send(feed, {:route_bootstrap_timeout, ref})
 
-      assert_receive {:subscribed, _result}, 3_000
+      assert_receive {:subscribed, :ok}, 3_000
       assert :sys.get_state(feed).route_bootstrap == nil
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 3_000
@@ -151,7 +151,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       test_pid = self()
       spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
 
-      assert_receive {:subscribed, _result}, 3_000
+      assert_receive {:subscribed, :ok}, 3_000
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 3_000
 
       # The budget is named, not merely applied — a consumer reading the notice has to be
@@ -186,8 +186,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       %{ref: ref} = :sys.get_state(feed).route_bootstrap
       send(feed, {:route_bootstrap_timeout, ref})
 
-      assert_receive {:first, _r1}, 3_000
-      assert_receive {:second, _r2}, 3_000
+      assert_receive {:first, :ok}, 3_000
+      assert_receive {:second, :ok}, 3_000
       assert Process.alive?(feed)
     end
 
@@ -280,18 +280,21 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       assert_receive {:bootstrap_started, held}, 5_000
 
       reader = Task.async(fn -> Feed.coverage(feed) end)
-      # The bootstrap is held until released below, so an answer within 1.5 s can only come
-      # from a feed that is not waiting on that call.
-      result = Task.yield(reader, 1_500) || Task.shutdown(reader, :brutal_kill)
+      # The bootstrap is held until released below, so an answer, however late, can only
+      # come from a feed that is not waiting on that call. The deadline is a ceiling for a
+      # wedged feed to fail against, not a latency claim, so it is generous: a tight one
+      # would turn a loaded suite into a failure of the property.
+      result = Task.yield(reader, 5_000) || Task.shutdown(reader, :brutal_kill)
       send(held, :release)
 
       assert match?({:ok, _}, result),
-             "coverage/1 did not answer within 1.5 s while a subscribe was establishing " <>
+             "coverage/1 did not answer while a subscribe was establishing " <>
                "the route — the Feed is blocked inside handle_call. got: #{inspect(result)}"
 
       # The subscribe still gets its own answer once the route settles; deferring the reply
-      # must not mean losing it.
-      assert Task.await(subscriber, 5_000) in [:ok, {:error, :no_route}]
+      # must not mean losing it. The 401 lands it on the poll route, where the symbols are
+      # applied to a live poller, so the answer is `:ok` and nothing else.
+      assert Task.await(subscriber, 5_000) == :ok
       assert Process.alive?(feed)
     end
 
@@ -302,10 +305,20 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       # `@call_timeout`.
       test_pid = self()
 
+      # Held until released, not slept for a guessed 500 ms: a sleep this short is a bet
+      # that the second caller arrives inside it, and a caller that arrived after it would
+      # find a settled route, join nothing, and leave the test green without having tested
+      # the sharing at all.
       plug = fn conn ->
         if String.contains?(conn.request_path, "userPreference") do
-          send(test_pid, :bootstrap_started)
-          Process.sleep(500)
+          send(test_pid, {:bootstrap_started, self()})
+
+          receive do
+            :release -> :ok
+          after
+            10_000 -> :ok
+          end
+
           Plug.Conn.resp(conn, 401, "no")
         else
           Req.Test.json(conn, quote_body())
@@ -324,14 +337,20 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       first = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
       # Five seconds, as the test above uses: the receive returns the moment the plug reports
       # in, so this only matters under load, where one second failed the full suite.
-      assert_receive :bootstrap_started, 5_000
+      assert_receive {:bootstrap_started, held}, 5_000
       second = Task.async(fn -> Feed.subscribe(feed, ["MSFT"]) end)
 
-      assert Task.await(first, 5_000) in [:ok, {:error, :no_route}]
-      assert Task.await(second, 5_000) in [:ok, {:error, :no_route}]
+      # Both callers are on the waiting list before the bootstrap is let go, which is the
+      # point: the second joined a bootstrap that was already in flight.
+      wait_for_waiting(feed, 2)
+      send(held, :release)
 
-      # Exactly one bootstrap ran: a second would have sent a second `:bootstrap_started`.
-      refute_receive :bootstrap_started, 300
+      assert Task.await(first, 5_000) == :ok
+      assert Task.await(second, 5_000) == :ok
+
+      # Exactly one bootstrap ran: a second would have reported in with its own pid. Every
+      # report a bootstrap sends precedes the reply the callers were just awaited on.
+      refute_received {:bootstrap_started, _other}
 
       assert Enum.sort(Feed.wanted(feed)) == ["AAPL", "MSFT"]
     end

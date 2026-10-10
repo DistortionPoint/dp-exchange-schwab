@@ -159,10 +159,12 @@ defmodule DpExchange.Schwab.Capabilities do
     # The venue genuinely does not serve: staking, perpetual funding, conversions, crypto
     # deposit and withdrawal addresses. Schwab is an equities and options broker.
     #
-    # The venue DOES serve these and this package does not implement them yet: option
-    # chains and expirations (`/chains`, `/expirationchain`), movers as a screener
-    # (`/movers/{symbol_id}`), and positions via the accounts endpoint. Each is a Phase
-    # 3–13 item, recorded in `docs/reference/schwab/coverage-matrix.md`.
+    # Option chains and expirations (`/chains`, `/expirationchain`), movers as a screener
+    # (`/movers/{symbol_id}`) and positions via the accounts endpoint were once listed here
+    # as served by the venue and not yet implemented. They are implemented now
+    # (`get_option_chain/2`, `get_option_expirations/2`, `get_screener/2`, `get_positions/1`)
+    # and so are absent from this list, i.e. `:experimental`.
+    #
     # **Schwab previews an order and replaces one, and does neither for an amendment in
     # advance.** `/accounts/{accountNumber}/previewOrder` prices an order that does not
     # exist yet; there is no `previewReplaceOrder`. Replacing is `PUT` on the order itself,
@@ -313,7 +315,7 @@ defmodule DpExchange.Schwab.Capabilities do
       #
       # **`:spot` and `:option`** — routable as before: `SymbolFormat.validate/1` accepts
       # a plain equity ticker and, separately, a 21-character fixed-width option symbol
-      # (`option?/1`), and `Rest.get_price/2`'s decode reads an EQUITY and an OPTION
+      # (`option?/1`), and `Rest.get_price/3`'s decode reads an EQUITY and an OPTION
       # `quote` block correctly. `EQUITY` maps to `:spot`: a share bought outright is a
       # spot instrument.
       #
@@ -386,8 +388,8 @@ defmodule DpExchange.Schwab.Capabilities do
       # search against a term. `get_symbols/1` is active and requires `:query`.
       catalog_access: :query_only,
 
-      # Four of Core's seven map. The three that do not are named rather than
-      # approximated:
+      # Eight, and each is one `Orders.build/2` actually sends. The ones Core names that do
+      # not map are named rather than approximated:
       #
       #   `:ioc` and `:fok` are **not order types here** — they are `duration` values
       #   (IMMEDIATE_OR_CANCEL, FILL_OR_KILL), and they appear below under
@@ -398,13 +400,9 @@ defmodule DpExchange.Schwab.Capabilities do
       #   `:post_only` has no equivalent. NON_MARKETABLE is close and is not the same
       #   thing, so it is absent rather than mapped.
       #
-      # TRAILING_STOP, TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE are real
-      # order types this venue supports that Core has no vocabulary for. The honest
-      # declaration lists only what Core can name; the gap is recorded at 7.5.
-      # Eight, now that Core has words for four of them. TRAILING_STOP,
-      # TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE are real order types this
-      # venue accepts, and until Core learned them this list read as four — under-declaring,
-      # which is the safe direction and still a lie about the venue.
+      # TRAILING_STOP, TRAILING_STOP_LIMIT, MARKET_ON_CLOSE and LIMIT_ON_CLOSE once had no
+      # Core vocabulary, and until Core learned them this list read as four —
+      # under-declaring, which is the safe direction and still a lie about the venue.
       supported_order_types: [
         :market,
         :limit,

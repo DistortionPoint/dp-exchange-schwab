@@ -158,9 +158,10 @@ defmodule DpExchange.Schwab.AuthTest do
     end
 
     test "every refresh mints a new refresh token, and it replaces the old one" do
-      # The token sent is SPENT by this call. The one returned is its only replacement,
-      # and carries a fresh seven days — which is why a host refreshing every half hour
-      # never needs a person again, and why losing this value costs the grant.
+      # The token sent is SPENT by this call. The one returned is its only replacement, which
+      # is why losing this value costs the grant. Whether the replacement also carries a
+      # fresh seven days is NOT known — the vendor says only "7 days after creation" (see
+      # `Auth`'s moduledoc) — so nothing here claims a host never needs a person again.
       body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
 
       assert {:ok, renewed} = Auth.refresh(@creds, plug: responding(body))

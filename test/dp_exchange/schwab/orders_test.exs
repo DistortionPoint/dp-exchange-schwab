@@ -48,6 +48,29 @@ defmodule DpExchange.Schwab.OrdersTest do
     end
   end
 
+  describe "the leg's assetType follows the stated instrument, not the ticker's spelling" do
+    test "a mutual fund order is sent as MUTUAL_FUND, not as a share order" do
+      # `SWPPX` and `AAPL` are spelled alike; every non-option order went out as EQUITY.
+      fund = %{symbol: "SWPPX", side: :buy, quantity: 1, instrument_type: :mutual_fund}
+
+      assert {:ok, payload} = Orders.build(fund)
+      assert [%{"instrument" => %{"assetType" => "MUTUAL_FUND"}}] = payload["orderLegCollection"]
+
+      assert {:ok, cash} =
+               Orders.build(%{fund | symbol: "SNSXX", instrument_type: :cash_equivalent})
+
+      assert [%{"instrument" => %{"assetType" => "CASH_EQUIVALENT"}}] = cash["orderLegCollection"]
+    end
+
+    test "no stated type is EQUITY, and an unsendable one is refused rather than guessed" do
+      assert {:ok, payload} = Orders.build(@buy)
+      assert [%{"instrument" => %{"assetType" => "EQUITY"}}] = payload["orderLegCollection"]
+
+      assert Orders.build(Map.put(@buy, :instrument_type, :bond)) ==
+               {:error, {:unsupported_instrument_type, :bond}}
+    end
+  end
+
   describe "prices" do
     test "a limit order carries its price as a string" do
       request =
@@ -235,10 +258,13 @@ defmodule DpExchange.Schwab.OrdersTest do
       assert [%{"quantity" => 0.5}] = payload["orderLegCollection"]
     end
 
-    test "zero, negative and non-numeric quantities are refused" do
-      for bad <- [0, -1, "15", nil] do
-        assert {:error, _reason} = Orders.build(%{@buy | quantity: bad})
+    test "zero, negative and non-numeric quantities are refused, each by name" do
+      for bad <- [0, -1, "15"] do
+        assert Orders.build(%{@buy | quantity: bad}) == {:error, {:invalid_quantity, bad}}
       end
+
+      # Absent is a different fact from unreadable, and is named differently.
+      assert Orders.build(%{@buy | quantity: nil}) == {:error, {:missing_order_field, :quantity}}
     end
   end
 

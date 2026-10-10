@@ -16,7 +16,7 @@ the top and carries its `legs`. An order with no `orderId` is refused rather tha
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Requires `dp_exchange_core ~> 0.2.1`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `~> 0.3.50`.
 
 ```elixir
 # before
@@ -61,14 +61,14 @@ The **book** is the opposite and always was: `to_order_book/2` reads the venue's
 `snapshot_time` and fails closed without it, so an `OrderBook` always carries a real
 `venue_time`.
 
-**`get_price/3` over REST used to do the same, and stopped in 0.2.29.** This section said it
+**`get_price/2` over REST used to do the same, and stopped in 0.2.29.** This section said it
 still did. A quote row carrying neither `quoteTime` nor `tradeTime`, or carrying one this
 package cannot read, now comes back with `venue_time: nil` rather than refusing — the price
 is guarded separately and `Core.Types.Quote` does not enforce the time, so discarding a real
 traded price over it threw away what the caller asked for. **Write the `nil` branch for REST
 quotes too**, not only for streamed ones.
 
-`get_historical_prices/5` is unchanged and still refuses an undated bar, because
+`get_historical_prices/4` is unchanged and still refuses an undated bar, because
 `Core.Types.Candle` enforces `:opened_at` and a bar at an invented minute lands in the series
 looking like a real one.
 
@@ -85,15 +85,16 @@ A level whose price cannot be read is dropped rather than carried with a `nil` p
 
 ## A streamed quote with an unreadable last price is refused, not nilled
 
-As of 0.2.30, a `LEVELONE_*` frame whose `last` is a NaN or an Infinity produces
-`{:error, {:invalid_decimal, :price, _}}` rather than a `%Quote{price: nil}`.
-`Core.Types.Quote` enforces `:price`, and a quote with no price is not a weaker quote — it is
-not a quote. The frame's **size** is not enforced and an unreadable one still yields
+As of 0.2.30, a `LEVELONE_*` frame whose `last` is a NaN or an Infinity delivers no `Quote`
+at all, rather than a `%Quote{price: nil}`: the decoder's own answer is
+`{:error, {:invalid_decimal, :price, _}}`, and the socket drops it (the frame's top of book,
+if it moved one, is still delivered). `Core.Types.Quote` enforces `:price`, and a quote with
+no price is not a weaker quote — it is not a quote. The frame's **size** is not enforced and an unreadable one still yields
 `volume: nil` beside a good price.
 
 ## A screener row the venue did not name is dropped
 
-Also 0.2.30. `get_screener/3` used to publish such a row with `symbol: ""`, which satisfied
+Also 0.2.30. `get_screener/2` used to publish such a row with `symbol: ""`, which satisfied
 the contract's non-nil requirement while saying nothing — and an empty string is worse than a
 `nil`, because a consumer keying coverage by symbol gets a live entry named `""`.
 
@@ -520,6 +521,12 @@ broker moves money through cheques, ACH and wires arranged with a person, not th
 API**, and the Accounts and Trading specification has no payment method, transfer, allowlist
 or network list. `get_transactions/2` *reports* money that moved and is served.
 
+Those are not the whole list. `DpExchange.Schwab.venue_does_not_serve/0` is: it also covers
+`get_trades/2`, `get_auction_imbalance/2`, `get_volume_profile/3`, `place_orders/3`,
+`preview_replace/4`, `cancel_all_orders/2`, `close_position/3`, and the staking,
+conversion, watchlist, news and account-management callbacks. Every endpoint it names is
+declared `:unsupported` in `capabilities/0`.
+
 - **`get_order_book/2`** — the venue publishes depth on the Streamer, but this package does
   not subscribe it (§9): the vendor names no rule for routing an equity symbol between
   `NYSE_BOOK` and `NASDAQ_BOOK`, and guessing one is exactly what this package refuses to
@@ -610,8 +617,9 @@ symbols in one call, and whole-call injection cannot express "this one symbol in
 fails, the rest succeed". `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` are
 local bookkeeping that always succeeds by construction. And not yet wired, stated here
 rather than left to be discovered: `get_option_chain/2`, `get_option_expirations/2`,
-`get_screener/2`, `get_transactions/2` and `get_rate_limit_status/2` — they gate credentials
-correctly but cannot yet be made to fail on demand.
+`get_screener/2` and `get_transactions/2` — they gate credentials correctly but cannot yet
+be made to fail on demand. (`get_rate_limit_status/2` is `:unsupported`, so it has nothing
+to inject into.)
 
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 
@@ -859,7 +867,7 @@ package used to substitute an empty object for such a body, which then decoded i
 well-formed value with every field `nil` and was returned as success.
 
 
-**On `get_price/3` this replaced a false statement about the venue's listings.** An
+**On `get_price/2` this replaced a false statement about the venue's listings.** An
 undecodable body became an empty object, an empty object has no key for the symbol, and a
 missing key means `{:refused, :not_listed}` — permanent, not worth retrying. So a maintenance
 page came back as "Schwab does not carry AAPL". `{:refused, :not_listed}` still means exactly

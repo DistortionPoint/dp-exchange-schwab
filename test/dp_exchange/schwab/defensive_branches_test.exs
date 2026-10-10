@@ -227,8 +227,15 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert Rest.max_lookback_days("nonsense") == :error
     end
 
-    test "a short range picks a small period rather than always the largest" do
-      body = %{"candles" => []}
+    test "a range inside the width's reach is sent as a window, never as a lookback period" do
+      # The range decides whether the width can reach (`fetch_period/4`), and then names the
+      # window itself: a `period` beside `startDate` would be a second, unmeasured opinion on
+      # the same question. This used to claim the range picked a small `period`, and asserted
+      # nothing about what was sent.
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, %{"candles" => []})
+      end
 
       assert {:ok, []} =
                Rest.get_historical_prices(
@@ -236,8 +243,12 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                  "1d",
                  [start: DateTime.add(DateTime.utc_now(), -30, :day)],
                  @creds,
-                 opts(responding(body))
+                 opts(capture)
                )
+
+      assert_received {:request, query}
+      assert query =~ "startDate="
+      refute query =~ "period="
     end
 
     test "an open-ended range measured from a start is still bounded" do

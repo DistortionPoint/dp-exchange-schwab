@@ -378,13 +378,15 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.coverage_by_kind(feed: name) == %{quotes: %{}}
     end
 
-    test "the poller exposes its own status", %{feed: feed} do
-      assert %{delivering: _delivering} = Feed.status(feed)
+    test "an unrouted feed reports no route, not a stream", %{feed: feed} do
+      # Nothing has dialled anything yet, so `route: :stream` here would be a route that was
+      # never established, claimed as the live one.
+      assert Feed.status(feed) == %{route: nil, delivering: 0, wanted: 0, last_error: nil}
     end
 
     test "status/1 delegates to the named feed, and is empty when no feed is running",
          %{name: name} do
-      assert %{delivering: _delivering, route: _route} = Schwab.status(feed: name)
+      assert Schwab.status(feed: name) == %{route: nil, delivering: 0, wanted: 0, last_error: nil}
       assert Schwab.status(feed: :no_such_feed) == %{}
     end
 
@@ -446,9 +448,6 @@ defmodule DpExchange.SchwabTest do
           name: name,
           symbols: ["AAPL"],
           interval_ms: 50,
-          # Headroom before the poller's first tick, so the facade call below is
-          # guaranteed to land before the fallback poll's own first attempt — the
-          # poller runs on its own timer, not on a message this test controls.
           start_delay_ms: 150,
           retry_attempts: 0
         )
@@ -465,11 +464,14 @@ defmodule DpExchange.SchwabTest do
         end
       end)
 
+      # Registered BEFORE the first ask. The route (and with it the fallback poll) is only
+      # established by `Feed.subscribe/3`, so registering first needs no head start over the
+      # poller's timer: nothing it fires can predate the registration.
+      assert Schwab.subscribe_notices(feed: name, to: self()) == :ok
+
       # The route is established on the first ask, not at boot — see `Feed`'s moduledoc,
       # "A consumer that never subscribes must not find a socket open".
       :ok = Feed.subscribe(feed, ["AAPL"])
-
-      assert Schwab.subscribe_notices(feed: name, to: self()) == :ok
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
       assert notice.severity == :warning
@@ -530,6 +532,37 @@ defmodule DpExchange.SchwabTest do
       assert_receive {:relayed_to_socket,
                       {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
                      2_000
+    end
+
+    test "something that is not a credential map is refused and the feed is left running" do
+      # The `{:error, _}` a failed `refresh_credentials/2` returned, forwarded unchecked.
+      # It used to reach `Feed`, raise inside `handle_call/3`, and take every `subscribe/2`
+      # with it when the supervisor restarted the feed from its start-time options.
+      name = :"invalid_credentials_feed_#{System.unique_integer([:positive])}"
+
+      {:ok, feed} =
+        Feed.start_link(
+          name: name,
+          credentials: @creds,
+          symbols: ["AAPL"],
+          start_delay_ms: 60_000
+        )
+
+      on_exit(fn ->
+        try do
+          GenServer.stop(feed, :normal)
+        catch
+          :exit, _reason -> :ok
+        end
+      end)
+
+      for bad <- [nil, {:error, :refused}, "token"] do
+        assert Schwab.update_credentials(bad, feed: name) ==
+                 {:error, {:invalid_credentials, :schwab}}
+      end
+
+      assert Process.whereis(name) == feed
+      assert Schwab.wanted(feed: name) == ["AAPL"]
     end
   end
 
@@ -632,7 +665,10 @@ defmodule DpExchange.SchwabTest do
     end
 
     test "defaults `now` to the current time" do
-      refute Schwab.needs_refresh?(%{access_token: "at-1"})
+      # Both sides, so a default that was frozen or ignored would fail one of them. An hour
+      # is far outside the margin either way, so no clock tolerance is involved.
+      refute Schwab.needs_refresh?(%{expires_at: DateTime.add(DateTime.utc_now(), 3_600)})
+      assert Schwab.needs_refresh?(%{expires_at: DateTime.add(DateTime.utc_now(), -3_600)})
     end
   end
 
@@ -931,7 +967,7 @@ defmodule DpExchange.SchwabTest do
         end
       end)
 
-      assert_receive :registered
+      assert_receive :registered, 2_000
 
       assert DpExchange.Schwab.subscribe(["AAPL"], feed: name) == {:error, {:feed_exited, :boom}}
     end

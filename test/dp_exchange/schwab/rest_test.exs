@@ -376,10 +376,10 @@ defmodule DpExchange.Schwab.RestTest do
       # high and low were discarded at the boundary.
       assert Decimal.equal?(candle.close, Decimal.from_float(1.5))
       assert Decimal.equal?(candle.volume, Decimal.new(100))
-      assert candle.open
-      assert candle.high
-      assert candle.low
-      assert candle.opened_at
+      assert Decimal.equal?(candle.open, Decimal.from_float(1.0))
+      assert Decimal.equal?(candle.high, Decimal.from_float(2.0))
+      assert Decimal.equal?(candle.low, Decimal.from_float(0.5))
+      assert candle.opened_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
     test "no range asks for the deepest the width allows" do
@@ -721,8 +721,12 @@ defmodule DpExchange.Schwab.RestTest do
         retry_delay: 1
       )
 
-      assert_receive :attempt
-      refute_receive :attempt, 200
+      # The plug runs in this process and `Core.HttpClient` retries inside the call, so every
+      # attempt it made is already in the mailbox when the call returns. Nothing is waited
+      # for, which is what makes the second assertion exact rather than a guess at how long
+      # a retry might take to show up.
+      assert_received :attempt
+      refute_received :attempt
     end
 
     test "a replace is sent exactly once too" do
@@ -739,8 +743,9 @@ defmodule DpExchange.Schwab.RestTest do
         retry_delay: 1
       )
 
-      assert_receive :attempt
-      refute_receive :attempt, 200
+      # As above: every attempt is in the mailbox once the call returns.
+      assert_received :attempt
+      refute_received :attempt
     end
 
     test "a read still retries, because re-asking a question repeats nothing" do
@@ -755,8 +760,9 @@ defmodule DpExchange.Schwab.RestTest do
 
       Rest.get_accounts(@creds, plug: plug, retry_attempts: 2, retry_delay: 1)
 
-      assert_receive :attempt
-      assert_receive :attempt, 1_000
+      # In the mailbox already, as for the writes above: a read that retried made two.
+      assert_received :attempt
+      assert_received :attempt
     end
 
     test "a 201 with no Location is a failure, not a success with no id" do

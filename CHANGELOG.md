@@ -31,6 +31,42 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mutual-fund order was sent as an equity order.** `Orders.build/2` derived the leg's
+  `assetType` from the ticker alone, and nothing in a ticker tells `SWPPX` from `AAPL`, so
+  every non-option order went out as `EQUITY` although `capabilities/0` declares
+  `:mutual_fund` and `:cash_equivalent`. The request's `:instrument_type` now sets it:
+  `:mutual_fund` → `MUTUAL_FUND`, `:cash_equivalent` → `CASH_EQUIVALENT` (the Trader API's
+  own values), none/`:equity` → `EQUITY`; an option symbol is always `OPTION`. Any other
+  type is `{:error, {:unsupported_instrument_type, value}}`. Documentation-derived; no fund
+  order has been placed live.
+
+- **`update_credentials/2` could take a running feed down.** Anything that was not a map
+  (`nil`, or the `{:error, _}` a failed `refresh_credentials/2` returned and the caller
+  forwarded unchecked) reached the `Feed` process, which raised inside `handle_call/3`;
+  `Supervisor` restarted it from its start-time options and every `subscribe/2` made since
+  was gone. It now answers `{:error, {:invalid_credentials, :schwab}}` from the facade,
+  before the feed is looked at, and the feed is untouched.
+- **Documentation contradicted the code in several places a consumer reads.**
+  `Rest.get_balances/3`'s `@doc` said a margin account's `available_balance` is its buying
+  power; the code (and `usage-rules.md`) read `availableFunds`, because buying power is
+  leveraged. `Rest.get_historical_prices/5`'s `@spec` promised `Quote.t()` and returns
+  `Candle.t()`. `get_trade_history/2`'s `@doc` said it was neither declared `:experimental`
+  nor `:unsupported`; it is declared `:unsupported` and answers `{:error, :not_supported}`.
+  The README told a consumer to pin `~> 0.1.0` (no current release matches), said every
+  endpoint is `:experimental` (the unserved ones are `:unsupported`), and named the internal
+  `Auth.refresh/2` where `usage-rules.md` points at `refresh_credentials/2`. `Fake`'s
+  moduledoc and `usage-rules.md` listed `get_rate_limit_status/2` among endpoints with a
+  success path that lacks an injection point; it is `:unsupported` and has no success path.
+  `Feed`'s moduledoc described one `/quotes` request per symbol where the fallback poll
+  batches 100 per request, and its `wanted/1` `@doc` rendered a block of source comments as
+  documentation. `StreamerDecode`'s moduledoc said `observed_at` "stands in" for an absent
+  `venue_time`, which the code never does. Stale references to functions that no longer
+  exist (`ensure_route/1`, `Rest.to_candle/3`, `get_market_status/1`, `Socket.subscribe/4`)
+  now name the ones that do, and `Capabilities`' source comments no longer describe option
+  chains, movers and positions as unimplemented.
+
 ## [0.2.98] - 2026-10-10
 
 ### Fixed

@@ -94,7 +94,7 @@ defmodule DpExchange.Schwab.Feed do
 
   ## The fallback poll going silent is a different failure from the bootstrap failing
 
-  `ensure_route/1` already emits `Notice{kind: :degraded}` once, the instant the Streamer
+  `fall_back_to_poll/2` already emits `Notice{kind: :degraded}` once, the instant the Streamer
   bootstrap itself fails — "the socket could not be reached, here is the fallback." That
   says nothing about whether the fallback then keeps working. DpCryptoManagement's issue
   #21 is the reason that gap matters: a poll-based feed on another venue delivered nothing
@@ -138,13 +138,13 @@ defmodule DpExchange.Schwab.Feed do
   make "closed" and "crashed" look the same from outside, and pre-market and post-market
   sessions are real trading windows this package must not decide are uninteresting.
 
-  ## One request per symbol, and the cost is real — on the poll
+  ## One request per hundred symbols on the poll, and the cost is real
 
-  `/quotes` accepts several symbols at once, but the throttle that matters here applies to
-  *order writes*, not reads. Even so, each poll is a signed request against a token with a
-  30-minute life, so `Core.PollingFeed` spreads symbols across the interval rather than
-  sweeping them in a burst. The socket has no such cost: one connection carries every
-  symbol.
+  `/quotes` accepts several symbols at once, and the fallback poll uses that: each cycle
+  fetches through `Rest.get_prices/3`, one `/quotes` request per 100 symbols rather than one
+  per symbol. The throttle that matters on this venue applies to *order writes*, not reads,
+  but each poll is still a signed request against a token with a 30-minute life. The socket
+  has no such cost: one connection carries every symbol.
 
   ## `acquire`, not `check`, on the fallback poll
 
@@ -156,7 +156,7 @@ defmodule DpExchange.Schwab.Feed do
   measured as 87 of 87 symbols delivering collapsing to 8 of 87 in a single tick, purely
   from our own limiter, not the venue.
 
-  This module's `request_opts` — shared by the fallback poll's `Rest.get_price/3` calls
+  This module's `request_opts` — shared by the fallback poll's `Rest.get_prices/3` calls
   and this module's own Streamer-bootstrap call to `Rest.get_user_preference/2` — defaults
   `:rate_limit_blocking` to `true` for exactly that reason: neither call site has a
   one-off caller waiting synchronously on a tight deadline, so blocking for capacity is
@@ -217,9 +217,10 @@ defmodule DpExchange.Schwab.Feed do
 
   ## A crashed socket or poller used to be Feed's crash too — and now it is caught
 
-  `start_socket/1` calls `Socket.start_link/1`, and `start_poller/1` calls
-  `PollingFeed.start_link/1` — both from inside `Feed`'s own callback (`ensure_route/1`),
-  which links either process to `Feed` the way `start_link` always does. `Feed` never
+  `build_socket/2` calls `Socket.start_link/1`, and `start_poller/1` calls
+  `PollingFeed.start_link/1` — both from inside `Feed`'s own callbacks
+  (`complete_route_bootstrap/2` and `fall_back_to_poll/2`), which links either process to
+  `Feed` the way `start_link` always does. `Feed` never
   called `Process.flag(:trap_exit, true)`, so either one exiting abnormally sent an
   untrappable `EXIT` signal along its link and crashed `Feed` too — every subscriber, the
   whole `wanted` set, gone, restarted by `DpExchange.Schwab.Supervisor` from the STATIC
@@ -227,11 +228,11 @@ defmodule DpExchange.Schwab.Feed do
   calls or a credential pushed in through `update_credentials/2`.
 
   `Feed` now traps exits. A crashed socket or poller clears `state.route`, `state.socket`
-  and `state.poller` (so `ensure_route/1` reconsiders the route from scratch rather than
+  and `state.poller` (so `settle_route/2` reconsiders the route from scratch rather than
   treating a dead pid as still live) and resets `state.delivering`/`state.kinds` — this
   feed has exactly one active route at a time, so a crash costs everything it was
   delivering, not a partial set — reports a `:link_down` `Core.Notice`, and immediately
-  calls `ensure_route/1` again: a fresh Streamer bootstrap if the credential still works,
+  starts a new route bootstrap: a fresh Streamer bootstrap if the credential still works,
   falling back to the poll the same way a first-ever bootstrap failure already does.
 
   ## A consumer that never subscribes must not find a socket open — this venue was the one exception
@@ -240,7 +241,7 @@ defmodule DpExchange.Schwab.Feed do
   itself… A consumer who has not asked for a venue must not find a socket open."** Until
   now this module violated it, unconditionally: `init/1` ended with
   `{:ok, state, {:continue, :connect}}`, and `handle_continue(:connect, state)` called
-  `ensure_route/1` immediately — before a single `subscribe/2` had ever been received. A
+  `settle_route/2` immediately — before a single `subscribe/2` had ever been received. A
   tree that supervised this package and never subscribed anything still got
   `Rest.get_user_preference/2` (a signed request against the venue) and, on success, a
   live Streamer `LOGIN`. Found 2026-09-07, the same cross-package audit that found four
@@ -250,7 +251,7 @@ defmodule DpExchange.Schwab.Feed do
   deferred dialling to `subscribe/2` or a first tick. Schwab was the only venue that
   dialled at boot.
 
-  **The eager dial was incidental, not load-bearing.** `ensure_route/1` was already
+  **The eager dial was incidental, not load-bearing.** `settle_route/2` was already
   reachable from `handle_call({:subscribe, symbols, subscriber}, _from, state)` and
   `handle_call({:update_symbols, symbols}, _from, state)`, both of which call it before
   replying — every path a consumer actually uses to ask for data already established the
@@ -391,10 +392,7 @@ defmodule DpExchange.Schwab.Feed do
   def unsubscribe(feed, symbols),
     do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
 
-  @doc """
-  What has been asked for, which is not what `coverage/1` reports.
-
-  # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
+  # Reads carry `@call_timeout` explicitly, exactly as the writes above do.
   #
   # They used to take `GenServer.call/2`'s implicit five seconds, and that asymmetry is what
   # turned a bounded delay into a dead caller in dp-exchange-core issue #28: `coverage/1` is
@@ -406,6 +404,9 @@ defmodule DpExchange.Schwab.Feed do
   # The blocking is fixed at its sources rather than papered over here; this is the second
   # line of defence. A read that has to queue behind something should WAIT for it, never
   # die of it.
+  @doc """
+  What has been asked for, which is not what `coverage/1` reports.
+
   Reachable through the facade as `DpExchange.Schwab.wanted/1`.
   """
   @spec wanted(GenServer.server()) :: [String.t()]
@@ -469,7 +470,7 @@ defmodule DpExchange.Schwab.Feed do
 
   Core's moduledoc for this callback describes a venue where "a symbol can legitimately be
   `:internal_poll` for one kind while another is `:stream`". **That is not reachable here.**
-  `state.route` is chosen once, for the whole feed, in `ensure_route/1` — the very first
+  `state.route` is chosen once, for the whole feed, in `settle_route/2` — the very first
   clause matches and short-circuits once `route` is `:stream` or `:poll`, and nothing in
   this module ever revisits that choice for a live feed. A symbol's kinds can differ from
   each other (quotes but not candles, or the reverse), but every kind for every symbol comes
@@ -544,7 +545,7 @@ defmodule DpExchange.Schwab.Feed do
 
   @impl true
   def init(opts) do
-    # `start_socket/1` and `start_poller/1` both run inside `ensure_route/1`, a `Feed`
+    # `build_socket/2` and `start_poller/1` both run inside `settle_route/2`, a `Feed`
     # callback — `Socket.start_link/1` and `PollingFeed.start_link/1` are therefore
     # linked children of `Feed`, not supervised siblings. Without this flag, either one
     # exiting abnormally sends an untrappable EXIT signal along that link and takes
@@ -568,7 +569,7 @@ defmodule DpExchange.Schwab.Feed do
 
     state = %{
       # Wrapped immediately, before it reaches `state` — see `Credentials`'s moduledoc.
-      # Every downstream use (`Rest.get_user_preference/2`, `Rest.get_price/3`,
+      # Every downstream use (`Rest.get_user_preference/2`, `Rest.get_prices/3`,
       # `access_token/1`, `Socket.start_link/1`'s `access_token:` opt) keeps working
       # unchanged: a struct is a map.
       credentials: credentials,
@@ -640,7 +641,7 @@ defmodule DpExchange.Schwab.Feed do
     }
 
     # No `{:continue, :connect}` — this process dials nothing until the first
-    # `subscribe/2` or `update_symbols/2` call reaches `ensure_route/1` on its own. See
+    # `subscribe/2` or `update_symbols/2` call reaches `settle_route/2` on its own. See
     # the moduledoc's "A consumer that never subscribes must not find a socket open"
     # section for why an eager dial here used to happen anyway, and what depended on it
     # (nothing did).
@@ -706,7 +707,7 @@ defmodule DpExchange.Schwab.Feed do
     {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
   end
 
-  # The poll route reaches `/quotes` and nothing else — see `Rest.get_price/3`, the only
+  # The poll route reaches `/quotes` and nothing else — see `Rest.get_prices/3`, the only
   # fetch this route ever calls — so there is exactly one kind to report, sourced the same
   # way `coverage/1` sources it on this route: from `PollingFeed`, not from `state.kinds`.
   # No `:candles` key is invented here; candles cannot arrive on this route at all.
@@ -789,7 +790,7 @@ defmodule DpExchange.Schwab.Feed do
   # A whole reset, for the reason `isolate_crashed_route/2` gives: this feed has exactly one
   # active route at a time, so the link that just dropped was the only thing delivering.
   # `route` and `socket` are left alone — that socket is reconnecting rather than dead, and
-  # clearing them here would make `ensure_route/1` dial a second one.
+  # clearing them here would make `settle_route/2` dial a second one.
   # The bootstrap task died or ran past its budget without answering. **Ordered above the
   # subscriber `:DOWN` clause, which would otherwise swallow it**, and matched on the stored
   # `ref` so only this feed's own in-flight bootstrap reaches it.
@@ -1015,7 +1016,7 @@ defmodule DpExchange.Schwab.Feed do
   # A WARNING rather than a notice or a state change: this is a condition a person should
   # read, not one a consumer can act on differently from any other gap in coverage, and the
   # next tick retries anyway. Nothing is torn down, because the route may be mid-rebuild and
-  # reacting here would race `ensure_route/1`.
+  # reacting here would race `settle_route/2`.
   #
   # Found by running dialyzer with `:unmatched_returns`, which is not enabled by default —
   # see the release note for why the flag itself was not adopted family-wide.
@@ -1260,7 +1261,7 @@ defmodule DpExchange.Schwab.Feed do
   # See the moduledoc's "A crashed socket or poller used to be Feed's crash too" section
   # and `handle_info({:EXIT, pid, reason}, %{socket: pid} = state)`/`%{poller: pid}`
   # above. `state.route` is cleared along with `state.socket`/`state.poller` so
-  # `ensure_route/1`'s own first clause — `when route in [:stream, :poll], do: state` —
+  # `settle_route/2`'s own first clause — `when route in [:stream, :poll], do: state` —
   # does not treat the pid that just died as still live and skip reconnecting entirely.
   # `state.delivering`/`state.kinds` reset because this feed has exactly one active
   # route at a time: whichever one crashed was the only thing delivering.
@@ -1282,7 +1283,7 @@ defmodule DpExchange.Schwab.Feed do
     # been fixed since (`update_credentials/2`) in the meantime. `apply_symbols/1` is
     # NO LONGER called explicitly here — see the replacement note just below. The old shape
     # was `handle_call({:subscribe, …})` and
-    # `handle_call({:update_symbols, …})` both use — because `ensure_route/1`'s own
+    # `handle_call({:update_symbols, …})` both use — because `settle_route/2`'s own
     # `:stream` branch no longer applies symbols internally; see that function's own
     # comment for why. On the `:poll` branch this is a harmless idempotent re-send:
     # `start_poller/1` already seeded `PollingFeed` with `state.wanted` at start.

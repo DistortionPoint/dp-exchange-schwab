@@ -45,12 +45,13 @@ defmodule DpExchange.Schwab.Fake do
   venue could refuse.
 
   **The widened surface is not wired yet** — `get_option_chain/2`,
-  `get_option_expirations/2`, `get_screener/2`, `get_transactions/2` and
-  `get_rate_limit_status/2` have real success paths but no injection point. They gate
-  credentials correctly; they just cannot yet be made to fail on demand. Stated here rather
-  than left to be discovered, because a caller reaching for `queue_failures/2` against one
-  of them will otherwise get the fake's normal answer and read it as the injection not
-  working.
+  `get_option_expirations/2`, `get_screener/2` and `get_transactions/2` have real success
+  paths but no injection point. They gate credentials correctly; they just cannot yet be
+  made to fail on demand. (`get_rate_limit_status/2` is not among them: it is `:unsupported`
+  and answers `{:error, :not_supported}`, with no success path to inject into.) Stated
+  here rather than left to be discovered, because a caller reaching for `queue_failures/2`
+  against one of them will otherwise get the fake's normal answer and read it as the
+  injection not working.
   """
 
   @behaviour DpExchange.Core.Venue

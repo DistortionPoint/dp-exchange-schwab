@@ -35,6 +35,12 @@ defmodule DpExchange.Schwab.BusyFeedTest do
       blocked = make_ref()
       test_pid = self()
 
+      # Started BEFORE the blocker is spawned, so the block is wholly inside the interval
+      # measured: the six-second sleep begins after this reading, and the call under test
+      # cannot return until it ends. A reading taken after the block began could be late by
+      # however long this process was descheduled, which a loaded suite makes unbounded.
+      started = System.monotonic_time(:millisecond)
+
       # `spawn`, not `spawn_link`, and `:sys.replace_state/3` rather than `/2`: the two-arity
       # form carries its own five-second timeout, which the six-second block deliberately
       # outlasts, and a linked blocker would then have killed the test with that exit before
@@ -53,12 +59,13 @@ defmodule DpExchange.Schwab.BusyFeedTest do
 
       assert_receive ^blocked, 5_000
 
-      started = System.monotonic_time(:millisecond)
       assert :ok = Feed.subscribe_notices(feed, to: self())
       waited = System.monotonic_time(:millisecond) - started
 
       # Proves the call actually queued behind the block rather than being answered before
-      # it started — without which this would pass on the unfixed code too.
+      # it started — without which this would pass on the unfixed code too. A lower bound
+      # only: the sleep is six seconds and the reading precedes it, so `waited` is at least
+      # that however the scheduler behaves, a full second clear of the bound asserted.
       assert waited > 5_000
     end
   end

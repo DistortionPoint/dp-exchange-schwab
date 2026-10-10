@@ -63,15 +63,15 @@ defmodule DpExchange.Schwab.FallbackPollTest do
           plug: always_failing_quotes_plug(),
           retry_attempts: 0,
           interval_ms: 50,
-          # Headroom before the first tick so `subscribe_notices/2` below is guaranteed to
-          # land before the poller's first attempt — the poller is a third process on its
-          # own timer, not driven by a message this test controls.
           start_delay_ms: 150,
           symbols: ["AAPL"]
         )
 
-      :ok = Feed.subscribe(feed, ["AAPL"])
+      # Registered before the first ask. The poller only exists once `subscribe/3` has
+      # established the route, and it runs on its own timer, so registering afterwards raced
+      # that timer: a slow scheduler could let the first notice go out unheard.
       :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
 
@@ -106,8 +106,8 @@ defmodule DpExchange.Schwab.FallbackPollTest do
           symbols: ["AAPL"]
         )
 
-      :ok = Feed.subscribe(feed, ["AAPL"])
       :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
                      3_000
@@ -130,8 +130,8 @@ defmodule DpExchange.Schwab.FallbackPollTest do
           symbols: ["AAPL"]
         )
 
-      :ok = Feed.subscribe(feed, ["AAPL"])
       :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
                      3_000
@@ -170,13 +170,13 @@ defmodule DpExchange.Schwab.FallbackPollTest do
     # module is active in the test process at the moment `start_feed/1` calls
     # `Feed.start_link/1`, so the override has to happen first.
 
-    defp exhausted_limiter do
+    defp exhausted_limiter(per_ms \\ 300) do
       name = :"limiter_#{System.unique_integer([:positive])}"
 
       {:ok, _pid} =
         DefaultRateLimiter.start_link(
           name: name,
-          limits: %{default: %{limit: 1, per_ms: 300, burst: 0}}
+          limits: %{default: %{limit: 1, per_ms: per_ms, burst: 0}}
         )
 
       :ok = DefaultRateLimiter.record(:schwab, 1, limiter: name)
@@ -226,14 +226,35 @@ defmodule DpExchange.Schwab.FallbackPollTest do
           interval_ms: 60_000,
           start_delay_ms: 0,
           symbols: ["AAPL"],
-          limiter: exhausted_limiter(),
+          # A bucket that does not refill inside this test. The one the blocking test uses
+          # frees after 300 ms, and a poll that happened to start later than that on a
+          # loaded machine would be served, which is not what fail-fast means.
+          limiter: exhausted_limiter(600_000),
           rate_limit_blocking: false
         )
 
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      refute_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 1_500
+      # The cycle that was lost is observed rather than waited out: the poller's own status
+      # says it tried and failed, so no quote can still be on its way once this returns.
+      wait_for_failed_poll(feed)
+
+      refute_received {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}
       assert Process.alive?(feed)
+    end
+
+    defp wait_for_failed_poll(feed, waited \\ 0) do
+      cond do
+        match?(%{failures_since_ok: failures} when failures >= 1, Feed.status(feed)) ->
+          :ok
+
+        waited >= 5_000 ->
+          flunk("the fallback poll never attempted a cycle: #{inspect(Feed.status(feed))}")
+
+        true ->
+          Process.sleep(20)
+          wait_for_failed_poll(feed, waited + 20)
+      end
     end
   end
 

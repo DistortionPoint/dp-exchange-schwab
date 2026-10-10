@@ -386,8 +386,9 @@ defmodule DpExchange.Schwab do
   @doc """
   **Not supported yet.** `/transactions` carries fills, but mapping a Schwab transaction
   onto `Core.Types.Fill` needs a live response to check against and this repository holds
-  no credential. Declared `:experimental` and returning `:not_supported` would be a
-  declaration disagreeing with itself, so it is neither — see `capabilities/0`.
+  no credential. Declared `:unsupported` in `capabilities/0` and answering
+  `{:error, :not_supported}`, so the declaration and the code agree. Use
+  `get_transactions/2`, which returns the venue's own transaction rows unmapped.
   """
   @impl true
   def get_trade_history(_credentials, _opts \\ []), do: Venue.not_supported()
@@ -661,9 +662,17 @@ defmodule DpExchange.Schwab do
 
   Resolves the feed exactly as `coverage/1` and `subscribe_notices/1` do; answers
   `{:error, :feed_not_started}` on the same terms, since there is nothing to update.
+
+  Something that is not a credential map (`nil`, or the `{:error, _}` a failed
+  `refresh_credentials/2` returned) is `{:error, {:invalid_credentials, :schwab}}`, checked
+  before the feed is looked at. It used to reach the `Feed` process, which raised inside
+  `handle_call/3` and was restarted from its start-time options, losing every `subscribe/2`
+  made since.
   """
   @spec update_credentials(map(), keyword()) :: :ok | {:error, term()}
-  def update_credentials(credentials, opts \\ []) do
+  def update_credentials(credentials, opts \\ [])
+
+  def update_credentials(credentials, opts) when is_map(credentials) do
     feed = feed(opts)
 
     if alive?(feed),
@@ -674,6 +683,8 @@ defmodule DpExchange.Schwab do
         ),
       else: {:error, :feed_not_started}
   end
+
+  def update_credentials(_not_a_map, _opts), do: {:error, {:invalid_credentials, :schwab}}
 
   # --- plumbing -----------------------------------------------------------
 
@@ -763,9 +774,12 @@ defmodule DpExchange.Schwab do
 
   # --- Declared but not yet implemented -----------------------------------
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
-  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
-  # consumer routing on the declaration is told the truth.
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. The five
+  # implemented reads that open this section (`get_positions/1`, `get_option_chain/2`,
+  # `get_option_expirations/2`, `get_screener/2`, `get_transactions/2`) are `:experimental`.
+  # Every callback after them answers `{:error, :not_supported}` and is declared
+  # `:unsupported` in `capabilities/0`, so a consumer routing on the declaration is told the
+  # truth.
   #
   # **`:unsupported` here is a statement about this package, not about the venue.** That
   # distinction is the one Phase 1 had to correct after a package spent a year asserting a

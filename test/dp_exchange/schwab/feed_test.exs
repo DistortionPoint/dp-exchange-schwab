@@ -480,12 +480,12 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Feed.subscribe(feed, ["AAPL"])
       # One cast carrying every service — the Streamer fails parallel commands (code 22).
-      assert_receive {:"$websockex_cast", {:subscribe_all, batch}}
+      assert_receive {:"$websockex_cast", {:subscribe_all, batch}}, 2_000
       assert {"LEVELONE_EQUITIES", "SUBS", ["AAPL"], []} in batch
 
       assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
 
-      assert_receive {:"$websockex_cast", {:subscribe_all, emptied}}
+      assert_receive {:"$websockex_cast", {:subscribe_all, emptied}}, 2_000
       assert {"LEVELONE_EQUITIES", "SUBS", [], []} in emptied
       assert {"CHART_EQUITY", "SUBS", [], []} in emptied
     end
@@ -766,7 +766,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(subscriber)
       Process.exit(subscriber, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}, 2_000
 
       # A call is answered only after the feed's own `:DOWN` has been handled.
       _settled = Feed.coverage(feed)
@@ -785,7 +785,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(watcher)
       Process.exit(watcher, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}, 2_000
       _settled = Feed.coverage(feed)
 
       refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
@@ -806,7 +806,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(holder)
       Process.exit(holder, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}, 2_000
       _settled = Feed.coverage(feed)
 
       assert MapSet.member?(:sys.get_state(feed).subscribers, name)
@@ -838,7 +838,7 @@ defmodule DpExchange.Schwab.FeedTest do
       feed = start_feed(socket: fake_socket(), subscriber: self(), symbols: ["AAPL"])
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %{symbol: "AAPL"}}
+      assert_receive {:dp_exchange, :schwab, %{symbol: "AAPL"}}, 2_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
 
       # `:no_route` here only means this test's feed has no live route; the set changed.
@@ -911,8 +911,12 @@ defmodule DpExchange.Schwab.FeedTest do
       # A notice per dropped message would arrive at the rate of the stream the consumer
       # already cannot keep up with, into the same fan-out that is overloaded.
       for _each <- 1..5, do: send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+
+      # A reply from the feed is sent after everything it sent this process before it, and
+      # both come from the one process, so no notice can still be on its way once this
+      # returns. `refute_received` is exact here where a timed wait only guessed.
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 100
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
     end
 
     test "a symbol whose frames are dropped for a slow consumer is still covered" do
@@ -1153,8 +1157,10 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, {:polled, make_ref(), quote_for("AAPL")}})
 
-      refute_receive {:dp_exchange, :schwab, %Types.Quote{}}, 200
+      # The call is the fence: the feed has handled the stale delivery before it answers,
+      # and anything it forwarded to this process was sent before that answer.
       assert Feed.coverage(feed) == %{}
+      refute_received {:dp_exchange, :schwab, %Types.Quote{}}
     end
   end
 

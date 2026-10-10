@@ -33,8 +33,9 @@ defmodule DpExchange.Schwab.StreamerDecode do
     still falls back as below.
 
   Where a service carries one, `to_quote/3` and `to_top_of_book/3` use it; where it does
-  not, or the frame did not include it, `venue_time` is `nil` and `observed_at` — the
-  frame's arrival time, which the socket passes in — is what stands in.
+  not, or the frame did not include it, `venue_time` is `nil`. It is never filled from
+  `observed_at`, which is a separate field stating only when the frame arrived (the socket
+  passes that time in).
 
   `nil` there is not an oversight. It says the venue did not stamp this frame, which is the
   difference between "quoted at 14:53:02" and "seen at 14:53:02". This used to say
@@ -177,8 +178,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
   merged onto the last known book in `Socket.merge_top_of_book/3`, and the snapshot is what
   crosses the facade.
 
-  `Rest.to_candle/3` — the REST arm of the same type — already guarded all four. This was the
-  copy that did not.
+  `Rest`'s own candle decode — the REST arm of the same type — already guarded all four.
+  This was the copy that did not.
 
   `volume` stays unguarded: it is not an enforced key on `Candle`, and a frame that did not
   state a volume has not stated one.

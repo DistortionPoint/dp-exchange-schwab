@@ -262,8 +262,6 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert {:ok, ^body} =
                Schwab.get_market("equity", @creds, plug: capturing(body), retry_attempts: 0)
 
-      assert %{"equity" => %{"EQ" => %{"isOpen" => true, "sessionHours" => %{}}}} = body
-
       assert_received {:request, "GET", "/marketdata/v1/markets/equity", _query}
     end
   end
@@ -300,7 +298,6 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert body["symbol"] == "AAPL"
       assert_received {:request, "GET", "/marketdata/v1/instruments/037833100", _query}
     end
   end
@@ -697,8 +694,6 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       # package can fix without inventing contract vocabulary Core does not have; every
       # other key the contract CAN express matches the vendor's own example exactly.
       assert Map.drop(expected, ["complexOrderStrategyType"]) == body
-      assert body["price"] == "6.45"
-      assert body["orderLegCollection"] == expected["orderLegCollection"]
     end
   end
 

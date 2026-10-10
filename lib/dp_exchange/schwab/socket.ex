@@ -16,7 +16,7 @@ defmodule DpExchange.Schwab.Socket do
 
   ## A command sent before LOGIN is held, not dropped
 
-  `subscribe/4` is a cast and always answers `:ok`. This module used to *drop* a command
+  `subscribe_all/2` is a cast and always answers `:ok`. This module used to *drop* a command
   that arrived before the LOGIN response, raise a `:degraded` "not logged in" notice, and
   let the `:ok` stand. The reason given was that a caller told a subscription had succeeded
   would wait for data the venue never agreed to send. But the caller had already been told

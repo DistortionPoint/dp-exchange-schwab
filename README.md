@@ -9,7 +9,7 @@ facade how data reaches the package, and must not be able to.
 
 ```elixir
 def deps do
-  [{:dp_exchange_schwab, "~> 0.1.0"}]
+  [{:dp_exchange_schwab, "~> 0.2.98"}]
 end
 ```
 
@@ -23,8 +23,9 @@ than temporary**:
   available later this year", and neither specification declares a non-production server.
 
 So there is nowhere to exercise this package that is not somebody's real money. Every
-endpoint is declared `:experimental` and none can become `:proven` here — that happens when
-a consumer trades live. See `capabilities/0`; maturity is per endpoint, not per package.
+endpoint this package serves is declared `:experimental` (the rest `:unsupported`), and
+none can become `:proven` here — that happens when a consumer trades live. See
+`capabilities/0`; maturity is per endpoint, not per package.
 
 The declaration was derived from Schwab's two OpenAPI documents **before** any provider code
 was written. Both are committed under `docs/reference/schwab/`, because the portal returns
@@ -88,8 +89,8 @@ credential *use* — signing, session refresh, token rotation — belongs here.
 
 | | Lifetime | Renewed by |
 |---|---|---|
-| `access_token` | 30 minutes | `Auth.refresh/2` |
-| `refresh_token` | 7 days after creation | `Auth.refresh/2` — every call mints a new one |
+| `access_token` | 30 minutes | `DpExchange.Schwab.refresh_credentials/2` |
+| `refresh_token` | 7 days after creation | `refresh_credentials/2` — every call mints a new one |
 
 **The refresh token is one-time use.** A refresh spends the token it was given and returns
 its replacement. The vendor documents the refresh token itself as valid seven days after
@@ -98,9 +99,9 @@ creation and does not say whether refreshing before expiry resets that clock —
 every seven days regardless of how often you refresh in between.
 
 **Persist the result of every refresh before using it.** Losing the returned token costs the
-grant, and recovering costs a person at a browser. `refresh/2` is never retried internally —
-it is at-most-once, because a retry after a timeout re-sends a token that may already have
-been spent.
+grant, and recovering costs a person at a browser. `refresh_credentials/2` is never retried
+internally — it is at-most-once, because a retry after a timeout re-sends a token that may
+already have been spent.
 
 ```elixir
 credentials = %{

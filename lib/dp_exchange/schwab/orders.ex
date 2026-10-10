@@ -44,8 +44,8 @@ defmodule DpExchange.Schwab.Orders do
   @equity_instructions ~w(BUY SELL BUY_TO_COVER SELL_SHORT)
   @option_instructions ~w(BUY_TO_OPEN BUY_TO_CLOSE SELL_TO_OPEN SELL_TO_CLOSE)
 
-  # Core's vocabulary => Schwab's. Only the four Core can name; the venue's
-  # TRAILING_STOP, MARKET_ON_CLOSE, LIMIT_ON_CLOSE and NET_* have no Core atom (7.5).
+  # Core's vocabulary => Schwab's. The eight Core can name; the venue's CABINET,
+  # NON_MARKETABLE, EXERCISE and NET_* order types have no Core atom and are refused.
   @order_types %{
     market: "MARKET",
     limit: "LIMIT",
@@ -103,7 +103,10 @@ defmodule DpExchange.Schwab.Orders do
   Build a single-leg order payload from a contract request.
 
   The request is `Core`'s vocabulary: `:symbol`, `:side`, `:quantity`, and optionally
-  `:order_type`, `:price`, `:stop_price`, `:time_in_force`, `:session`.
+  `:order_type`, `:price`, `:stop_price`, `:time_in_force`, `:session`. The venue's own
+  `:instruction` (required for an option, which has no plain buy or sell), and a trailing
+  stop's `:stop_price_offset`, `:stop_price_link_basis` and `:stop_price_link_type`, ride
+  along under their venue names. `opts[:session]` is read when the request names none.
 
   Refuses, by name and before any request, when:
 
@@ -111,6 +114,15 @@ defmodule DpExchange.Schwab.Orders do
   - a limit order carries no price, or a stop order no stop price — the venue would
     reject it, and a locally-refused order has not spent a throttled write
   - the instruction does not match the asset type, per the venue's published matrix
+  - `:instrument_type` names an asset this builder cannot send
+
+  **`:instrument_type` sets the leg's `assetType`.** Nothing in a ticker tells a mutual fund
+  from a share (`SWPPX` and `AAPL` are spelled alike, and `capabilities/0` declares both),
+  so every non-option order went out as `EQUITY` — a fund order sent as a share order.
+  `:mutual_fund` sends `MUTUAL_FUND` and `:cash_equivalent` sends `CASH_EQUIVALENT`, the
+  Trader API's own `assetType` values; `:equity`/`:spot` (or none) sends `EQUITY`, and an
+  option symbol is `OPTION` whatever is said. Anything else is
+  `{:error, {:unsupported_instrument_type, value}}` rather than a guessed `EQUITY`.
   """
   @spec build(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def build(request, opts \\ []) do
@@ -121,6 +133,7 @@ defmodule DpExchange.Schwab.Orders do
          {:ok, duration} <- fetch_duration(request),
          {:ok, instruction} <- fetch_instruction(request, native),
          {:ok, session} <- fetch_session(request, opts),
+         {:ok, asset} <- fetch_asset_type(request, native),
          :ok <- check_finite(request),
          :ok <- check_prices(order_type, request) do
       {:ok,
@@ -135,7 +148,7 @@ defmodule DpExchange.Schwab.Orders do
              "quantity" => quantity,
              "instrument" => %{
                "symbol" => native,
-               "assetType" => asset_type(native)
+               "assetType" => asset
              }
            }
          ]
@@ -386,6 +399,19 @@ defmodule DpExchange.Schwab.Orders do
 
   defp asset_type(native), do: if(SymbolFormat.option?(native), do: "OPTION", else: "EQUITY")
 
+  # See `build/2`'s "`:instrument_type` sets the leg's `assetType`". An option symbol is an
+  # option whatever the request says; a non-option symbol takes the caller's stated type.
+  defp fetch_asset_type(request, native) do
+    if SymbolFormat.option?(native),
+      do: {:ok, "OPTION"},
+      else: stated_asset_type(Map.get(request, :instrument_type))
+  end
+
+  defp stated_asset_type(type) when type in [nil, :equity, :spot], do: {:ok, "EQUITY"}
+  defp stated_asset_type(:mutual_fund), do: {:ok, "MUTUAL_FUND"}
+  defp stated_asset_type(:cash_equivalent), do: {:ok, "CASH_EQUIVALENT"}
+  defp stated_asset_type(other), do: {:error, {:unsupported_instrument_type, other}}
+
   defp maybe_put(payload, _key, nil), do: payload
 
   # **`stopPriceOffset` is documented as a JSON number** — `OrderRequest.stopPriceOffset`
@@ -445,11 +471,11 @@ defmodule DpExchange.Schwab.Orders do
   # --- reading an order back --------------------------------------------------
 
   # `Core.Types.Order.order_type/0` is `:market | :limit | :stop | :stop_limit |
-  # :post_only | :ioc | :fok` — this venue never builds the last three, and of the four it
-  # does build, only these four have a Core atom. `build/2`'s own `@order_types` above can
-  # also send `TRAILING_STOP`, `TRAILING_STOP_LIMIT`, `MARKET_ON_CLOSE` and
-  # `LIMIT_ON_CLOSE`, none of which Core names (see that map's own comment), so reading
-  # one of those back has nowhere honest to land but `nil`.
+  # :post_only | :ioc | :fok` — this venue never builds the last three, and of the eight
+  # it does build, only these four have an atom on that type. `build/2`'s own
+  # `@order_types` above can also send `TRAILING_STOP`, `TRAILING_STOP_LIMIT`,
+  # `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, none of which `Core.Types.Order.order_type/0`
+  # names, so reading one of those back has nowhere honest to land but `nil`.
   #
   # Built FROM `@order_types` rather than a second hand-typed table, restricted to the
   # types Core actually has an atom for — so an order type added to `@order_types` cannot

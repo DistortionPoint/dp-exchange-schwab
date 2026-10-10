@@ -904,9 +904,13 @@ defmodule DpExchange.Schwab.SocketTest do
           [:dp_exchange, :link, :reconnect_attempt]
         ],
         fn event, measurements, metadata, _config ->
-          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
-          # one also receives every other concurrently-running test's events.
-          if metadata.provider == :schwab do
+          # Scoped by provider AND by process: `:telemetry` handlers are global to the VM, so
+          # an unscoped one also receives every other concurrently-running test's events.
+          # Provider alone is not enough here, because other async tests in this package
+          # run a real `Socket` whose reconnects emit `:schwab` link events from their own
+          # processes; a handler is executed in the emitting process, and every emission
+          # these tests mean to see is made by the test process itself.
+          if metadata.provider == :schwab and self() == test_pid do
             send(test_pid, {:telemetry, event, measurements, metadata})
           end
         end,
@@ -922,7 +926,10 @@ defmodule DpExchange.Schwab.SocketTest do
       # command until LOGIN succeeds, so a socket reporting the link up on connect would
       # show a healthy venue for a session that receives nothing.
       assert {:ok, _state} = Socket.handle_connect(%{}, state())
-      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+
+      # The handler runs in the emitting process, which is this one, so an event is already
+      # in the mailbox by the time the callback returns: nothing to wait for.
+      refute_received {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}
 
       response = %{
         "response" => [
