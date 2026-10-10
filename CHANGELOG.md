@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.99] - 2026-10-10
+
 ### Fixed
 
 - **A mutual-fund order was sent as an equity order.** `Orders.build/2` derived the leg's
