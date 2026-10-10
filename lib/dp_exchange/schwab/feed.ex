@@ -561,13 +561,18 @@ defmodule DpExchange.Schwab.Feed do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     subscriber = Config.opt(opts, :subscriber, self())
+    credentials = opts |> Keyword.get(:credentials, %{}) |> Credentials.wrap()
 
     state = %{
       # Wrapped immediately, before it reaches `state` — see `Credentials`'s moduledoc.
       # Every downstream use (`Rest.get_user_preference/2`, `Rest.get_price/3`,
       # `access_token/1`, `Socket.start_link/1`'s `access_token:` opt) keeps working
       # unchanged: a struct is a map.
-      credentials: opts |> Keyword.get(:credentials, %{}) |> Credentials.wrap(),
+      credentials: credentials,
+      # The fallback poll's view of `credentials`, read on every fetch. See
+      # `start_poller/1`: a closure over `state.credentials` froze the token the poller
+      # started with, and `update_credentials/2` never reached it.
+      credentials_cell: new_credentials_cell(credentials),
       # `:credentials` stripped rather than carried twice — see the moduledoc's "Why
       # `Feed` no longer stores the raw `opts` it was started with". Nothing below reads
       # `:credentials` back out of `state.opts`; only `state.credentials` is ever signed
@@ -743,6 +748,7 @@ defmodule DpExchange.Schwab.Feed do
   def handle_call({:update_credentials, credentials}, _from, state) do
     push_access_token(state, Map.get(credentials, :access_token))
     state = %{state | credentials: Credentials.wrap(credentials)}
+    true = :ets.insert(state.credentials_cell, {:credentials, state.credentials})
     {:reply, :ok, maybe_upgrade(state, :credentials_changed)}
   end
 
@@ -896,7 +902,7 @@ defmodule DpExchange.Schwab.Feed do
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
   # this process never saw go down reads identically to a healthy connection from here —
   # see the moduledoc's "A reconnect used to mean silence" section. Only the `:stream`
-  # route has anything to re-issue; the `:poll` route re-reads `state.credentials` on its
+  # route has anything to re-issue; the `:poll` route re-reads `credentials_cell` on its
   # own next tick via `PollingFeed`'s own `fetch` closure, which already needs nothing
   # pushed to it, and `apply_symbols/1`'s `:poll` clause would only repeat the identical
   # `update_symbols/2` call `PollingFeed` already keeps current.
@@ -1268,8 +1274,13 @@ defmodule DpExchange.Schwab.Feed do
 
   defp start_poller(state) do
     subscriber = self()
-    credentials = state.credentials
+    cell = state.credentials_cell
     request_opts = state.request_opts
+
+    refuse = fn symbol, reason ->
+      send(subscriber, {:dp_exchange, :schwab, {:refused, symbol, reason}})
+    end
+
     snapshot = state.config_snapshot
 
     result =
@@ -1294,9 +1305,7 @@ defmodule DpExchange.Schwab.Feed do
         interval_ms: Config.opt(state.opts, :interval_ms, @interval_ms),
         start_delay_ms: Keyword.get(state.opts, :start_delay_ms),
         sink: fn quote_struct -> send(subscriber, {:dp_exchange, :schwab, quote_struct}) end,
-        on_refusal: fn symbol, reason ->
-          send(subscriber, {:dp_exchange, :schwab, {:refused, symbol, reason}})
-        end,
+        on_refusal: refuse,
         # DpCryptoManagement's issue #21: this is the fallback poll's own silent-delivery
         # detector reaching a consumer as data, not just a `Logger.warning` — see this
         # module's moduledoc and `Core.PollingFeed`'s. The `Core.Notice{kind: :coverage_change}`
@@ -1305,13 +1314,17 @@ defmodule DpExchange.Schwab.Feed do
         # `state.notice_subscribers` — no new clause needed, because that handler is already
         # generic over `kind`.
         on_notice: fn notice -> send(subscriber, {:dp_exchange, :schwab, notice}) end,
-        fetch: fn symbol ->
+        # One `/quotes` request per 100 symbols a cycle, not one per symbol: at the default
+        # 120-a-minute read ceiling, per-symbol polling could not finish a 30 s cycle past
+        # about 60 symbols. See `Rest.get_prices/3`.
+        fetch_all: fn symbols ->
           # The poller is a third process, and neither this one's dictionary nor the
           # starting caller's reaches it. Re-applying here is what keeps a consumer's
           # async-test seam — its own rate limiter, its own adapter — in force on the
           # fallback route as well as the socket one.
           apply_config(snapshot)
-          Rest.get_price(symbol, credentials, request_opts)
+          {:ok, results} = Rest.get_prices(symbols, current_credentials(cell), request_opts)
+          bulk_outcome(results, refuse)
         end
       )
 
@@ -1320,6 +1333,47 @@ defmodule DpExchange.Schwab.Feed do
       {:error, reason} -> %{state | route: nil, last_error: reason}
     end
   end
+
+  # The poller is another process, so it cannot read `state`. It used to close over
+  # `state.credentials` at start, and kept signing with that token after
+  # `update_credentials/2` replaced it — an access token lives 30 minutes, so a feed stuck
+  # on `:poll` turned every fetch into a 401 for good. A `:protected` table owned by this
+  # process: only `Feed` writes it, and the fetch reads the current value each time.
+  # One cycle's per-symbol results, as `PollingFeed`'s bulk outcome. Quotes are published.
+  # A refused symbol is reported each cycle, as the per-symbol `fetch` reported it. With no
+  # quote at all, the cycle is a failure: an error if any chunk failed, else the refusals.
+  defp bulk_outcome(results, refuse) do
+    quotes = for {_symbol, {:ok, quote_struct}} <- results, do: quote_struct
+    refusals = for {symbol, {:refused, reason}} <- results, do: {symbol, reason}
+    errors = for {_symbol, {:error, reason}} <- results, do: reason
+
+    case {quotes, errors} do
+      {[], []} ->
+        {:refused, refusals}
+
+      {[], [reason | _rest]} ->
+        Enum.each(refusals, fn {symbol, why} -> refuse.(symbol, why) end)
+        {:error, reason}
+
+      {quotes, _errors} ->
+        Enum.each(refusals, fn {symbol, why} -> refuse.(symbol, why) end)
+        {:ok, quotes}
+    end
+  end
+
+  defp new_credentials_cell(credentials) do
+    cell = :ets.new(:schwab_feed_credentials, [:set, :protected, read_concurrency: true])
+    true = :ets.insert(cell, {:credentials, credentials})
+    cell
+  end
+
+  defp current_credentials(cell) do
+    [{:credentials, credentials}] = :ets.lookup(cell, :credentials)
+    credentials
+  end
+
+  # Every service `services_for/1` can route a symbol to.
+  @streamed_services ~w(LEVELONE_EQUITIES CHART_EQUITY LEVELONE_OPTIONS)
 
   defp apply_symbols(%{route: :poll, poller: poller} = state)
        when is_pid(poller) or is_atom(poller) do
@@ -1331,10 +1385,18 @@ defmodule DpExchange.Schwab.Feed do
     # means. `ADD` would accumulate the symbols a caller just removed. A symbol can now
     # reach more than one service (an equity reaches both `LEVELONE_EQUITIES` and
     # `CHART_EQUITY`), so this groups `{service, symbol}` pairs rather than symbols.
-    state.wanted
-    |> MapSet.to_list()
-    |> Enum.flat_map(fn symbol -> Enum.map(services_for(symbol), &{&1, symbol}) end)
-    |> Enum.group_by(fn {service, _symbol} -> service end, fn {_service, symbol} -> symbol end)
+    grouped =
+      state.wanted
+      |> MapSet.to_list()
+      |> Enum.flat_map(fn symbol -> Enum.map(services_for(symbol), &{&1, symbol}) end)
+      |> Enum.group_by(fn {service, _symbol} -> service end, fn {_service, symbol} -> symbol end)
+
+    # A service with nothing wanted gets an empty `SUBS`, which `Socket` turns into an
+    # `UNSUBS` of what its session holds. Grouping only what is wanted sent nothing for it,
+    # so the last symbol unsubscribed kept streaming until a reconnect.
+    @streamed_services
+    |> Map.new(&{&1, []})
+    |> Map.merge(grouped)
     |> Enum.each(fn {service, symbols} ->
       Socket.subscribe(socket, service, "SUBS", Enum.map(symbols, &native/1))
     end)
@@ -1345,7 +1407,7 @@ defmodule DpExchange.Schwab.Feed do
   defp apply_symbols(_state), do: {:error, :no_route}
 
   # Only meaningful on the stream route with a live socket — the poll route re-reads
-  # `state.credentials` on its own next tick via the `fetch` closure in `start_poller/1`,
+  # `credentials_cell` on its own next tick via the `fetch` closure in `start_poller/1`,
   # which already needs nothing pushed to it. A `nil` or non-binary token is not pushed:
   # `Socket.update_access_token/2` guards on `is_binary/1` itself, so this mirrors that
   # rather than sending something it would reject anyway.

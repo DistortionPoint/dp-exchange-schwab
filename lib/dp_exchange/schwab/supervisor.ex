@@ -175,7 +175,10 @@ defmodule DpExchange.Schwab.Supervisor do
       schwab: %{limit: reads, per_ms: 60_000, burst: reads},
       # `scope: :account` because that is what Schwab counts against, and a limiter keyed
       # by credential would silently over-permit a host running several accounts through
-      # one registration.
+      # one registration. **`Core.DefaultRateLimiter` does not read `:scope`**: the bucket
+      # is keyed by provider alone, so every account this supervisor serves shares it. That
+      # under-permits a multi-account host and never over-permits one; `usage-rules.md`
+      # says so rather than promising a per-account ceiling.
       schwab_orders: %{
         limit: max(orders, 1),
         per_ms: 60_000,

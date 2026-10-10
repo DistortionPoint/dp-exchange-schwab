@@ -205,6 +205,10 @@ defmodule DpExchange.Schwab.Socket do
       # Commands that arrived before the LOGIN response, sent once it succeeds — see the
       # moduledoc's "A command sent before LOGIN is held, not dropped".
       held: [],
+      # service => keys this session has put on the wire. Lets an empty `SUBS` (nothing
+      # wanted for that service any more) become an `UNSUBS` of exactly what is held — see
+      # `handle_cast({:subscribe, ...})`. Cleared with the session.
+      subscribed: %{},
       # When anything, a frame or a pong, last arrived, and this connection's liveness
       # check. See the moduledoc's "A dead connection is found by pinging it".
       last_heard_at: nil,
@@ -267,6 +271,9 @@ defmodule DpExchange.Schwab.Socket do
   accumulates; see `StreamerProtocol`. Before the LOGIN response has arrived the command is
   held and sent once the login succeeds, because the venue ignores commands sent before it;
   see the moduledoc's "A command sent before LOGIN is held, not dropped" section.
+
+  A `SUBS` with no keys means nothing is wanted on the service. It is sent as an `UNSUBS` of
+  the keys this session holds there, or not at all when it holds none.
   """
   @spec subscribe(pid(), String.t(), String.t(), [String.t()], keyword()) ::
           :ok | {:error, term()}
@@ -429,7 +436,7 @@ defmodule DpExchange.Schwab.Socket do
   defp now_ms, do: System.monotonic_time(:millisecond)
 
   @impl true
-  def handle_disconnect(%{reason: reason}, state) do
+  def handle_disconnect(%{reason: reason} = status, state) do
     notify(state, Notice.new(:link_down, :schwab, details: %{reason: inspect(reason)}))
     Telemetry.link_down(:schwab, inspect(reason))
 
@@ -438,7 +445,13 @@ defmodule DpExchange.Schwab.Socket do
     # token the venue will never accept would otherwise hammer the Streamer at full connect
     # speed, forever. Zero consecutive failures waits zero, so an ordinary network blip
     # after a healthy session still reconnects at once.
-    delay = reconnect_delay_ms(state.login_failures)
+    #
+    # A connect that never gets as far as LOGIN counts too. `websockex` calls this again
+    # after each failed reconnect with `attempt_number` climbing, and `login_failures` stays
+    # 0 when the network is down. Read alone, it gave an instant ECONNREFUSED or DNS failure
+    # a zero delay every time, a reconnect spin flooding `:link_down` notices.
+    failures = max(state.login_failures, Map.get(status, :attempt_number, 1) - 1)
+    delay = reconnect_delay_ms(failures)
 
     # This venue is the ONLY one in the family that emits `link_reconnect_attempt`, and the
     # reason is that it is the only one with a real attempt counter. `login_failures` is
@@ -449,7 +462,7 @@ defmodule DpExchange.Schwab.Socket do
     # which renders a reconnect loop as an endless series of first attempts. An invented
     # counter is exactly the plausible-wrong-value this family keeps writing rules against,
     # so they emit `:link, :down` and nothing else.
-    Telemetry.link_reconnect_attempt(:schwab, state.login_failures + 1, delay)
+    Telemetry.link_reconnect_attempt(:schwab, failures + 1, delay)
 
     if delay > 0, do: Process.sleep(delay)
 
@@ -458,7 +471,7 @@ defmodule DpExchange.Schwab.Socket do
     # `last_top` goes with the session, and for the same reason. A book carried across
     # this boundary would be this package continuing to assert a level on behalf of a session
     # the venue no longer has; the fresh session re-states what is true when it resubscribes.
-    {:reconnect, %{state | logged_in?: false, last_top: %{}}}
+    {:reconnect, %{state | logged_in?: false, last_top: %{}, subscribed: %{}}}
   end
 
   @impl true
@@ -479,6 +492,17 @@ defmodule DpExchange.Schwab.Socket do
     end
   end
 
+  # Nothing wanted for this service any more. `SUBS` with no keys is not a request the
+  # vendor documents, and sending nothing left the venue streaming the last symbol after
+  # `unsubscribe/2` until the next reconnect. So it is an `UNSUBS` of what this session
+  # holds for the service, or nothing when it holds none.
+  def handle_cast({:subscribe, service, "SUBS", [], opts}, state) do
+    case Map.get(state.subscribed, service, []) do
+      [] -> {:ok, state}
+      held -> handle_cast({:subscribe, service, "UNSUBS", held, opts}, state)
+    end
+  end
+
   def handle_cast({:subscribe, service, command, keys, opts}, state) do
     case StreamerProtocol.subscribe(
            state.info,
@@ -493,7 +517,8 @@ defmodule DpExchange.Schwab.Socket do
         {:reply, {:text, frame},
          %{
            state
-           | request_id: state.request_id + 1
+           | request_id: state.request_id + 1,
+             subscribed: record_subscription(state.subscribed, service, command, keys)
          }}
 
       {:error, reason} ->
@@ -558,16 +583,36 @@ defmodule DpExchange.Schwab.Socket do
   # command held before it for the same service moot. Dropping them keeps what is sent
   # identical in effect to sending each in turn, and keeps the hold bounded by the number of
   # services when, as `Feed` does, a caller only ever sends `SUBS`.
-  defp hold(state, {service, "SUBS", _keys, _opts} = command) do
+  defp hold(state, {service, "SUBS", keys, _opts} = command) do
     kept =
       Enum.reject(state.held, fn {held_service, _command, _keys, _opts} ->
         held_service == service
       end)
 
-    hold_within_limit(%{state | held: kept}, command)
+    # An empty `SUBS` before LOGIN only cancels what was held: a session that has not
+    # logged in holds nothing on the venue to unsubscribe.
+    case keys do
+      [] -> %{state | held: kept}
+      _keys -> hold_within_limit(%{state | held: kept}, command)
+    end
   end
 
   defp hold(state, command), do: hold_within_limit(state, command)
+
+  defp record_subscription(subscribed, service, "SUBS", keys),
+    do: Map.put(subscribed, service, keys)
+
+  defp record_subscription(subscribed, service, "ADD", keys),
+    do: Map.update(subscribed, service, keys, &Enum.uniq(&1 ++ keys))
+
+  defp record_subscription(subscribed, service, "UNSUBS", keys) do
+    case Map.get(subscribed, service, []) -- keys do
+      [] -> Map.delete(subscribed, service)
+      left -> Map.put(subscribed, service, left)
+    end
+  end
+
+  defp record_subscription(subscribed, _service, _view, _keys), do: subscribed
 
   defp hold_within_limit(%{held: held} = state, command) when length(held) < @max_held,
     do: %{state | held: held ++ [command]}
@@ -599,7 +644,8 @@ defmodule DpExchange.Schwab.Socket do
         {[request | requests],
          %{
            state
-           | request_id: state.request_id + 1
+           | request_id: state.request_id + 1,
+             subscribed: record_subscription(state.subscribed, service, command, keys)
          }}
       end)
 
@@ -722,16 +768,23 @@ defmodule DpExchange.Schwab.Socket do
   # A LEVELONE frame is two facts at once, so both are emitted: the quote only when the
   # venue reported a traded price, and the top of book always.
   defp decode("LEVELONE_" <> _rest, fields, symbol, observed_at, state) do
-    quote_result = StreamerDecode.to_quote(fields, symbol, observed_at)
-    {:ok, delta} = StreamerDecode.to_top_of_book(fields, symbol, observed_at)
+    quoted =
+      case StreamerDecode.to_quote(fields, symbol, observed_at) do
+        {:ok, quote_struct} -> [quote_struct]
+        # No traded price. A quote would have to invent one.
+        {:error, _reason} -> []
+      end
 
-    top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
-    state = put_in(state.last_top[symbol], top)
-
-    case quote_result do
-      {:ok, quote_struct} -> {[quote_struct, top], state}
-      # No traded price. The top of book still stands; a quote would have to invent one.
-      {:error, _reason} -> {[top], state}
+    if book_moved?(fields) do
+      {:ok, delta} = StreamerDecode.to_top_of_book(fields, symbol, observed_at)
+      top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
+      {quoted ++ [top], put_in(state.last_top[symbol], top)}
+    else
+      # A frame that moved no book field (a trade, a volume tick) says nothing about the
+      # book. Republishing the carried-forward levels stamped it `observed_at: now` with no
+      # `venue_time` — a stale book presented as fresh — and on a symbol's first frame
+      # published `nil` levels, which `TopOfBook` reads as "no resting order".
+      {quoted, state}
     end
   end
 
@@ -753,6 +806,9 @@ defmodule DpExchange.Schwab.Socket do
   # ACCT_ACTIVITY and the screeners have field maps but no value type in this contract yet.
   # Emitting the renamed map would hand a consumer a shape the facade never promised.
   defp decode(_service, _fields, _symbol, _observed_at, state), do: {[], state}
+
+  defp book_moved?(fields),
+    do: Enum.any?([:bid, :ask, :bid_size, :ask_size], &is_map_key(fields, &1))
 
   # `LEVELONE_*` is **Change** delivery. The vendor's own service table gives that type to
   # `LEVELONE_EQUITIES`, `LEVELONE_OPTIONS`, `LEVELONE_FUTURES` and

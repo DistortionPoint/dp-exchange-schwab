@@ -31,6 +31,53 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Twelve facade reads skipped the supervised rate limiter.** `get_positions`,
+  `get_option_chain`, `get_option_expirations`, `get_screener`, `get_transactions`,
+  `get_transaction`, `get_account_summaries`, `get_all_orders`, `get_symbol_quote`,
+  `get_market`, `get_instrument` and `get_user_preference` passed raw `opts` to `Rest`. In a
+  supervised deployment they used the default limiter instance, not
+  `DpExchange.Schwab.RateLimiter`. All now go through it, as `get_price` already did.
+- **The fallback poll kept the token it started with.** Its fetch closed over
+  `state.credentials`, so `update_credentials/2` never reached it. A feed held on `:poll` past
+  the access token's 30 minutes got a 401 on every fetch for good. The fetch now reads the
+  current credential each cycle.
+- **A reconnect that failed before LOGIN retried at full speed.** The backoff read only
+  `login_failures`, which stays 0 when the network is down, so an instant ECONNREFUSED or DNS
+  failure spun and flooded `:link_down`. `websockex`'s `attempt_number` now counts too.
+- **A LEVELONE frame that moved no book field republished the book.** A trade-only delta sent
+  the carried bid and ask with `observed_at: now` and no `venue_time`, a stale book presented
+  as fresh. On a symbol's first frame it sent `nil` levels, which read as "no resting order".
+  A top of book is now published only when the frame moves a book field.
+- **REST `get_price/3` dated a last-trade price by `quoteTime`.** That is the last bid/ask
+  update and can be much newer than the trade. `lastPrice` is now dated by `tradeTime` first,
+  matching the Streamer. `mark` and `nAV` still use `quoteTime` first.
+- **A refresh with no `expires_in` kept the old token's expiry.** `needs_refresh?/2` then said
+  yes on every call, and each call spent the one-time refresh token again. The old
+  `:expires_at` now goes with the old token.
+- **Unsubscribing the last symbol of a service never reached the venue.** Nothing was sent for a
+  service with no wanted symbols, so it kept streaming until a reconnect. `Feed` now sends an
+  empty `SUBS`, and `Socket` turns that into an `UNSUBS` of exactly the keys its session holds.
+- **The fallback poll spent one request per symbol per cycle.** At the default 120-a-minute
+  read ceiling, it could not finish a cycle past about 60 symbols. New `Rest.get_prices/3`
+  sends up to 100 symbols per `/quotes` request, and the poll uses it.
+- **Smaller fail-closed gaps.**
+  - `get_transactions` and `get_transaction` now URI-encode the account hash.
+  - An instrument search body without `instruments` is now an error. It used to be an empty
+    match, because `%{}` matches every map.
+  - A `Location` ending in `/` is now "order id not returned", not `{:ok, ""}`.
+  - A non-UTC `DateTime` keeps its milliseconds, because it is converted to UTC first.
+- Two tests that proved little: one slept 20 ms before asserting the feed was alive, and one
+  held a bootstrap 2 s against a 1.5 s deadline. They now synchronise on messages.
+
+### Documentation
+
+- The read and order ceilings are stated as metered. Reads, previews included, share a courtesy
+  120-a-minute bucket. Order writes share one bucket across every account a supervisor serves,
+  because `Core.DefaultRateLimiter` does not read `:scope`. The docs said reads were unthrottled
+  and orders were metered per account.
+
 ## [0.2.88] - 2026-10-05
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

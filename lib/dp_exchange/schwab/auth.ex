@@ -300,10 +300,19 @@ defmodule DpExchange.Schwab.Auth do
       |> put_expiry(response["expires_in"], now)
       |> put_rotated_refresh(response["refresh_token"])
 
-    with {:ok, renewed} <- renewed, do: {:ok, Map.merge(credentials, renewed)}
+    # The old `:expires_at` goes with the old token. Merged over, a response with no expiry
+    # claim kept the previous token's past expiry on the new one, `needs_refresh?/2` said yes
+    # on every call, and each refresh spent the one-time refresh token again.
+    with {:ok, renewed} <- renewed,
+         do: {:ok, credentials |> forget_expiry() |> Map.merge(renewed)}
   end
 
   defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
+
+  # A `Credentials` struct keeps its key and loses the value; deleting a struct key would
+  # leave a map that is no longer the struct.
+  defp forget_expiry(%{__struct__: _module} = credentials), do: %{credentials | expires_at: nil}
+  defp forget_expiry(credentials), do: Map.delete(credentials, :expires_at)
 
   # **Bounded, because `DateTime.add/3` is not.** It computes a date for any offset, and for
   # an extreme one it took longer than 4 seconds (measured 2026-09-27 at 10^20 seconds and

@@ -38,6 +38,7 @@ defmodule DpExchange.Schwab.SocketTest do
         login_failures: 0,
         logged_in_once?: false,
         held: [],
+        subscribed: %{},
         last_heard_at: nil,
         liveness: nil,
         last_top: %{}
@@ -310,7 +311,9 @@ defmodule DpExchange.Schwab.SocketTest do
         next
       end
 
-      once = subscribe.(state(%{logged_in?: true}), ~w(AAPL))
+      # The same number of keys as each later SUBS: the socket now records the keys its
+      # session holds per service (for `UNSUBS`), which is bounded by one set, not growth.
+      once = subscribe.(state(%{logged_in?: true}), ["SYM0", "AAPL"])
       many = Enum.reduce(1..500, once, fn n, acc -> subscribe.(acc, ["SYM#{n}", "AAPL"]) end)
 
       assert :erts_debug.flat_size(%{many | request_id: 0}) ==
@@ -628,6 +631,25 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert_received {:dp_exchange, :schwab, %Types.TopOfBook{}}
       refute_received {:dp_exchange, :schwab, %Types.Quote{}}
+    end
+
+    test "a LEVELONE frame that moves no book field emits the quote and NO top of book" do
+      # A trade-only delta says nothing about the book. Republishing the carried levels
+      # stamped them fresh with no venue time, and on a first frame published nil levels.
+      data = %{
+        "data" => [
+          %{
+            "service" => "LEVELONE_EQUITIES",
+            "content" => [%{"key" => "AAPL", "0" => "AAPL", "3" => 10.55}]
+          }
+        ]
+      }
+
+      assert {:ok, after_trade} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+
+      assert_received {:dp_exchange, :schwab, %Types.Quote{}}
+      refute_received {:dp_exchange, :schwab, %Types.TopOfBook{}}
+      assert after_trade.last_top == %{}
     end
 
     test "a CHART frame emits a candle" do
@@ -983,6 +1005,63 @@ defmodule DpExchange.Schwab.SocketTest do
       # from a session the venue no longer has.
       {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, state)
       assert reconnected.last_top == %{}
+    end
+  end
+
+  describe "nothing wanted on a service is an UNSUBS of what the session holds" do
+    test "a SUBS records its keys, and an empty SUBS then unsubscribes exactly those" do
+      logged_in = state(%{logged_in?: true})
+
+      assert {:reply, {:text, _raw}, subscribed} =
+               Socket.handle_cast(
+                 {:subscribe, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL MSFT), []},
+                 logged_in
+               )
+
+      assert subscribed.subscribed == %{"LEVELONE_EQUITIES" => ~w(AAPL MSFT)}
+
+      assert {:reply, {:text, raw}, cleared} =
+               Socket.handle_cast({:subscribe, "LEVELONE_EQUITIES", "SUBS", [], []}, subscribed)
+
+      assert %{"requests" => [request]} = Jason.decode!(raw)
+      assert request["command"] == "UNSUBS"
+      assert request["parameters"]["keys"] == "AAPL,MSFT"
+      assert cleared.subscribed == %{}
+    end
+
+    test "an empty SUBS on a service the session never subscribed sends nothing" do
+      logged_in = state(%{logged_in?: true})
+
+      assert {:ok, ^logged_in} =
+               Socket.handle_cast({:subscribe, "CHART_EQUITY", "SUBS", [], []}, logged_in)
+    end
+
+    test "before LOGIN an empty SUBS only cancels what was held for the service" do
+      held = state(%{held: [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []}]})
+
+      assert {:ok, cancelled} =
+               Socket.handle_cast({:subscribe, "LEVELONE_EQUITIES", "SUBS", [], []}, held)
+
+      assert cancelled.held == []
+    end
+
+    test "a reconnect forgets what the old session held" do
+      before = state(%{logged_in?: true, subscribed: %{"LEVELONE_EQUITIES" => ~w(AAPL)}})
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, before)
+      assert dropped.subscribed == %{}
+    end
+  end
+
+  describe "a reconnect that keeps failing before LOGIN backs off" do
+    test "attempt_number counts, so a refused connect is not retried at full speed" do
+      # `login_failures` stays 0 when the network itself is down; `websockex` reports each
+      # failed reconnect through `attempt_number` instead. The second attempt waits 1 s.
+      {elapsed_us, {:reconnect, _state}} =
+        :timer.tc(fn ->
+          Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 2}, state())
+        end)
+
+      assert elapsed_us >= 1_000_000
     end
   end
 end

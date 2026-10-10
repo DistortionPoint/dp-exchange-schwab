@@ -123,10 +123,9 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert quoted.symbol == "AAPL"
       assert Decimal.equal?(quoted.price, Decimal.from_float(168.405))
       assert Decimal.equal?(quoted.volume, Decimal.new(22_361_159))
-      # get_price/3's own @doc: "Timestamped from the venue's own quoteTime, or tradeTime
-      # when the response has no quoteTime" — quoteTime (672ms) wins over tradeTime
-      # (408ms) here because the vendor's own example carries both.
-      assert quoted.venue_time == DateTime.from_unix!(1_644_854_683_672, :millisecond)
+      # The price is `lastPrice`, a trade, so it is dated by `tradeTime` (408ms), not the
+      # later `quoteTime` (672ms) the vendor's example also carries — see get_price/3's @doc.
+      assert quoted.venue_time == DateTime.from_unix!(1_644_854_683_408, :millisecond)
       assert quoted.provider == :schwab
 
       assert_received {:request, "GET", "/marketdata/v1/quotes", query}

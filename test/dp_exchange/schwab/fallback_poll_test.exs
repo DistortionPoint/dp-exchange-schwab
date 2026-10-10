@@ -240,4 +240,43 @@ defmodule DpExchange.Schwab.FallbackPollTest do
   test "child_spec carries the configured name as its id" do
     assert %{id: :my_feed, type: :worker} = Feed.child_spec(name: :my_feed)
   end
+
+  describe "the fallback poll signs with the credential it is given now" do
+    test "update_credentials/2 reaches a running poller's next fetch" do
+      # The poller closed over the token it started with, so a feed stuck on `:poll` kept
+      # signing with a 30-minute token after every refresh, and every fetch became a 401.
+      test_pid = self()
+
+      plug = fn conn ->
+        if String.contains?(conn.request_path, "userPreference") do
+          Plug.Conn.resp(conn, 401, "no")
+        else
+          send(test_pid, {:signed, Plug.Conn.get_req_header(conn, "authorization")})
+          Req.Test.json(conn, quote_body())
+        end
+      end
+
+      feed =
+        start_feed(plug: plug, retry_attempts: 0, interval_ms: 50, start_delay_ms: 0)
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      assert_receive {:signed, ["Bearer token-abc"]}, 3_000
+
+      :ok = Feed.update_credentials(feed, %{credentials() | access_token: "token-fresh"})
+
+      assert_fresh_signature()
+    end
+
+    defp assert_fresh_signature(attempts \\ 40)
+    defp assert_fresh_signature(0), do: flunk("no poll was signed with the refreshed token")
+
+    defp assert_fresh_signature(attempts) do
+      receive do
+        {:signed, ["Bearer token-fresh"]} -> :ok
+        {:signed, _old} -> assert_fresh_signature(attempts - 1)
+      after
+        3_000 -> flunk("the poller stopped fetching")
+      end
+    end
+  end
 end

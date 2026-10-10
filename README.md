@@ -72,9 +72,11 @@ every lookup is a search. `get_symbols/1` therefore requires a `:query` and retu
 **It can preview and replace, and nothing else in the family can.** `previewOrder`
 validates an order and estimates its cost without placing it; `PUT .../orders/{id}` amends
 atomically. Both matter more here than they would elsewhere: order writes are throttled to
-`0..120` a minute per account and reads are not, so previewing a rejection is free while
-placing one is not — and cancel-then-place spends two writes *and* opens a window in which
-no order is live.
+`0..120` a minute per account and reads are not, so previewing a rejection costs a read while
+placing one costs a write — and cancel-then-place spends two writes *and* opens a window in
+which no order is live. This package meters reads (preview included) at a courtesy 120 a
+minute by default, and order writes in one bucket shared by every account a supervisor
+serves — stricter than the venue's per-account count. See `usage-rules.md`.
 
 ## Authentication
 

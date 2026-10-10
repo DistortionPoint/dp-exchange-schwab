@@ -317,9 +317,16 @@ rather than on venue name.
 {:ok, preview} = DpExchange.Schwab.preview_order(credentials, request, account_hash: hash)
 ```
 
-**Preview is close to free and placing is not.** Order writes are throttled here to
-somewhere between 0 and 120 a minute per account; reads are unthrottled. A rejection found
-by previewing costs nothing. One found by placing costs a scarce write.
+**Preview is close to free and placing is not.** Schwab throttles order writes to somewhere
+between 0 and 120 a minute per account and does not throttle reads. A rejection found by
+previewing costs a read. One found by placing costs a scarce write.
+
+This package meters both. Reads, `preview_order` included, share one bucket at
+`read_limit_per_minute` (120 by default), a courtesy ceiling rather than the venue's. Order
+writes share one bucket at your declared `order_limit_per_minute` **across every account the
+supervisor serves**, because the limiter keys by provider, not by account. That is stricter
+than Schwab's per-account count, never looser. Run one supervisor per account if you need
+each account's full ceiling.
 
 ```elixir
 {:ok, new_id} = DpExchange.Schwab.replace_order(credentials, old_id, request, account_hash: hash)

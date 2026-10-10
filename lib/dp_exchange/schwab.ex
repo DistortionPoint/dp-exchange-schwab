@@ -737,7 +737,7 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_positions(opts),
-    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), opts)
+    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), with_limiter(opts))
 
   @doc """
   The option chain for an underlying — expiry × strike, both sides.
@@ -747,7 +747,8 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_option_chain(underlying, opts),
-    do: Rest.get_option_chain(underlying, Keyword.get(opts, :credentials, %{}), opts)
+    do:
+      Rest.get_option_chain(underlying, Keyword.get(opts, :credentials, %{}), with_limiter(opts))
 
   @doc """
   The expiries listed on an underlying.
@@ -757,7 +758,12 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_option_expirations(underlying, opts),
-    do: Rest.get_option_expirations(underlying, Keyword.get(opts, :credentials, %{}), opts)
+    do:
+      Rest.get_option_expirations(
+        underlying,
+        Keyword.get(opts, :credentials, %{}),
+        with_limiter(opts)
+      )
 
   @doc """
   A mover list, by the venue's own universe — `movers_universes/0` lists them.
@@ -767,7 +773,7 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_screener(name, opts),
-    do: Rest.get_screener(name, Keyword.get(opts, :credentials, %{}), opts)
+    do: Rest.get_screener(name, Keyword.get(opts, :credentials, %{}), with_limiter(opts))
 
   @doc """
   Transactions on one account.
@@ -786,7 +792,7 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_transactions(credentials, opts) do
     with {:ok, hash} <- account_hash(opts) do
-      Rest.get_transactions(credentials, hash, opts)
+      Rest.get_transactions(credentials, hash, with_limiter(opts))
     end
   end
 
@@ -794,7 +800,7 @@ defmodule DpExchange.Schwab do
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts \\ []),
-    do: Rest.get_transaction(credentials, account_hash, transaction_id, opts)
+    do: Rest.get_transaction(credentials, account_hash, transaction_id, with_limiter(opts))
 
   @doc """
   Every account's balances, and its positions when asked.
@@ -805,7 +811,7 @@ defmodule DpExchange.Schwab do
   @spec get_account_summaries(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_account_summaries(credentials, opts \\ []),
-    do: Rest.get_account_summaries(credentials, opts)
+    do: Rest.get_account_summaries(credentials, with_limiter(opts))
 
   @doc """
   Orders across every account. `opts[:from]` and `opts[:to]` are required by the venue.
@@ -814,7 +820,8 @@ defmodule DpExchange.Schwab do
   """
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def get_all_orders(credentials, opts \\ []), do: Rest.get_all_orders(credentials, opts)
+  def get_all_orders(credentials, opts \\ []),
+    do: Rest.get_all_orders(credentials, with_limiter(opts))
 
   @doc """
   One symbol's quote, unnormalised. See `DpExchange.Schwab.Rest.get_symbol_quote/3`.
@@ -822,18 +829,19 @@ defmodule DpExchange.Schwab do
   @spec get_symbol_quote(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_symbol_quote(symbol, credentials, opts \\ []),
-    do: Rest.get_symbol_quote(symbol, credentials, opts)
+    do: Rest.get_symbol_quote(symbol, credentials, with_limiter(opts))
 
   @doc "One market's hours, optionally on another day. See `DpExchange.Schwab.Rest.get_market/3`."
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_market(market, credentials, opts \\ []), do: Rest.get_market(market, credentials, opts)
+  def get_market(market, credentials, opts \\ []),
+    do: Rest.get_market(market, credentials, with_limiter(opts))
 
   @doc "One instrument by CUSIP. See `DpExchange.Schwab.Rest.get_instrument/3`."
   @spec get_instrument(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_instrument(cusip, credentials, opts \\ []),
-    do: Rest.get_instrument(cusip, credentials, opts)
+    do: Rest.get_instrument(cusip, credentials, with_limiter(opts))
 
   @doc """
   The signed-in user's preferences — the same endpoint the streamer bootstraps from.
@@ -843,7 +851,7 @@ defmodule DpExchange.Schwab do
   @spec get_user_preference(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_user_preference(credentials, opts \\ []),
-    do: Rest.get_user_preference(credentials, opts)
+    do: Rest.get_user_preference(credentials, with_limiter(opts))
 
   @doc "The mover universes this venue publishes."
   @spec movers_universes() :: [String.t()]

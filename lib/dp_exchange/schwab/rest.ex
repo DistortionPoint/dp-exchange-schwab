@@ -149,9 +149,10 @@ defmodule DpExchange.Schwab.Rest do
   @doc """
   A quote for one symbol.
 
-  Timestamped from the venue's own `quoteTime`, or `tradeTime` when the response has no
-  `quoteTime` — `QuoteMutualFund` carries only the latter. A quote the venue did not date
-  returns `{:error, :missing_venue_timestamp}` — the local clock is never substituted.
+  Timestamped by the venue time that dates the price. A `lastPrice` is a trade, so
+  `tradeTime` comes first and `quoteTime` second. A `mark` or `nAV` is not a print, so
+  `quoteTime` comes first. A quote the venue did not date has `venue_time: nil`, and the
+  local clock is never substituted.
 
   The price is `lastPrice`, `mark` when there is no last, or `nAV` for a mutual fund
   (which has neither of the first two). See `quoted_price/1` for why the chain stops
@@ -165,6 +166,54 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
          {:ok, row} <- quote_row(body, native) do
       build_quote(native, row)
+    end
+  end
+
+  @quote_batch 100
+
+  @doc """
+  Quotes for many symbols, up to #{@quote_batch} per `/quotes` request.
+
+  `GET /quotes` takes a comma-separated `symbols` list, and the spec's `QuoteRequest` states
+  "max of 500 of symbols+cusip+ssids". #{@quote_batch} is a chosen batch below that, not a
+  measured one. The fallback poll used to spend one request per symbol per cycle, which at
+  the default 120-a-minute read ceiling could not finish a cycle past about 60 symbols.
+
+  Answers `{:ok, %{symbol => result}}` with a result for **every** symbol asked for, in the
+  shape `get_price/3` gives it. A symbol the venue omits or answers with a `QuoteError` is
+  `{:refused, :not_listed}`. A chunk whose request fails gives each of its symbols that
+  failure, and no other chunk's.
+  """
+  @spec get_prices([String.t()], map(), keyword()) ::
+          {:ok, %{String.t() => {:ok, Quote.t()} | {:error, term()} | {:refused, term()}}}
+  def get_prices(symbols, credentials, opts) when is_list(symbols) do
+    {valid, invalid} =
+      symbols
+      |> Enum.uniq()
+      |> Enum.map(&{&1, SymbolFormat.validate(&1)})
+      |> Enum.split_with(&match?({_symbol, {:ok, _native}}, &1))
+
+    quoted =
+      valid
+      |> Enum.map(fn {symbol, {:ok, native}} -> {symbol, native} end)
+      |> Enum.chunk_every(@quote_batch)
+      |> Enum.flat_map(&quote_chunk(&1, credentials, opts))
+
+    {:ok, Map.new(invalid ++ quoted)}
+  end
+
+  defp quote_chunk(pairs, credentials, opts) do
+    natives = pairs |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> Enum.join(",")
+    path = "/quotes?symbols=" <> URI.encode(natives) <> "&indicative=false"
+
+    case get(market_data_url(opts) <> path, credentials, opts) do
+      {:ok, body} ->
+        for {symbol, native} <- pairs do
+          {symbol, with({:ok, row} <- quote_row(body, native), do: build_quote(native, row))}
+        end
+
+      failure ->
+        for {symbol, _native} <- pairs, do: {symbol, failure}
     end
   end
 
@@ -280,8 +329,8 @@ defmodule DpExchange.Schwab.Rest do
   # dp-exchange-core issue #31 split the field to prevent. That remains ruled out: an
   # unstated venue time is `nil` here, never this package's clock.
   defp build_quote(native, row) do
-    with {:ok, raw_price} <- quoted_price(row),
-         {:ok, price} <- required_decimal(raw_price, :price) do
+    with {:ok, field} <- quoted_price(row),
+         {:ok, price} <- required_decimal(row[field], :price) do
       # `totalVolume` is the trading day's cumulative volume, so it is a running total to
       # difference, never one print to sum — dp-exchange-core issue #42. The Streamer's
       # `Quote` carries the opposite (`last_size`, one print); `volume_window` is what lets a
@@ -294,7 +343,7 @@ defmodule DpExchange.Schwab.Rest do
          price: price,
          volume: volume,
          volume_window: volume && :running_total,
-         venue_time: venue_time_or_nil(row),
+         venue_time: venue_time_or_nil(row, price_times(field)),
          observed_at: DateTime.utc_now(),
          provider: :schwab
        }}
@@ -317,9 +366,16 @@ defmodule DpExchange.Schwab.Rest do
   defp quoted_price(row) do
     case Enum.find(["lastPrice", "mark", "nAV"], &stated_price?(row[&1])) do
       nil -> {:error, :unexpected_response_shape}
-      field -> {:ok, row[field]}
+      field -> {:ok, field}
     end
   end
+
+  # Which venue time dates the price chosen above. `lastPrice` is a trade, so `tradeTime`
+  # first: `quoteTime` is the last bid/ask update and can be far newer than the last print,
+  # which made a REST quote look fresher than the Streamer's for the same trade (the Streamer
+  # dates a `Quote` by its trade time). `mark` and `nAV` are not prints, so the quote time.
+  defp price_times("lastPrice"), do: ["tradeTime", "quoteTime"]
+  defp price_times(_derived), do: ["quoteTime", "tradeTime"]
 
   # **Zero is not a price.** `row["lastPrice"] || row["mark"] || ...` stopped at the first
   # value that was not `nil`, and `0` is not `nil`: an instrument that has not traded, whose
@@ -340,8 +396,8 @@ defmodule DpExchange.Schwab.Rest do
   # For the types whose contract makes the venue's time optional — see `build_quote/2`.
   # Absent and present-but-unreadable answer the same way, because both mean this package
   # cannot state the venue's time and `nil` says that.
-  defp venue_time_or_nil(row) do
-    case venue_time(row) do
+  defp venue_time_or_nil(row, keys) do
+    case venue_time(row, keys) do
       {:ok, at} -> at
       {:error, _unstated} -> nil
     end
@@ -351,8 +407,8 @@ defmodule DpExchange.Schwab.Rest do
   # `quoted_price/1` stopped at a zero price, and `DateTime.from_unix(0)` answered a venue time
   # of 1970-01-01, which every staleness check then reads as fifty years old. The first
   # POSITIVE time is used; with none, the time is unstated.
-  defp venue_time(row) do
-    case Enum.find([row["quoteTime"], row["tradeTime"]], &positive_epoch?/1) do
+  defp venue_time(row, keys \\ ["quoteTime", "tradeTime"]) do
+    case keys |> Enum.map(&row[&1]) |> Enum.find(&positive_epoch?/1) do
       nil -> {:error, :missing_venue_timestamp}
       raw -> parse_time(raw)
     end
@@ -669,8 +725,9 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   # A search that matched nothing is an empty list, not a refusal: "no instrument is
-  # called that" is a real answer, unlike "no such endpoint".
-  defp instrument_symbols(%{}), do: {:ok, []}
+  # called that" is a real answer, unlike "no such endpoint". Only an EMPTY map: `%{}` as a
+  # pattern matches every map, so any body without `"instruments"` read as "no match".
+  defp instrument_symbols(body) when body == %{}, do: {:ok, []}
   defp instrument_symbols(_other), do: {:error, :unexpected_response_shape}
 
   # --- the rest of market data --------------------------------------------
@@ -1469,7 +1526,12 @@ defmodule DpExchange.Schwab.Rest do
   # precision, so dividing by 1000 and zero-padding to three digits is exact for every
   # precision — second, millisecond or microsecond alike.
   defp schwab_datetime(%DateTime{} = at) do
-    %{microsecond: {microsecond, _precision}} = truncated = DateTime.truncate(at, :millisecond)
+    # In UTC first. The `.SSS` is spliced in before the `Z`, and a DateTime in another
+    # offset renders `-05:00` with no `Z`, so it went out with no milliseconds at all.
+    # Through unix milliseconds rather than `DateTime.shift_zone/2`, which needs a time
+    # zone database this package does not configure.
+    utc = at |> DateTime.to_unix(:millisecond) |> DateTime.from_unix!(:millisecond)
+    %{microsecond: {microsecond, _precision}} = truncated = DateTime.truncate(utc, :millisecond)
 
     millis = microsecond |> div(1000) |> Integer.to_string() |> String.pad_leading(3, "0")
 
@@ -1527,7 +1589,7 @@ defmodule DpExchange.Schwab.Rest do
           "symbol" => Keyword.get(opts, :symbol)
         })
 
-      path = "/accounts/" <> account_hash <> "/transactions" <> query
+      path = "/accounts/" <> URI.encode(account_hash) <> "/transactions" <> query
 
       with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
         {:ok, List.wrap(body)}
@@ -1578,7 +1640,11 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts)
       when is_binary(account_hash) do
-    path = "/accounts/" <> account_hash <> "/transactions/" <> to_string(transaction_id)
+    path =
+      "/accounts/" <>
+        URI.encode(account_hash) <>
+        "/transactions/" <>
+        URI.encode(to_string(transaction_id))
 
     with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
          do: object_or_list(body)
@@ -1796,9 +1862,13 @@ defmodule DpExchange.Schwab.Rest do
       |> Map.get(:headers, %{})
       |> header("location")
 
-    case location do
-      nil -> {:error, :order_id_not_returned}
-      value -> {:ok, value |> String.split("/") |> List.last()}
+    # A Location ending in `/` has an empty last segment. `{:ok, ""}` is an order id that
+    # names no order, so it is the same "not returned" as no header.
+    with value when is_binary(value) <- location,
+         id when id != "" <- value |> String.split("/") |> List.last() do
+      {:ok, id}
+    else
+      _no_id -> {:error, :order_id_not_returned}
     end
   end
 

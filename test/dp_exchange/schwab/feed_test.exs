@@ -464,6 +464,29 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage(feed) == %{}
     end
 
+    test "unsubscribing the last symbol tells the socket its services want nothing" do
+      # Grouping only what is wanted sent nothing at all once nothing was wanted, so the
+      # venue kept streaming the last symbol until a reconnect.
+      test_pid = self()
+
+      socket =
+        spawn(fn ->
+          Stream.repeatedly(fn -> receive(do: (message -> send(test_pid, message))) end)
+          |> Stream.run()
+        end)
+
+      on_exit(fn -> Process.exit(socket, :kill) end)
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, ["AAPL"])
+      assert_receive {:"$websockex_cast", {:subscribe, "LEVELONE_EQUITIES", "SUBS", ["AAPL"], _}}
+
+      assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
+
+      assert_receive {:"$websockex_cast", {:subscribe, "LEVELONE_EQUITIES", "SUBS", [], _}}
+      assert_receive {:"$websockex_cast", {:subscribe, "CHART_EQUITY", "SUBS", [], _}}
+    end
+
     test "update_symbols replaces rather than accumulating" do
       feed = start_feed(socket: fake_socket())
 
@@ -543,8 +566,11 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Feed.subscribe(feed, ["AAPL"], to: name)
       send(feed, {:dp_exchange, :schwab, %{account: "123", event: "OrderFill"}})
-      Process.sleep(20)
 
+      # A call queued behind the event is answered only once the event has been handled,
+      # so this proves the fan-out to a missing name ran and was survived. A sleep proved
+      # only that 20 ms had passed.
+      assert is_map(Feed.coverage(feed))
       assert Process.alive?(feed)
     end
   end
@@ -1058,7 +1084,10 @@ defmodule DpExchange.Schwab.FeedTest do
   defp subscribed_services(socket_pid) do
     {:messages, messages} = Process.info(socket_pid, :messages)
 
-    for {:"$websockex_cast", {:subscribe, service, "SUBS", keys, _opts}} <- messages,
+    # An empty SUBS is "nothing wanted here", which `Socket` sends as an `UNSUBS` of what its
+    # session holds, or not at all. It subscribes nothing, so it is not counted here.
+    for {:"$websockex_cast", {:subscribe, service, "SUBS", [_first | _rest] = keys, _opts}} <-
+          messages,
         reduce: %{} do
       acc -> Map.update(acc, service, keys, &(&1 ++ keys))
     end

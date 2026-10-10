@@ -249,10 +249,16 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
 
       plug = fn conn ->
         if String.contains?(conn.request_path, "userPreference") do
-          send(test_pid, :bootstrap_started)
-          # Stands in for a slow venue. The real budget is ~90s; 2s keeps the test quick
-          # while still being longer than the 1.5 s this asserts a read answers within.
-          Process.sleep(2_000)
+          send(test_pid, {:bootstrap_started, self()})
+          # Stands in for a slow venue, held until the test has its answer. It was a fixed
+          # 2 s against a 1.5 s read deadline, a 500 ms margin a loaded suite can eat; a
+          # release message makes the hold outlast the read by construction.
+          receive do
+            :release -> :ok
+          after
+            10_000 -> :ok
+          end
+
           Plug.Conn.resp(conn, 401, "no")
         else
           Req.Test.json(conn, quote_body())
@@ -271,12 +277,13 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       subscriber = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
       # A wait for an event, not the property: under a loaded suite the signed request took
       # longer than one second to reach the plug (2026-09-28), so this waits five.
-      assert_receive :bootstrap_started, 5_000
+      assert_receive {:bootstrap_started, held}, 5_000
 
       reader = Task.async(fn -> Feed.coverage(feed) end)
-      # 1.5 s, still well inside the 2 s the bootstrap is held: an answer within it can only
-      # come from a feed that is not waiting on that call.
+      # The bootstrap is held until released below, so an answer within 1.5 s can only come
+      # from a feed that is not waiting on that call.
       result = Task.yield(reader, 1_500) || Task.shutdown(reader, :brutal_kill)
+      send(held, :release)
 
       assert match?({:ok, _}, result),
              "coverage/1 did not answer within 1.5 s while a subscribe was establishing " <>

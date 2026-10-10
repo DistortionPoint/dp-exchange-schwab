@@ -143,6 +143,20 @@ defmodule DpExchange.Schwab.AuthTest do
       end
     end
 
+    test "a refresh with no expiry claim does not keep the OLD token's expiry" do
+      # Merged over, the past expiry stayed on the new token, `needs_refresh?/2` said yes on
+      # every call, and every call spent the one-time refresh token again.
+      now = ~U[2026-08-31 12:00:00Z]
+      stale = Map.put(@creds, :expires_at, DateTime.add(now, -600, :second))
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2"}
+
+      assert {:ok, renewed} =
+               Auth.refresh(stale, plug: responding(body), retry_attempts: 0, now: now)
+
+      refute Map.has_key?(renewed, :expires_at)
+      refute Auth.needs_refresh?(renewed, now)
+    end
+
     test "every refresh mints a new refresh token, and it replaces the old one" do
       # The token sent is SPENT by this call. The one returned is its only replacement,
       # and carries a fresh seven days — which is why a host refreshing every half hour
