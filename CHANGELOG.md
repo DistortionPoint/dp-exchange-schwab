@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.94] - 2026-10-10
+
 ### Fixed
 
 - **A wanted-set update went to the Streamer as one frame per service.** The venue documents
