@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.97] - 2026-10-10
+
 ### Fixed
 
 - **A delayed quote was delivered as a live one.** An account without real-time
