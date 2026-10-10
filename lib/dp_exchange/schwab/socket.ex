@@ -265,20 +265,27 @@ defmodule DpExchange.Schwab.Socket do
   end
 
   @doc """
-  Subscribes `keys` on `service` using `command`.
+  Sends `{service, command, keys}` commands, all of them in **one** frame.
 
   **`command` has no default.** `SUBS` replaces every prior symbol for the service and `ADD`
-  accumulates; see `StreamerProtocol`. Before the LOGIN response has arrived the command is
+  accumulates; see `StreamerProtocol`. Before the LOGIN response has arrived each command is
   held and sent once the login succeeds, because the venue ignores commands sent before it;
   see the moduledoc's "A command sent before LOGIN is held, not dropped" section.
 
   A `SUBS` with no keys means nothing is wanted on the service. It is sent as an `UNSUBS` of
   the keys this session holds there, or not at all when it holds none.
+
+  One frame, not one per service, because the Streamer documents `FAILED_COMMAND_SUBS`
+  (code 22) as caused by "two or more commands are processed in parallel causing one to
+  fail" (market-data-production.txt:168). A wanted-set update reaching three services as
+  three frames could lose one of them until the next periodic resubscribe. This replaced a
+  one-command `subscribe/5`, so there is no way left to send them apart.
   """
-  @spec subscribe(pid(), String.t(), String.t(), [String.t()], keyword()) ::
+  @spec subscribe_all(pid(), [{String.t(), String.t(), [String.t()]}]) ::
           :ok | {:error, term()}
-  def subscribe(socket, service, command, keys, opts \\ []) do
-    VendoredWebSockex.cast(socket, {:subscribe, service, command, keys, opts})
+  def subscribe_all(socket, commands) do
+    batch = Enum.map(commands, fn {service, command, keys} -> {service, command, keys, []} end)
+    VendoredWebSockex.cast(socket, {:subscribe_all, batch})
     :ok
   catch
     :exit, _reason -> {:error, :send_timeout}
@@ -359,7 +366,7 @@ defmodule DpExchange.Schwab.Socket do
   def handle_connect(_conn, state) do
     # `handle_connect/2` cannot reply — the behaviour returns `{:ok, state}` only — so the
     # LOGIN frame is sent from `handle_info/2` a moment later. That is a transport detail,
-    # not a delay a caller can observe: a `subscribe/5` before the login *response* is held
+    # not a delay a caller can observe: a `subscribe_all/2` before the login *response* is held
     # and sent once it arrives, regardless.
     #
     # The link is up and the session is not. `:link_up` waits for that response —
@@ -492,18 +499,52 @@ defmodule DpExchange.Schwab.Socket do
     end
   end
 
+  def handle_cast({:subscribe, service, command, keys, opts}, state),
+    do: handle_cast({:subscribe_all, [{service, command, keys, opts}]}, state)
+
+  # Before LOGIN each command is held exactly as a lone `{:subscribe, ...}` cast is, and
+  # `release_held/1` already sends everything held in one frame.
+  def handle_cast({:subscribe_all, commands}, %{logged_in?: false} = state) do
+    {:ok,
+     Enum.reduce(commands, state, fn {service, command, keys, opts}, acc ->
+       {:ok, acc} = handle_cast({:subscribe, service, command, keys, opts}, acc)
+       acc
+     end)}
+  end
+
+  # Every command in one envelope — see `subscribe_all/2` for why one frame, not several.
+  def handle_cast({:subscribe_all, commands}, state) do
+    {requests, state} =
+      Enum.reduce(commands, {[], state}, fn {service, command, keys, opts}, {requests, acc} ->
+        case prepared(acc, service, command, keys, opts) do
+          {:ok, request, acc} -> {[request | requests], acc}
+          {:none, acc} -> {requests, acc}
+        end
+      end)
+
+    case requests do
+      [] ->
+        {:ok, state}
+
+      _some ->
+        {:reply, {:text, Jason.encode!(StreamerProtocol.envelope(Enum.reverse(requests)))}, state}
+    end
+  end
+
+  def handle_cast(_other, state), do: {:ok, state}
+
   # Nothing wanted for this service any more. `SUBS` with no keys is not a request the
   # vendor documents, and sending nothing left the venue streaming the last symbol after
   # `unsubscribe/2` until the next reconnect. So it is an `UNSUBS` of what this session
   # holds for the service, or nothing when it holds none.
-  def handle_cast({:subscribe, service, "SUBS", [], opts}, state) do
+  defp prepared(state, service, "SUBS", [], opts) do
     case Map.get(state.subscribed, service, []) do
-      [] -> {:ok, state}
-      held -> handle_cast({:subscribe, service, "UNSUBS", held, opts}, state)
+      [] -> {:none, state}
+      held -> prepared(state, service, "UNSUBS", held, opts)
     end
   end
 
-  def handle_cast({:subscribe, service, command, keys, opts}, state) do
+  defp prepared(state, service, command, keys, opts) do
     case StreamerProtocol.subscribe(
            state.info,
            service,
@@ -512,9 +553,7 @@ defmodule DpExchange.Schwab.Socket do
            Keyword.put(opts, :request_id, state.request_id)
          ) do
       {:ok, request} ->
-        frame = Jason.encode!(StreamerProtocol.envelope([request]))
-
-        {:reply, {:text, frame},
+        {:ok, request,
          %{
            state
            | request_id: state.request_id + 1,
@@ -524,11 +563,9 @@ defmodule DpExchange.Schwab.Socket do
 
       {:error, reason} ->
         notify(state, Notice.new(:degraded, :schwab, details: %{reason: inspect(reason)}))
-        {:ok, state}
+        {:none, state}
     end
   end
-
-  def handle_cast(_other, state), do: {:ok, state}
 
   @impl true
   def handle_frame({:text, raw}, state) do

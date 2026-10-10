@@ -479,12 +479,15 @@ defmodule DpExchange.Schwab.FeedTest do
       feed = start_feed(socket: socket)
 
       Feed.subscribe(feed, ["AAPL"])
-      assert_receive {:"$websockex_cast", {:subscribe, "LEVELONE_EQUITIES", "SUBS", ["AAPL"], _}}
+      # One cast carrying every service — the Streamer fails parallel commands (code 22).
+      assert_receive {:"$websockex_cast", {:subscribe_all, batch}}
+      assert {"LEVELONE_EQUITIES", "SUBS", ["AAPL"], []} in batch
 
       assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
 
-      assert_receive {:"$websockex_cast", {:subscribe, "LEVELONE_EQUITIES", "SUBS", [], _}}
-      assert_receive {:"$websockex_cast", {:subscribe, "CHART_EQUITY", "SUBS", [], _}}
+      assert_receive {:"$websockex_cast", {:subscribe_all, emptied}}
+      assert {"LEVELONE_EQUITIES", "SUBS", [], []} in emptied
+      assert {"CHART_EQUITY", "SUBS", [], []} in emptied
     end
 
     test "update_symbols replaces rather than accumulating" do
@@ -1086,8 +1089,8 @@ defmodule DpExchange.Schwab.FeedTest do
 
     # An empty SUBS is "nothing wanted here", which `Socket` sends as an `UNSUBS` of what its
     # session holds, or not at all. It subscribes nothing, so it is not counted here.
-    for {:"$websockex_cast", {:subscribe, service, "SUBS", [_first | _rest] = keys, _opts}} <-
-          messages,
+    for {:"$websockex_cast", {:subscribe_all, batch}} <- messages,
+        {service, "SUBS", [_first | _rest] = keys, _opts} <- batch,
         reduce: %{} do
       acc -> Map.update(acc, service, keys, &(&1 ++ keys))
     end

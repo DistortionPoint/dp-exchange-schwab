@@ -1029,6 +1029,48 @@ defmodule DpExchange.Schwab.SocketTest do
       assert cleared.subscribed == %{}
     end
 
+    test "subscribe_all sends every command in one frame, and skips an empty SUBS held nowhere" do
+      # The Streamer fails one of two commands processed in parallel (code 22,
+      # market-data-production.txt:168), so a wanted-set update is one envelope.
+      logged_in = state(%{logged_in?: true, last_top: %{"AAPL" => :book, "MSFT" => :book}})
+
+      batch = [
+        {"LEVELONE_EQUITIES", "SUBS", ~w(AAPL MSFT), []},
+        {"CHART_EQUITY", "SUBS", ~w(AAPL), []},
+        {"LEVELONE_OPTIONS", "SUBS", [], []}
+      ]
+
+      assert {:reply, {:text, raw}, sent} = Socket.handle_cast({:subscribe_all, batch}, logged_in)
+      assert %{"requests" => [equities, chart]} = Jason.decode!(raw)
+      assert {equities["service"], chart["service"]} == {"LEVELONE_EQUITIES", "CHART_EQUITY"}
+      assert equities["requestid"] != chart["requestid"]
+
+      # A symbol dropped from a LEVELONE service takes its carried book with it.
+      assert {:reply, {:text, _raw}, narrowed} =
+               Socket.handle_cast(
+                 {:subscribe_all, [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []}]},
+                 sent
+               )
+
+      assert Map.keys(narrowed.last_top) == ["AAPL"]
+
+      assert {:ok, ^narrowed} =
+               Socket.handle_cast(
+                 {:subscribe_all, [{"LEVELONE_OPTIONS", "SUBS", [], []}]},
+                 narrowed
+               )
+    end
+
+    test "subscribe_all before LOGIN holds each command" do
+      batch = [
+        {"LEVELONE_EQUITIES", "SUBS", ~w(AAPL), []},
+        {"CHART_EQUITY", "SUBS", ~w(AAPL), []}
+      ]
+
+      assert {:ok, held} = Socket.handle_cast({:subscribe_all, batch}, state())
+      assert length(held.held) == 2
+    end
+
     test "an empty SUBS on a service the session never subscribed sends nothing" do
       logged_in = state(%{logged_in?: true})
 

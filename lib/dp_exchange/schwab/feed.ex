@@ -1426,11 +1426,10 @@ defmodule DpExchange.Schwab.Feed do
     @streamed_services
     |> Map.new(&{&1, []})
     |> Map.merge(grouped)
-    |> Enum.each(fn {service, symbols} ->
-      Socket.subscribe(socket, service, "SUBS", Enum.map(symbols, &native/1))
-    end)
-
-    :ok
+    # One frame for every service, not one each: the Streamer fails one of two commands it
+    # processes in parallel (code 22) — see `Socket.subscribe_all/2`.
+    |> Enum.map(fn {service, symbols} -> {service, "SUBS", Enum.map(symbols, &native/1)} end)
+    |> then(&Socket.subscribe_all(socket, &1))
   end
 
   defp apply_symbols(_state), do: {:error, :no_route}

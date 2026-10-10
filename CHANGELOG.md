@@ -31,6 +31,14 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wanted-set update went to the Streamer as one frame per service.** The venue documents
+  `FAILED_COMMAND_SUBS` (code 22) as caused by "two or more commands are processed in
+  parallel causing one to fail", so one of the three could be lost until the next periodic
+  resubscribe. `Feed` now sends them in one envelope. `Socket.subscribe/5` is replaced by
+  `Socket.subscribe_all/2`, which sends a list of commands as one frame.
+
 ## [0.2.93] - 2026-10-10
 
 ### Fixed
