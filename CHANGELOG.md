@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.96] - 2026-10-10
+
 ### Changed
 
 - **`dp_exchange_core` 0.3.61.** The fallback poll's `[:dp_exchange, :link, …]` telemetry now
