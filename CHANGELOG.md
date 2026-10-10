@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.91] - 2026-10-10
+
 ### Fixed
 
 - **An order request with no `:order_type` and a `:price` went out as a MARKET order.** It carried the
