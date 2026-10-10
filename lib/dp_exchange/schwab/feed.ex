@@ -560,7 +560,10 @@ defmodule DpExchange.Schwab.Feed do
 
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
-    subscriber = Config.opt(opts, :subscriber, self())
+    # No default. `self()` here is this Feed, and a Feed that subscribed itself delivered each
+    # message back to its own mailbox, which delivered it again, forever (found 2026-10-10;
+    # `Supervisor` passes no `:subscriber`). Subscribers arrive through `subscribe/3`'s `to:`.
+    subscriber = Config.opt(opts, :subscriber, nil)
     credentials = opts |> Keyword.get(:credentials, %{}) |> Credentials.wrap()
 
     state = %{
@@ -605,7 +608,7 @@ defmodule DpExchange.Schwab.Feed do
       # Overridable so a test can prove the early reply without waiting ten seconds.
       bootstrap_reply_ms: Keyword.get(opts, :bootstrap_reply_ms) || @bootstrap_reply_ms,
       subscriber: subscriber,
-      subscribers: MapSet.new([subscriber]),
+      subscribers: if(subscriber, do: MapSet.new([subscriber]), else: MapSet.new()),
       notice_subscribers: MapSet.new(),
       # Monitor references for pid subscribers, so a dead one is dropped rather than walked
       # on every message for the life of this feed — see the `:DOWN` clause and
@@ -623,6 +626,8 @@ defmodule DpExchange.Schwab.Feed do
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),
       poller: nil,
+      # The current poller's delivery tag — see `start_poller/1`.
+      poll_tag: nil,
       route: nil,
       delivering: %{},
       # `symbol => MapSet.t(Core.Capabilities.data_kind())`, populated only from the
@@ -643,15 +648,25 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   @impl true
+  # **A symbol the REST route refuses is refused here too, before anything changes.** It was
+  # accepted and sent to the Streamer unchanged (`native/1`), so `subscribe(["BTC-USD"])`
+  # answered `:ok` on the stream route while the poll route refused the same symbol, and the
+  # venue's rejection arrived only as a generic `:degraded` notice.
   def handle_call({:subscribe, symbols, subscriber}, from, state) do
-    state = %{
-      state
-      | subscribers: MapSet.put(state.subscribers, subscriber),
-        monitors: Fanout.watch(subscriber, state.monitors),
-        wanted: MapSet.union(state.wanted, MapSet.new(symbols))
-    }
+    case invalid_symbols(symbols) do
+      [] ->
+        state = %{
+          state
+          | subscribers: MapSet.put(state.subscribers, subscriber),
+            monitors: Fanout.watch(subscriber, state.monitors),
+            wanted: MapSet.union(state.wanted, MapSet.new(symbols))
+        }
 
-    settle_route(state, from)
+        settle_route(state, from)
+
+      invalid ->
+        {:reply, {:error, {:invalid_symbols, invalid}}, state}
+    end
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
@@ -668,14 +683,10 @@ defmodule DpExchange.Schwab.Feed do
   def handle_call(:wanted, _from, state), do: {:reply, MapSet.to_list(state.wanted), state}
 
   def handle_call({:update_symbols, symbols}, from, state) do
-    state = %{
-      state
-      | wanted: MapSet.new(symbols),
-        delivering: Map.take(state.delivering, symbols),
-        kinds: Map.take(state.kinds, symbols)
-    }
-
-    settle_route(state, from)
+    case invalid_symbols(symbols) do
+      [] -> update_wanted(state, symbols, from)
+      invalid -> {:reply, {:error, {:invalid_symbols, invalid}}, state}
+    end
   end
 
   def handle_call(:coverage, _from, %{route: :poll, poller: poller} = state)
@@ -891,6 +902,18 @@ defmodule DpExchange.Schwab.Feed do
   # late frame left `coverage/1` answering `:stream` for an unsubscribed symbol
   # indefinitely. Found 2026-09-27 by reading the path, the same shape `Core.PollingFeed`
   # had for an in-flight fetch.
+  # A poll delivery counts only from the poller currently serving the route. One queued when
+  # the route upgraded to the stream was handled after `complete_upgrade/2` reset coverage,
+  # and `coverage/1` answered `:stream` for a symbol the socket had not delivered.
+  def handle_info(
+        {:dp_exchange, :schwab, {:polled, tag, value}},
+        %{poll_tag: tag, route: :poll} = state
+      ),
+      do: handle_info({:dp_exchange, :schwab, value}, state)
+
+  def handle_info({:dp_exchange, :schwab, {:polled, _stale_tag, _value}}, state),
+    do: {:noreply, state}
+
   def handle_info({:dp_exchange, :schwab, value} = message, state) do
     if unwanted?(value, state.wanted) do
       {:noreply, state}
@@ -1273,6 +1296,7 @@ defmodule DpExchange.Schwab.Feed do
   defp access_token(_credentials), do: {:error, {:missing_credentials, :schwab}}
 
   defp start_poller(state) do
+    tag = make_ref()
     subscriber = self()
     cell = state.credentials_cell
     request_opts = state.request_opts
@@ -1304,7 +1328,12 @@ defmodule DpExchange.Schwab.Feed do
         symbols: MapSet.to_list(state.wanted),
         interval_ms: Config.opt(state.opts, :interval_ms, @interval_ms),
         start_delay_ms: Keyword.get(state.opts, :start_delay_ms),
-        sink: fn quote_struct -> send(subscriber, {:dp_exchange, :schwab, quote_struct}) end,
+        # Tagged with THIS poller's ref, so a quote already in the mailbox when the route
+        # upgrades to the stream is dropped rather than counted as `:stream` — see the
+        # `{:polled, _, _}` clause of `handle_info/2`.
+        sink: fn quote_struct ->
+          send(subscriber, {:dp_exchange, :schwab, {:polled, tag, quote_struct}})
+        end,
         on_refusal: refuse,
         # DpCryptoManagement's issue #21: this is the fallback poll's own silent-delivery
         # detector reaching a consumer as data, not just a `Logger.warning` — see this
@@ -1329,7 +1358,7 @@ defmodule DpExchange.Schwab.Feed do
       )
 
     case result do
-      {:ok, poller} -> %{state | poller: poller, route: :poll}
+      {:ok, poller} -> %{state | poller: poller, route: :poll, poll_tag: tag}
       {:error, reason} -> %{state | route: nil, last_error: reason}
     end
   end
@@ -1450,6 +1479,21 @@ defmodule DpExchange.Schwab.Feed do
     else
       ["LEVELONE_EQUITIES", "CHART_EQUITY"]
     end
+  end
+
+  defp update_wanted(state, symbols, from) do
+    state = %{
+      state
+      | wanted: MapSet.new(symbols),
+        delivering: Map.take(state.delivering, symbols),
+        kinds: Map.take(state.kinds, symbols)
+    }
+
+    settle_route(state, from)
+  end
+
+  defp invalid_symbols(symbols) do
+    for symbol <- symbols, not match?({:ok, _native}, SymbolFormat.validate(symbol)), do: symbol
   end
 
   defp native(symbol) do

@@ -548,7 +548,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert {:ok, %DpExchange.Core.Types.Order{id: "1"}} =
                Schwab.get_order(@creds, "1", base ++ opts(responding(%{"orderId" => 1})))
 
-      assert :ok =
+      assert {:ok, :cancelled} =
                Schwab.cancel_order(
                  @creds,
                  "1",
@@ -565,7 +565,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       request = %{symbol: "AAPL", side: :buy, quantity: 1}
 
-      assert {:ok, "7"} =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, request, [account_hash: "H"] ++ opts(plug))
     end
 
@@ -607,7 +607,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
         |> Plug.Conn.resp(201, "")
       end
 
-      assert {:ok, "9"} = Schwab.replace_order(@creds, "1", request, base ++ opts(plug))
+      assert {:ok, %DpExchange.Core.Types.Order{id: "9"}} =
+               Schwab.replace_order(@creds, "1", request, base ++ opts(plug))
     end
 
     test "preview_order sends /previewOrder's own documented shape, not place_order's" do

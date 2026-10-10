@@ -518,7 +518,8 @@ defmodule DpExchange.Schwab.Socket do
          %{
            state
            | request_id: state.request_id + 1,
-             subscribed: record_subscription(state.subscribed, service, command, keys)
+             subscribed: record_subscription(state.subscribed, service, command, keys),
+             last_top: prune_last_top(state, service, command, keys)
          }}
 
       {:error, reason} ->
@@ -599,6 +600,24 @@ defmodule DpExchange.Schwab.Socket do
 
   defp hold(state, command), do: hold_within_limit(state, command)
 
+  # The book carried for a symbol goes when the symbol does. `last_top` gained one entry per
+  # symbol that ever framed and lost none until a reconnect, so a feed rotating symbols held
+  # every one it had ever seen. Only the keys THIS service dropped: the map is shared by every
+  # `LEVELONE_*` service, keyed by the venue's own symbol.
+  defp prune_last_top(
+         %{last_top: last_top, subscribed: subscribed},
+         "LEVELONE_" <> _channel = service,
+         command,
+         keys
+       )
+       when command in ["SUBS", "UNSUBS"] do
+    held = Map.get(subscribed, service, [])
+    dropped = if command == "SUBS", do: held -- keys, else: keys
+    Map.drop(last_top, dropped)
+  end
+
+  defp prune_last_top(%{last_top: last_top}, _service, _command, _keys), do: last_top
+
   defp record_subscription(subscribed, service, "SUBS", keys),
     do: Map.put(subscribed, service, keys)
 
@@ -645,7 +664,8 @@ defmodule DpExchange.Schwab.Socket do
          %{
            state
            | request_id: state.request_id + 1,
-             subscribed: record_subscription(state.subscribed, service, command, keys)
+             subscribed: record_subscription(state.subscribed, service, command, keys),
+             last_top: prune_last_top(state, service, command, keys)
          }}
       end)
 

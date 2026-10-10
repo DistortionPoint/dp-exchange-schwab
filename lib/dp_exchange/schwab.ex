@@ -80,7 +80,7 @@ defmodule DpExchange.Schwab do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Config, Venue}
+  alias DpExchange.Core.{Config, Types, Venue}
   alias DpExchange.Schwab.{Auth, Capabilities, Feed, OrderLimit, Orders, Rest, Supervisor}
 
   # --- identity -----------------------------------------------------------
@@ -250,10 +250,43 @@ defmodule DpExchange.Schwab do
   def place_order(credentials, request, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
-         {:ok, payload} <- Orders.build(request, opts) do
-      Rest.place_order(credentials, hash, payload, with_limiter(opts))
+         {:ok, payload} <- Orders.build(request, opts),
+         {:ok, id} <- Rest.place_order(credentials, hash, payload, with_limiter(opts)) do
+      placed_order(credentials, id, request, opts)
     end
   end
+
+  # **An `Order`, as `Core.Venue` types it, not the bare id.** The venue answers a placement
+  # with a `Location` header and nothing else, so `{:ok, "123"}` was all this returned, and a
+  # consumer matching `%Order{}` across venues broke on this one. The order is read back with
+  # `get_order/3`, a read on this venue rather than a throttled write. If that read fails the
+  # order is still placed, so the answer is `{:ok, _}`, built only from what is known: the id
+  # the venue named and the request as sent, `:pending`, nothing invented.
+  defp placed_order(credentials, id, request, opts) do
+    case get_order(credentials, id, opts) do
+      {:ok, %Types.Order{} = order} ->
+        {:ok, order}
+
+      _read_back_failed ->
+        {:ok,
+         %Types.Order{
+           id: id,
+           symbol: Map.get(request, :symbol),
+           side: Map.get(request, :side),
+           order_type: Map.get(request, :order_type, :market),
+           quantity: to_decimal(Map.get(request, :quantity)),
+           price: to_decimal(Map.get(request, :price)),
+           status: :pending,
+           provider: :schwab
+         }}
+    end
+  end
+
+  defp to_decimal(nil), do: nil
+  defp to_decimal(%Decimal{} = value), do: value
+  defp to_decimal(value) when is_integer(value), do: Decimal.new(value)
+  defp to_decimal(value) when is_float(value), do: Decimal.from_float(value)
+  defp to_decimal(value) when is_binary(value), do: Decimal.new(value)
 
   @doc """
   **Not supported.** Schwab places one order per request.
@@ -294,9 +327,9 @@ defmodule DpExchange.Schwab do
   those are **not equivalent here**: cancel-then-place opens a window in which no order is
   live, and it spends two throttled writes rather than one.
 
-  Returns the **new** order id. Schwab treats a replacement as a new order, so the old id
-  is dead afterwards and a caller still holding it would be tracking something that no
-  longer exists.
+  Returns the **new** order, read back as `place_order/3` reads one. Schwab treats a
+  replacement as a new order, so the old id is dead afterwards and a caller still holding it
+  would be tracking something that no longer exists.
 
   `{:error, :order_limit_not_declared}` under the same conditions as `place_order/3` — a
   replacement is a `PUT` order write, the same throttled category as a placement.
@@ -305,8 +338,11 @@ defmodule DpExchange.Schwab do
   def replace_order(credentials, order_id, request, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
-         {:ok, payload} <- Orders.build(request, opts) do
-      Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts))
+         {:ok, payload} <- Orders.build(request, opts),
+         {:ok, new_id} <-
+           Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts)) do
+      # The NEW order, read back the way a placement is — see `placed_order/4`.
+      placed_order(credentials, new_id, request, opts)
     end
   end
 
@@ -319,8 +355,12 @@ defmodule DpExchange.Schwab do
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
-         :ok <- ensure_order_limit_declared(opts) do
-      Rest.cancel_order(credentials, hash, order_id, with_limiter(opts))
+         :ok <- ensure_order_limit_declared(opts),
+         :ok <- Rest.cancel_order(credentials, hash, order_id, with_limiter(opts)) do
+      # `{:ok, :cancelled}`, as `dp_exchange_coinbase` and `dp_exchange_webull` answer a cancel
+      # whose response carries no order. A bare `:ok` matched none of the `{:ok, _} |
+      # {:error, _} | {:refused, _}` shapes every other call here returns.
+      {:ok, :cancelled}
     end
   end
 

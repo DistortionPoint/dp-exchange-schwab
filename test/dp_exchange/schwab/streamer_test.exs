@@ -667,6 +667,15 @@ defmodule DpExchange.Schwab.StreamerTest do
       refute Decimal.equal?(size, Decimal.new("150"))
     end
 
+    test "a level with no size is dropped, as one with no price is" do
+      fields = %{snapshot_time: 1_787_936_147_000, bids: [[10.5], [10.4, 100]], asks: [[11, nil]]}
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert [{price, _size}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("10.4"))
+      assert book.asks == []
+    end
+
     test "bids come back highest first and asks lowest first, whatever the venue sent" do
       # `Core.Types.OrderBook`: "The ordering is part of the contract, not a convenience: a
       # caller reading `hd(bids)` as the best bid is reading it correctly, and a venue

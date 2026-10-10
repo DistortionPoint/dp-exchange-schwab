@@ -554,7 +554,11 @@ defmodule DpExchange.Schwab.RestTest do
       body = %{
         "securitiesAccount" => %{
           "type" => "MARGIN",
-          "currentBalances" => %{"equity" => 50_000.0, "buyingPower" => 100_000.0}
+          "currentBalances" => %{
+            "equity" => 50_000.0,
+            "availableFunds" => 20_000.0,
+            "buyingPower" => 100_000.0
+          }
         }
       }
 
@@ -563,7 +567,8 @@ defmodule DpExchange.Schwab.RestTest do
 
       assert balance.currency == "USD"
       assert Decimal.equal?(balance.balance, Decimal.from_float(50_000.0))
-      assert Decimal.equal?(balance.available_balance, Decimal.from_float(100_000.0))
+      # Not `buyingPower`: leveraged, larger than the balance it would sit inside.
+      assert Decimal.equal?(balance.available_balance, Decimal.from_float(20_000.0))
     end
 
     test "a cash account reports total cash and cash available" do
@@ -584,6 +589,15 @@ defmodule DpExchange.Schwab.RestTest do
       # Reading a margin account as cash would report no buying power for an account
       # that has one — a plausible value, and the wrong one.
       body = %{"securitiesAccount" => %{"currentBalances" => %{"totalCash" => 1.0}}}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a total that is not a number is unreadable, not a balance of nothing" do
+      body = %{
+        "securitiesAccount" => %{"type" => "CASH", "currentBalances" => %{"totalCash" => "abc"}}
+      }
 
       assert {:error, :unexpected_response_shape} =
                Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)

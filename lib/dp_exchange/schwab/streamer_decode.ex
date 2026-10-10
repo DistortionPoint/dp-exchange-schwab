@@ -309,9 +309,12 @@ defmodule DpExchange.Schwab.StreamerDecode do
   defp levels(rows, direction) when is_list(rows) do
     rows
     |> Enum.flat_map(fn row ->
-      case level_at(row, 0) do
-        nil -> []
-        price -> [{price, level_at(row, 1)}]
+      # A level without a size is dropped as one without a price is: `{price, nil}` reached
+      # a caller summing the book, and `OrderBook`'s level type has no nil in it.
+      case {level_at(row, 0), level_at(row, 1)} do
+        {nil, _size} -> []
+        {_price, nil} -> []
+        {price, size} -> [{price, size}]
       end
     end)
     |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})

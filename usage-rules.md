@@ -285,6 +285,15 @@ silently-chosen account is not something this package will do for you.
 DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
 ```
 
+**`get_positions/1` is the exception, and it takes `:account_number`.** It reads every
+account in one call, and `Position` has no account field. So with more than one account,
+leave out `:account_number` and you get `{:error, {:account_number_required, n}}` rather than
+one list mixing every account. A row holding both a long and a short leg comes back as two
+positions. `notional_value` is unsigned, because `:side` carries the direction.
+
+A margin account's `available_balance` is `availableFunds`, not `buyingPower`. Buying power
+is leveraged and can exceed the balance it would sit inside.
+
 ## 7. Orders: only what Core can name
 
 Order types: `:market`, `:limit`, `:stop`, `:stop_limit`, `:trailing_stop`,
@@ -329,12 +338,18 @@ than Schwab's per-account count, never looser. Run one supervisor per account if
 each account's full ceiling.
 
 ```elixir
-{:ok, new_id} = DpExchange.Schwab.replace_order(credentials, old_id, request, account_hash: hash)
+{:ok, %Order{id: new_id}} =
+  DpExchange.Schwab.replace_order(credentials, old_id, request, account_hash: hash)
 ```
 
-**`replace_order/4` returns a NEW id.** Schwab treats a replacement as a new order, so the
+**`replace_order/4` returns the NEW order, with a new id.** Schwab treats a replacement as a new order, so the
 id you passed in is dead afterwards — keep the one you get back, or you will be tracking an
 order that no longer exists.
+
+`place_order/3` and `replace_order/4` return an `Order`, read back with `get_order/3` once the
+venue names the id. The venue answers a write with only a `Location` header. If the read back
+fails, the order is still placed: you get an `Order` holding the id and your request, with
+`status: :pending`. `cancel_order/3` returns `{:ok, :cancelled}`.
 
 Use it instead of cancel-then-place wherever you can. The two are **not equivalent**:
 cancel-then-place leaves a window with no order live, and spends two throttled writes

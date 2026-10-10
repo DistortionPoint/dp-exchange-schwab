@@ -1251,9 +1251,13 @@ defmodule DpExchange.Schwab.Rest do
   balances and says nothing about exposure. This always asks.
 
   Schwab reports **long and short quantities as separate fields** rather than one signed
-  number, and this reads whichever is non-zero: `longQuantity` is a `:long` and
-  `shortQuantity` a `:short`. A row with both zero is skipped — it is a closed position the
-  venue still lists, not an open one of size nothing.
+  number: `longQuantity` is a `:long` and `shortQuantity` a `:short`, and a row with both
+  positive is **two** positions, one per leg. A row with both zero is skipped — it is a
+  closed position the venue still lists, not an open one of size nothing.
+
+  **One account at a time.** `Position` has no account field, so with more than one account
+  the caller names which by `:account_number`; without it the call is
+  `{:error, {:account_number_required, n}}` rather than one unattributable list.
 
   `liquidation_price` is `nil`: Schwab publishes none per position. **That is not safety** —
   the account's maintenance requirement is in the balances beside it.
@@ -1262,10 +1266,29 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, [Position.t()]} | {:error, term()} | {:refused, term()}
   def get_positions(credentials, opts) do
     with {:ok, accounts} <-
-           get_account_summaries(credentials, Keyword.put(opts, :fields, "positions")) do
+           get_account_summaries(credentials, Keyword.put(opts, :fields, "positions")),
+         {:ok, accounts} <- one_account(accounts, Keyword.get(opts, :account_number)) do
       accounts |> Enum.flat_map(&account_positions/1) |> collect_positions()
     end
   end
+
+  # **One account's positions, never several merged.** Every account's rows were flattened
+  # into one list, so AAPL long in one account and short in another read as a hedge, or as
+  # double the exposure.
+  defp one_account(accounts, nil) when length(accounts) <= 1, do: {:ok, accounts}
+  defp one_account(accounts, nil), do: {:error, {:account_number_required, length(accounts)}}
+
+  defp one_account(accounts, number) do
+    case Enum.filter(accounts, &account_numbered?(&1, number)) do
+      [] -> {:refused, {:account_not_found, number}}
+      matching -> {:ok, matching}
+    end
+  end
+
+  defp account_numbered?(%{"securitiesAccount" => %{"accountNumber" => number}}, number),
+    do: true
+
+  defp account_numbered?(_account, _number), do: false
 
   # `nil` rows are DROPPED and error rows REFUSE the whole reply, and the difference is the
   # point. A `nil` comes from `position_side/2` finding neither a long nor a short leg — a
@@ -1288,7 +1311,7 @@ defmodule DpExchange.Schwab.Rest do
 
   defp account_positions(%{"securitiesAccount" => %{"positions" => positions}})
        when is_list(positions),
-       do: Enum.map(positions, &to_position/1)
+       do: Enum.flat_map(positions, &to_position/1)
 
   # An account with no `positions` key holds none: the field is optional in the venue's
   # `SecuritiesAccount` schema, and an account with nothing open has nothing to list.
@@ -1311,19 +1334,50 @@ defmodule DpExchange.Schwab.Rest do
   defp to_position(%{} = row) do
     case row["instrument"] do
       instrument when is_map(instrument) or is_nil(instrument) ->
-        to_position(row, instrument || %{})
+        to_positions(row, instrument || %{})
 
       _unreadable ->
-        {:error, :unexpected_response_shape}
+        [{:error, :unexpected_response_shape}]
     end
   end
 
-  defp to_position(_unreadable_row), do: {:error, :unexpected_response_shape}
+  defp to_position(_unreadable_row), do: [{:error, :unexpected_response_shape}]
 
-  defp to_position(row, instrument) do
+  # **A row holding both legs is two positions.** `Position` (AT:2123-2183) carries
+  # `longQuantity` and `shortQuantity` side by side, and `position_side/2` returned the long
+  # leg whenever it was positive, so an account 100 long and 40 short was reported 100 long,
+  # the short leg gone. `Core.Types.Position` has one side, so each leg is its own position.
+  # With both legs present `marketValue` and `averagePrice` cannot be split between them, and
+  # are `nil` rather than one leg's number wearing the other's name; each leg's cost comes
+  # from its own `averageLongPrice` / `averageShortPrice`.
+  defp to_positions(row, instrument) do
     long = decimal(row["longQuantity"])
     short = decimal(row["shortQuantity"])
 
+    case {positive?(long), positive?(short)} do
+      {true, true} ->
+        [
+          two_legged(to_position(row, instrument, :long, long), row, "averageLongPrice"),
+          two_legged(to_position(row, instrument, :short, short), row, "averageShortPrice")
+        ]
+
+      _one_or_none ->
+        [to_position(row, instrument, long, short)]
+    end
+  end
+
+  defp positive?(nil), do: false
+  defp positive?(value), do: Decimal.positive?(value)
+
+  defp two_legged(%Position{} = position, row, cost_field),
+    do: %{position | notional_value: nil, average_cost: decimal(row[cost_field])}
+
+  defp two_legged(other, _row, _cost_field), do: other
+
+  defp to_position(row, instrument, side, quantity) when side in [:long, :short],
+    do: build_position(row, instrument, side, quantity)
+
+  defp to_position(row, instrument, long, short) do
     case position_side(long, short) do
       nil ->
         nil
@@ -1382,7 +1436,9 @@ defmodule DpExchange.Schwab.Rest do
       instrument_type: position_instrument(instrument["assetType"]),
       average_cost: decimal(row["averagePrice"]),
       mark_price: nil,
-      notional_value: decimal(row["marketValue"]),
+      # Unsigned: `Position` carries direction in `:side`, with `:quantity` always positive.
+      # A short's `marketValue` signed would say "short" twice, once negatively.
+      notional_value: row["marketValue"] |> decimal() |> unsigned(),
       realised_pnl: nil,
       unrealised_pnl: decimal(pnl_for_side(row, side)),
       liquidation_price: nil,
@@ -1803,20 +1859,31 @@ defmodule DpExchange.Schwab.Rest do
   # inside `MarginBalance`) is chosen instead: it is the schema's own field for the
   # account's total equity — assets net of the margin loan — which is the closest honest
   # reading of "the account's balance" a margin account states, as against `buyingPower`
-  # (AT:2502), which is what `available_balance` below already reads. Recorded as a
+  # (AT:2502), which is leveraged and is not read here at all. Recorded as a
   # documented choice, not a measured one — this repository holds no Schwab credential.
   defp balance_total("MARGIN", current), do: fetch_balance(current, "equity")
   defp balance_total("CASH", current), do: fetch_balance(current, "totalCash")
   defp balance_total(_unknown, _current), do: {:error, :unexpected_response_shape}
 
+  # Present AND a number. Any non-nil value passed, so `"abc"` became a balance of `nil`
+  # downstream — an account with an unreadable total reported as holding nothing stated.
   defp fetch_balance(current, key) do
-    case Map.get(current, key) do
+    value = Map.get(current, key)
+
+    case decimal(value) do
       nil -> {:error, :unexpected_response_shape}
-      value -> {:ok, value}
+      _readable -> {:ok, value}
     end
   end
 
-  defp available("MARGIN", current), do: current["buyingPower"]
+  defp unsigned(nil), do: nil
+  defp unsigned(%Decimal{} = value), do: Decimal.abs(value)
+
+  # `availableFunds` (AT:2494), not `buyingPower` (AT:2502). Buying power is leveraged, so a
+  # $50k-equity account reported $200k available against a $50k balance, and the same field
+  # meant cash on a CASH account and borrowing on a MARGIN one. `Core.Types.Balance` reads
+  # `available_balance` as part of the total, never more than it.
+  defp available("MARGIN", current), do: current["availableFunds"]
   defp available("CASH", current), do: current["cashAvailableForTrading"]
   defp available(_unknown, _current), do: nil
 

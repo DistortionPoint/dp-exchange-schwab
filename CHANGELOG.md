@@ -31,6 +31,45 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `Feed` without `:subscriber` subscribed itself, and every message looped.** The default
+  was `self()` inside `init/1`. `Supervisor` passes no `:subscriber`, so the supervised tree
+  delivered each quote back to the Feed, which delivered it again. Notices were relayed twice.
+  There is now no default: subscribers arrive through `subscribe/3`'s `to:`.
+- **A position holding both a long and a short quantity lost the short leg.** Each leg is
+  now its own position. A row with both legs carries `nil` `notional_value`, and each leg's
+  cost comes from `averageLongPrice` or `averageShortPrice`.
+- **Positions from every account were merged with no account label.** With more than one
+  account, `get_positions/2` now needs `:account_number`, and is
+  `{:error, {:account_number_required, n}}` without it.
+- **`notional_value` carried the venue's sign.** It is now unsigned, because `:side` carries
+  the direction.
+- **A margin account's `available_balance` was `buyingPower`.** That is leveraged, so a $50k
+  account reported $200k available inside a $50k balance. It is now `availableFunds`.
+- **A balance that did not parse as a number was accepted** and became `nil` downstream. It
+  is now `{:error, :unexpected_response_shape}`.
+- **A book level with no size was kept as `{price, nil}`.** It is now dropped, as a level
+  with no price already was.
+- **A poll quote queued when the route upgraded to the stream counted as `:stream`.** Each
+  poller's deliveries are now tagged, and a stale one is dropped.
+- **`Socket.last_top` kept every symbol ever framed until a reconnect.** A `LEVELONE_*`
+  `SUBS` or `UNSUBS` now drops the book for the symbols it removes.
+- **`subscribe/3` and `update_symbols/2` accepted symbols the REST route refuses** and sent
+  them to the Streamer unchanged. They are now `{:error, {:invalid_symbols, symbols}}` before
+  anything changes.
+
+### Changed
+
+- **`place_order/3` and `replace_order/4` return an `Order`, not the bare id.** `Core.Venue`
+  types both as `Order.t()`, and a consumer matching `%Order{}` across venues broke on this one.
+  The order is read back with `get_order/3`, a read and not a throttled write. If the read back
+  fails, the order is still placed, so the answer is `{:ok, %Order{id: id, status: :pending}}`
+  built from the id and the request.
+- **`cancel_order/3` returns `{:ok, :cancelled}`**, the shape `Core.Venue` now declares for a
+  cancel whose answer carries no order. It returned a bare `:ok`, which matched none of the
+  `{:ok, _} | {:error, _} | {:refused, _}` shapes every other call returns.
+
 ## [0.2.92] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

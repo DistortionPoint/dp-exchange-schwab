@@ -1124,4 +1124,34 @@ defmodule DpExchange.Schwab.FeedTest do
         relay(parent)
     end
   end
+
+  describe "found 2026-10-10" do
+    test "a feed started without :subscriber does not subscribe itself" do
+      # `self()` in `init/1` is the Feed: a self-subscribed Feed re-delivered every message
+      # to its own mailbox, forever.
+      assert {:ok, state} = Feed.init([])
+      assert MapSet.size(state.subscribers) == 0
+      assert state.subscriber == nil
+    end
+
+    test "a symbol the REST route refuses is refused by subscribe and update_symbols too" do
+      feed = start_feed(socket: fake_socket())
+
+      assert Feed.subscribe(feed, ["AAPL", "BTC-USD"]) ==
+               {:error, {:invalid_symbols, ["BTC-USD"]}}
+
+      assert Feed.update_symbols(feed, ["BTC-USD"]) == {:error, {:invalid_symbols, ["BTC-USD"]}}
+      assert Feed.wanted(feed) == []
+    end
+
+    test "a poll quote from a poller no longer serving the route is dropped, not counted" do
+      feed = start_feed(socket: fake_socket())
+      assert Feed.subscribe(feed, ["AAPL"]) == :ok
+
+      send(feed, {:dp_exchange, :schwab, {:polled, make_ref(), quote_for("AAPL")}})
+
+      refute_receive {:dp_exchange, :schwab, %Types.Quote{}}, 200
+      assert Feed.coverage(feed) == %{}
+    end
+  end
 end

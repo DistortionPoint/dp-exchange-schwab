@@ -337,7 +337,8 @@ defmodule DpExchange.Schwab.Fake do
          # The real refusals, from the real module — a fake that accepted an order the
          # venue publishes as invalid would green-light code that cannot work.
          {:ok, _payload} <- Orders.build(request, opts) do
-      {:ok, "fake-order-1"}
+      # The read-back `Order`, as the real facade returns since 2026-10-10, not the bare id.
+      do_get_order(credentials, "fake-order-1", opts)
     end
   end
 
@@ -376,7 +377,7 @@ defmodule DpExchange.Schwab.Fake do
          {:ok, _payload} <- Orders.build(request, opts) do
       # A replacement is a NEW order on this venue, so the id differs from the one
       # replaced. A fake returning the old id would hide that from a consumer's test.
-      {:ok, "fake-order-2"}
+      do_get_order(credentials, "fake-order-2", opts)
     end
   end
 
@@ -388,7 +389,7 @@ defmodule DpExchange.Schwab.Fake do
   defp do_cancel_order(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials),
          {:ok, _hash} <- require_account(opts) do
-      :ok
+      {:ok, :cancelled}
     end
   end
 

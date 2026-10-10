@@ -286,10 +286,13 @@ defmodule DpExchange.SchwabTest do
       base = start_order_tree(order_limit_per_minute: 20)
       call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
 
-      assert {:ok, "7"} = Schwab.place_order(@creds, @order_request, call_opts)
-      assert {:ok, "7"} = Schwab.replace_order(@creds, "1", @order_request, call_opts)
+      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
+               Schwab.place_order(@creds, @order_request, call_opts)
 
-      assert :ok =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
+               Schwab.replace_order(@creds, "1", @order_request, call_opts)
+
+      assert {:ok, :cancelled} =
                Schwab.cancel_order(@creds, "1",
                  account_hash: "H",
                  order_limit: base[:order_limit],
@@ -306,7 +309,8 @@ defmodule DpExchange.SchwabTest do
       base = start_order_tree(order_limit_per_minute: 0)
       call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
 
-      assert {:ok, "7"} = Schwab.place_order(@creds, @order_request, call_opts)
+      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
+               Schwab.place_order(@creds, @order_request, call_opts)
     end
 
     test "preview_order/3 is never gated — it is not a throttled order write on this venue" do
@@ -328,7 +332,7 @@ defmodule DpExchange.SchwabTest do
       # Matches the existing "no account hash" refusal's own calling convention: a bare
       # facade call with no supervision tree behind it, which this package has always
       # allowed by letting a caller supply its own `:limiter`.
-      assert {:ok, "7"} =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, @order_request,
                  account_hash: "H",
                  plug: placed_ok_plug(),
@@ -728,7 +732,8 @@ defmodule DpExchange.SchwabTest do
     test "a valid order is accepted, and the account hash is still required" do
       request = %{symbol: "AAPL", side: :buy, quantity: 1}
 
-      assert {:ok, "fake-order-1"} = Fake.place_order(@creds, request, account_hash: "H")
+      assert {:ok, %DpExchange.Core.Types.Order{id: "fake-order-1"}} =
+               Fake.place_order(@creds, request, account_hash: "H")
 
       assert Fake.place_order(@creds, request, []) ==
                {:error, {:missing_account_hash, :schwab}}
@@ -738,7 +743,7 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, [%{hash: "FAKEHASH"}]} = Fake.get_accounts(@creds)
       assert {:ok, [balance]} = Fake.get_balances(@creds, account_hash: "H")
       assert balance.currency == "USD"
-      assert :ok = Fake.cancel_order(@creds, "1", account_hash: "H")
+      assert {:ok, :cancelled} = Fake.cancel_order(@creds, "1", account_hash: "H")
       # Was `{:ok, %{"orderId" => "1"}}` — the fake returning the raw venue map, which pinned
       # the same contract violation the real facade had. `Core.Venue.get_order/3` is typed
       # `result(Types.Order.t())`.

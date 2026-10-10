@@ -432,7 +432,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
   # ============================================================================
 
   describe "GET /accounts/{accountNumber} — account_margin_schema.json (schema-derived MarginAccount)" do
-    test "get_balances/2 reads MarginBalance.equity as balance, buyingPower as available" do
+    test "get_balances/2 reads MarginBalance.equity as balance, availableFunds (not buyingPower) as available" do
       body = fixture!("accounts_and_trading/account_margin_schema.json")
 
       assert {:ok, [%Balance{} = balance]} =
@@ -444,7 +444,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
 
       assert balance.currency == "USD"
       assert Decimal.equal?(balance.balance, Decimal.new(45_825))
-      assert Decimal.equal?(balance.available_balance, Decimal.new(30_000))
+      assert Decimal.equal?(balance.available_balance, Decimal.new(15_000))
       assert balance.provider == :schwab
 
       assert_received {:request, "GET", "/trader/v1/accounts/H", _query}
@@ -484,11 +484,16 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert_received {:request, "GET", "/trader/v1/accounts", _query}
     end
 
-    test "get_positions/1 flattens both accounts, drops the flat 0/0 position, keeps side and pnl" do
+    test "get_positions/1 reads one named account, drops the flat 0/0 position, keeps side and pnl" do
       body = fixture!("accounts_and_trading/account_summaries_schema.json")
 
       assert {:ok, positions} =
-               Schwab.get_positions(credentials: @creds, plug: capturing(body), retry_attempts: 0)
+               Schwab.get_positions(
+                 credentials: @creds,
+                 plug: capturing(body),
+                 retry_attempts: 0,
+                 account_number: "70123456"
+               )
 
       # The cash account's SPY row (longQuantity: 0, shortQuantity: 0) is a closed position
       # the venue still lists — Position has no way to say "flat", so it is dropped rather
@@ -511,6 +516,46 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
 
       assert_received {:request, "GET", "/trader/v1/accounts", query}
       assert query =~ "fields=positions"
+    end
+
+    test "get_positions/1 never merges accounts: it needs one named, and refuses an unknown one" do
+      body = fixture!("accounts_and_trading/account_summaries_schema.json")
+      opts = [credentials: @creds, plug: capturing(body), retry_attempts: 0]
+
+      assert {:error, {:account_number_required, 2}} = Schwab.get_positions(opts)
+      assert {:ok, []} = Schwab.get_positions(opts ++ [account_number: "70998877"])
+
+      assert {:refused, {:account_not_found, "1"}} =
+               Schwab.get_positions(opts ++ [account_number: "1"])
+    end
+
+    test "a row with both legs is two positions, and notional is unsigned" do
+      both = %{
+        "instrument" => %{"symbol" => "AAPL", "assetType" => "EQUITY"},
+        "longQuantity" => 100,
+        "shortQuantity" => 40,
+        "averageLongPrice" => 150,
+        "averageShortPrice" => 160,
+        "marketValue" => 9_000
+      }
+
+      short_only = %{
+        "instrument" => %{"symbol" => "BAC", "assetType" => "EQUITY"},
+        "longQuantity" => 0,
+        "shortQuantity" => 50,
+        "marketValue" => -1_500
+      }
+
+      body = [%{"securitiesAccount" => %{"positions" => [both, short_only]}}]
+
+      assert {:ok, [long, short, bac]} =
+               Schwab.get_positions(credentials: @creds, plug: capturing(body), retry_attempts: 0)
+
+      assert {long.side, short.side} == {:long, :short}
+      assert Decimal.equal?(long.quantity, 100) and Decimal.equal?(short.quantity, 40)
+      assert Decimal.equal?(long.average_cost, 150) and Decimal.equal?(short.average_cost, 160)
+      assert long.notional_value == nil and short.notional_value == nil
+      assert Decimal.equal?(bac.notional_value, 1_500)
     end
   end
 
@@ -605,7 +650,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       plug =
         capturing_body(201, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000001"}])
 
-      assert {:ok, "1000000001"} =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "1000000001"}} =
                Schwab.place_order(@creds, request,
                  account_hash: "H",
                  plug: plug,
@@ -637,7 +682,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       plug =
         capturing_body(200, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000002"}])
 
-      assert {:ok, "1000000002"} =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "1000000002"}} =
                Schwab.replace_order(@creds, "1000000001", request,
                  account_hash: "H",
                  plug: plug,
