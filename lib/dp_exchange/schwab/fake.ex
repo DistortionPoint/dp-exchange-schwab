@@ -178,8 +178,8 @@ defmodule DpExchange.Schwab.Fake do
   defp do_get_historical_prices(symbol, timeframe, range, opts) do
     with :ok <- require_credentials(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
-         :ok <- check_timeframe(timeframe),
-         :ok <- check_lookback(timeframe, range),
+         # The real module's own question, in its order: width, range shape, then reach.
+         :ok <- Rest.check_history(timeframe, range, @as_of),
          {:ok, price} <- fetch_price(native) do
       {:ok,
        for offset <- 4..0//-1 do
@@ -199,26 +199,6 @@ defmodule DpExchange.Schwab.Fake do
            provider: :schwab
          }
        end}
-    end
-  end
-
-  defp check_timeframe(timeframe) do
-    if timeframe in Rest.timeframes(),
-      do: :ok,
-      else: {:error, {:unsupported_timeframe, timeframe}}
-  end
-
-  # The refusal that matters, reproduced: minute widths cap at ten days.
-  defp check_lookback(timeframe, range) do
-    with {:ok, max_days} <- Rest.max_lookback_days(timeframe),
-         %DateTime{} = start <- Keyword.get(range, :start) do
-      days = @as_of |> DateTime.diff(start, :second) |> div(86_400)
-
-      if days > max_days,
-        do: {:error, {:lookback_exceeds_venue, timeframe, days, max_days}},
-        else: :ok
-    else
-      _no_range_or_width -> :ok
     end
   end
 
@@ -304,14 +284,16 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_balances(credentials, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts) do
+    with {:ok, _hash} <- require_account(opts),
+         :ok <- require_credentials(credentials: credentials) do
       {:ok,
        [
          %Balance{
            currency: "USD",
            balance: Decimal.new("50000.00"),
-           available_balance: Decimal.new("100000.00"),
+           # Part of the total, never more than it: the real decode reads `availableFunds`, not
+           # the leveraged `buyingPower`, for exactly that reason (`Rest.get_balances/3`).
+           available_balance: Decimal.new("40000.00"),
            hold: nil,
            timestamp: @as_of,
            provider: :schwab
@@ -332,11 +314,13 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_place_order(credentials, request, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts),
+    # The real order (`Schwab.place_order/3`): account hash, then the order's own shape, then
+    # the credential, which the real path only looks at when it signs the request.
+    with {:ok, _hash} <- require_account(opts),
          # The real refusals, from the real module — a fake that accepted an order the
          # venue publishes as invalid would green-light code that cannot work.
-         {:ok, _payload} <- Orders.build(request, opts) do
+         {:ok, _payload} <- Orders.build(request, opts),
+         :ok <- require_credentials(credentials: credentials) do
       # The read-back `Order`, as the real facade returns since 2026-10-10, not the bare id.
       do_get_order(credentials, "fake-order-1", opts)
     end
@@ -354,9 +338,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_preview_order(credentials, request, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts),
-         {:ok, _payload} <- Orders.build(request, opts) do
+    with {:ok, _hash} <- require_account(opts),
+         {:ok, _payload} <- Orders.build(request, opts),
+         :ok <- require_credentials(credentials: credentials) do
       {:ok,
        %{
          "orderStrategy" => %{"orderType" => "MARKET"},
@@ -372,9 +356,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_replace_order(credentials, request, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts),
-         {:ok, _payload} <- Orders.build(request, opts) do
+    with {:ok, _hash} <- require_account(opts),
+         {:ok, _payload} <- Orders.build(request, opts),
+         :ok <- require_credentials(credentials: credentials) do
       # A replacement is a NEW order on this venue, so the id differs from the one
       # replaced. A fake returning the old id would hide that from a consumer's test.
       do_get_order(credentials, "fake-order-2", opts)
@@ -387,8 +371,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_cancel_order(credentials, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts) do
+    with {:ok, _hash} <- require_account(opts),
+         :ok <- require_credentials(credentials: credentials) do
       {:ok, :cancelled}
     end
   end
@@ -399,8 +383,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_order(credentials, order_id, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts) do
+    with {:ok, _hash} <- require_account(opts),
+         :ok <- require_credentials(credentials: credentials) do
       # Decoded through the same `Orders.from_venue/1` the real facade uses, from a body in
       # the venue's own shape — so the fake cannot drift from the real decode. It returned the
       # raw map, the same contract violation the real facade had, which is why the suite
@@ -415,13 +399,13 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_orders(credentials, opts) do
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts),
+    with {:ok, _hash} <- require_account(opts),
          # The real venue refuses this call without both ends of a window
          # (`Rest.get_orders/3`'s own `fromEnteredTime`/`toEnteredTime` requirement) — a fake
          # that answered anyway would let a consumer's test suite go green calling this the
          # one way the real facade cannot be called.
-         :ok <- require_window(opts) do
+         :ok <- Rest.check_order_window(opts),
+         :ok <- require_credentials(credentials: credentials) do
       # One order, not `[]`: an empty list makes every check over its elements vacuous, which
       # is the "third axis" `dp_exchange_core`'s assertion-coverage document records.
       Orders.list_from_venue([fake_order_body("fake-order-1")])
@@ -592,18 +576,6 @@ defmodule DpExchange.Schwab.Fake do
     end
   end
 
-  # The same `:from`/`:to` requirement `Rest.get_orders/3`, `Rest.get_all_orders/2` and
-  # `Rest.get_transactions/3` all enforce locally, because the venue requires both ends of
-  # the window on every one of those endpoints and none of them will pick one on a
-  # caller's behalf.
-  defp require_window(opts) do
-    if is_nil(Keyword.get(opts, :from)) or is_nil(Keyword.get(opts, :to)) do
-      {:error, {:from_and_to_required, :schwab}}
-    else
-      :ok
-    end
-  end
-
   # --- Declared but not yet implemented -----------------------------------
   #
   # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
@@ -633,8 +605,11 @@ defmodule DpExchange.Schwab.Fake do
            instrument_type: :equity,
            average_cost: Decimal.new("180.25"),
            mark_price: nil,
-           notional_value: Decimal.new("-17500"),
-           realised_pnl: Decimal.new("25"),
+           # Unsigned and without a realised figure, as the real decode: `Position` carries
+           # direction in `:side`, and the venue states no realised P/L at all
+           # (`Rest.get_positions/2`).
+           notional_value: Decimal.new("17500"),
+           realised_pnl: nil,
            unrealised_pnl: Decimal.new("-125"),
            liquidation_price: nil,
            leverage: nil,
@@ -705,7 +680,8 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_option_chain(underlying, opts \\ []) do
-    with :ok <- require_credentials(opts) do
+    with :ok <- Rest.check_underlying(underlying),
+         :ok <- require_credentials(opts) do
       call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :call)
       put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :put)
       lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("220"), :call)
@@ -727,8 +703,10 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   @impl true
-  def get_option_expirations(_underlying, opts \\ []) do
-    with :ok <- require_credentials(opts), do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+  def get_option_expirations(underlying, opts \\ []) do
+    with :ok <- Rest.check_underlying(underlying),
+         :ok <- require_credentials(opts),
+         do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
   end
 
   defp fake_contract(underlying, expiry, strike, right) do
@@ -781,52 +759,37 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_screener(name, opts \\ []) do
-    with :ok <- require_credentials(opts) do
-      if name in Rest.movers_universes() do
-        {:ok,
-         [
-           %Types.ScreenerResult{
-             symbol: "AAPL",
-             screener: name,
-             # The venue's returned order, not a metric this fake ranked on.
-             rank: 1,
-             metrics: %{"netPercentChange" => 0.031, "volume" => 1_000_000},
-             venue_time: nil,
-             provider: :schwab
-           }
-         ]}
-      else
-        {:error, {:unknown_movers_universe, name}}
-      end
+    # The universe before the credential, as the real path: `Rest.get_movers/3` refuses a
+    # universe the venue has no list for before it signs anything.
+    with :ok <- Rest.check_movers_universe(name),
+         :ok <- require_credentials(opts) do
+      {:ok,
+       [
+         %Types.ScreenerResult{
+           symbol: "AAPL",
+           screener: name,
+           # The venue's returned order, not a metric this fake ranked on.
+           rank: 1,
+           metrics: %{"symbol" => "AAPL", "netPercentChange" => 0.031, "volume" => 1_000_000},
+           venue_time: nil,
+           provider: :schwab
+         }
+       ]}
     end
   end
 
   @impl true
   def get_transactions(credentials, opts \\ []) do
-    # Credentials first, then every one of the venue's three required parameters, in the
-    # same order the package checks them. `require_account/1` rather than a second
+    # The account hash, then the window and the type from `Rest.check_transactions/1` (the
+    # module that sends the request, so the two cannot drift), and the credential last, as the
+    # real path only looks at it when it signs. `require_account/1` rather than a second
     # spelling of the same check: this is the identical condition every other account
     # endpoint reports as `{:missing_account_hash, :schwab}`, and a consumer handling
     # "you forgot the account hash" uniformly cannot do it against two different atoms.
-    with :ok <- require_credentials(credentials: credentials),
-         {:ok, _hash} <- require_account(opts),
-         :ok <- require_window(opts) do
-      case Keyword.get(opts, :types) do
-        nil ->
-          {:error, {:types_required, :schwab}}
-
-        # The real venue's `types` is a scalar enum parameter, not a list — see
-        # `Rest.get_transactions/3`'s own @doc. A single-element list is accepted as the
-        # same convenience `Rest` accepts; more than one is refused the same way.
-        [_type] ->
-          {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
-
-        types when is_list(types) ->
-          {:error, {:multiple_transaction_types, :schwab, types}}
-
-        _one_type ->
-          {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
-      end
+    with {:ok, _hash} <- require_account(opts),
+         :ok <- Rest.check_transactions(opts),
+         :ok <- require_credentials(credentials: credentials) do
+      {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
     end
   end
 

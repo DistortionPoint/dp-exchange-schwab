@@ -457,7 +457,7 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
          :ok <- check_range(range),
-         {:ok, period} <- fetch_period(timeframe, period_type, range) do
+         {:ok, period} <- fetch_period(timeframe, period_type, range, DateTime.utc_now()) do
       params =
         %{
           "symbol" => native,
@@ -473,6 +473,24 @@ defmodule DpExchange.Schwab.Rest do
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
         candles(body, native, timeframe)
       end
+    end
+  end
+
+  @doc """
+  The refusals `get_historical_prices/5` makes before any request, and nothing else: an
+  unsupported width, a range with an end and no start or a start after its end, and a
+  lookback the width cannot reach.
+
+  Public so `DpExchange.Schwab.Fake` asks the same question in the same order rather than
+  keeping a second copy of the rules. `now` is the instant a start-only range is measured
+  back from; the real call passes the clock, the fake passes its fixed instant.
+  """
+  @spec check_history(String.t(), keyword(), DateTime.t()) :: :ok | {:error, term()}
+  def check_history(timeframe, range, now \\ DateTime.utc_now()) do
+    with {:ok, {period_type, _frequency_type, _frequency}} <- fetch_candle(timeframe),
+         :ok <- check_range(range),
+         {:ok, _period} <- fetch_period(timeframe, period_type, range, now) do
+      :ok
     end
   end
 
@@ -544,9 +562,9 @@ defmodule DpExchange.Schwab.Rest do
 
   # The caller's requested range decides `period`, and a range the width cannot reach is
   # refused by name rather than clamped.
-  defp fetch_period(timeframe, period_type, range) do
+  defp fetch_period(timeframe, period_type, range, now) do
     legal = Map.fetch!(@periods, period_type)
-    requested_days = requested_days(range)
+    requested_days = requested_days(range, now)
 
     case requested_days do
       nil ->
@@ -563,13 +581,13 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp requested_days(range) do
+  defp requested_days(range, now) do
     case {Keyword.get(range, :start), Keyword.get(range, :end)} do
       {%DateTime{} = start, %DateTime{} = finish} ->
         finish |> DateTime.diff(start, :second) |> div(86_400) |> max(1)
 
       {%DateTime{} = start, nil} ->
-        DateTime.utc_now() |> DateTime.diff(start, :second) |> div(86_400) |> max(1)
+        now |> DateTime.diff(start, :second) |> div(86_400) |> max(1)
 
       _no_range ->
         nil
@@ -819,14 +837,14 @@ defmodule DpExchange.Schwab.Rest do
     encoded = URI.encode(native, &URI.char_unreserved?/1)
     query = query_string(%{"fields" => Keyword.get(opts, :fields)})
 
+    # `object/1`, so the `{:ok, map()}` in this spec is true: a list body was returned as sent.
     with {:ok, body} <-
            get(
              market_data_url(opts) <> "/#{encoded}/quotes" <> query,
              credentials,
              opts
-           ) do
-      {:ok, body}
-    end
+           ),
+         do: object(body)
   end
 
   @doc """
@@ -867,7 +885,7 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   @chain_params [
-    contractType: "contractType",
+    contract_type: "contractType",
     strike_count: "strikeCount",
     include_underlying_quote: "includeUnderlyingQuote",
     strategy: "strategy",
@@ -885,7 +903,15 @@ defmodule DpExchange.Schwab.Rest do
     entitlement: "entitlement"
   ]
 
+  # **`contract_type:` is the option's name, like every other snake_case key here.** The table
+  # listed it as `:contractType` alone, so `contract_type: "CALL"` was dropped without a word
+  # and the caller got the full chain, calls and puts, where it asked for one side: a plausible
+  # answer to a different question. The camelCase atom stays accepted for callers already
+  # passing it.
   defp put_chain_params(params, opts) do
+    contract_type = Config.opt(opts, :contract_type, opts[:contractType])
+    opts = Keyword.put(opts, :contract_type, contract_type)
+
     Enum.reduce(@chain_params, params, fn {key, name}, acc ->
       Map.put(acc, name, chain_value(Keyword.get(opts, key)))
     end)
@@ -939,8 +965,8 @@ defmodule DpExchange.Schwab.Rest do
 
   @spec get_movers(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_movers(universe, credentials, opts) when is_binary(universe) do
-    if universe in @movers_universes do
+  def get_movers(universe, credentials, opts) do
+    with :ok <- check_movers_universe(universe) do
       query =
         query_string(%{
           "sort" => Keyword.get(opts, :sort),
@@ -952,9 +978,22 @@ defmodule DpExchange.Schwab.Rest do
       # `object/1`, so the `{:ok, map()}` in this spec is true. It returned the body as sent,
       # and a list body reached `get_screener/3`, which reads it as an object.
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
-    else
-      {:error, {:unknown_movers_universe, universe}}
     end
+  end
+
+  @doc """
+  Whether `universe` is one the venue publishes a mover list for.
+
+  The refusal `get_movers/3` and `get_screener/3` make **before** the credential is looked
+  at, so `DpExchange.Schwab.Fake` can ask the same question first. Any term that is not a
+  listed string is `{:error, {:unknown_movers_universe, universe}}`: an atom such as
+  `:nasdaq` used to raise `FunctionClauseError` in the caller's process.
+  """
+  @spec check_movers_universe(term()) :: :ok | {:error, term()}
+  def check_movers_universe(universe) do
+    if universe in @movers_universes,
+      do: :ok,
+      else: {:error, {:unknown_movers_universe, universe}}
   end
 
   @doc "The mover universes this venue publishes, as its own strings."
@@ -976,7 +1015,7 @@ defmodule DpExchange.Schwab.Rest do
 
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_market(market, credentials, opts) when is_binary(market) do
+  def get_market(market, credentials, opts) do
     if market in @markets do
       query = query_string(%{"date" => chain_value(Keyword.get(opts, :date))})
       path = "/markets/" <> market <> query
@@ -1029,9 +1068,13 @@ defmodule DpExchange.Schwab.Rest do
   rather than dropped, for the same reason a hole in a chain that looks complete is worse
   than an error.
   """
-  @spec get_option_chain(String.t(), map(), keyword()) ::
+  @spec get_option_chain(String.t() | term(), map(), keyword()) ::
           {:ok, OptionChain.t()} | {:error, term()} | {:refused, term()}
-  def get_option_chain(underlying, credentials, opts) when is_binary(underlying) do
+  def get_option_chain(underlying, _credentials, _opts)
+      when not is_binary(underlying) or underlying == "",
+      do: check_underlying(underlying)
+
+  def get_option_chain(underlying, credentials, opts) do
     with {:ok, body} <- get_chains(credentials, Keyword.put(opts, :symbol, underlying)) do
       with {:ok, calls} <- chain_side(body["callExpDateMap"], underlying, :call),
            {:ok, puts} <- chain_side(body["putExpDateMap"], underlying, :put) do
@@ -1181,9 +1224,10 @@ defmodule DpExchange.Schwab.Rest do
   refused — an expiration chain has no strikes hanging off each date, so a missing entry is a
   missing date and not a hole in a grid.
   """
-  @spec get_option_expirations(String.t(), map(), keyword()) ::
+  @spec get_option_expirations(String.t() | term(), map(), keyword()) ::
           {:ok, [Date.t()]} | {:error, term()} | {:refused, term()}
-  def get_option_expirations(underlying, credentials, opts) when is_binary(underlying) do
+  def get_option_expirations(underlying, credentials, opts)
+      when is_binary(underlying) and underlying != "" do
     with {:ok, body} <- get_expiration_chain(underlying, credentials, opts),
          {:ok, rows} <- list_field(body, "expirationList") do
       dates =
@@ -1196,6 +1240,21 @@ defmodule DpExchange.Schwab.Rest do
       {:ok, dates}
     end
   end
+
+  def get_option_expirations(underlying, _credentials, _opts), do: check_underlying(underlying)
+
+  @doc """
+  Whether `underlying` is a symbol the option endpoints can be asked about: a non-empty
+  string. Anything else — `:aapl`, `nil` — is `{:error, {:invalid_underlying, value}}`.
+
+  `get_option_chain/3` and `get_option_expirations/3` raised `FunctionClauseError` in the
+  caller's process on a non-string, where `get_movers/3` and `get_market/3` already answered
+  an error. `DpExchange.Schwab.Fake` runs the same check, before its credential check, so it
+  refuses in the real path's order.
+  """
+  @spec check_underlying(term()) :: :ok | {:error, {:invalid_underlying, term()}}
+  def check_underlying(underlying) when is_binary(underlying) and underlying != "", do: :ok
+  def check_underlying(underlying), do: {:error, {:invalid_underlying, underlying}}
 
   # **The vendor's own document contradicts itself on this field's name.** The
   # `Expiration` schema — what `ExpirationChain.expirationList` (`expirationchain`'s
@@ -1715,12 +1774,39 @@ defmodule DpExchange.Schwab.Rest do
     both_ends(Keyword.get(opts, :from), Keyword.get(opts, :to))
   end
 
+  @doc """
+  The refusals `get_transactions/3` makes before any request, in its order: the window, then
+  the type. Public so `DpExchange.Schwab.Fake` refuses the same things in the same order.
+  """
+  @spec check_transactions(keyword()) :: :ok | {:error, term()}
+  def check_transactions(opts) do
+    with {:ok, _from, _to} <- transaction_window(opts),
+         {:ok, _types} <- transaction_type_param(opts) do
+      :ok
+    end
+  end
+
+  @doc """
+  The refusal `get_orders/3` and `get_all_orders/2` make for a missing window end, before any
+  request. Public so `DpExchange.Schwab.Fake` refuses it in the same place.
+  """
+  @spec check_order_window(keyword()) :: :ok | {:error, term()}
+  def check_order_window(opts) do
+    with {:ok, _from, _to} <- order_window(opts), do: :ok
+  end
+
+  # **Every shape is answered, none raises.** A type that was not a string (`types: :TRADE`)
+  # matched no clause and raised `CaseClauseError` in the caller's process, and a single
+  # non-string in a list was reported as "multiple types". `[]` names no type at all.
   defp transaction_type_param(opts) do
     case Keyword.get(opts, :types) do
       nil ->
         {:error, {:types_required, :schwab}}
 
-      [type] when is_binary(type) ->
+      [] ->
+        {:error, {:types_required, :schwab}}
+
+      [type] ->
         validate_transaction_type(type)
 
       # More than one is refused rather than joined — see the @doc on why a list has
@@ -1729,7 +1815,7 @@ defmodule DpExchange.Schwab.Rest do
       types when is_list(types) ->
         {:error, {:multiple_transaction_types, :schwab, types}}
 
-      type when is_binary(type) ->
+      type ->
         validate_transaction_type(type)
     end
   end

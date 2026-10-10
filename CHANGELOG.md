@@ -31,6 +31,45 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_option_chain/3` and `get_option_expirations/3` raised on a non-string
+  underlying.** `:aapl` or `nil` hit a guarded clause and raised `FunctionClauseError` in the
+  caller's process; an empty string reached the venue. Each now answers
+  `{:error, {:invalid_underlying, value}}` through the new `Rest.check_underlying/1`, and
+  `Fake` runs the same check before its credential check.
+
+- **`Fake` refused in a different order from the real facade, and skipped refusals the real
+  path makes.** The real account endpoints check the account hash, then the call's own
+  parameters (order shape, time window, transaction type), and look at the credential last,
+  when the request is signed. The fake checked the credential first, so a call missing both
+  got `:missing_credentials` from the fake and `:missing_account_hash` in production. The
+  fake also skipped `Rest.get_historical_prices/5`'s range checks (an end with no start, a
+  start after its end), sized a bounded window by how long ago it began instead of by its
+  span, accepted any transaction type, and checked the movers universe after the credential.
+  It now calls `Rest.check_history/3`, `check_transactions/1`, `check_order_window/1` and
+  `check_movers_universe/1` — the functions the real path uses — in the real order.
+- **`Fake` answered values the real decode cannot produce.** `get_balances/2` reported an
+  available balance of twice the total, though the real decode reads `availableFunds` so that
+  it never exceeds it; `get_positions/1` returned a negative `notional_value` for a short and
+  a `realised_pnl`, where the real decode is unsigned and the venue states no realised figure.
+- **`get_chains/2` dropped `contract_type:` without a word.** The option table listed the key
+  as `:contractType` only, so `contract_type: "CALL"` returned the full chain, calls and
+  puts, where one side was asked for. Both spellings are sent now.
+- **`Rest.get_transactions/3` raised on a non-string `:types`.** `types: :TRADE` matched no
+  clause and raised `CaseClauseError` in the caller's process, and `types: [:TRADE]` was
+  reported as "multiple types". Both are `{:unknown_transaction_types, [type]}` now, and
+  `types: []` is `{:types_required, :schwab}`.
+- **`Rest.get_movers/3` and `Rest.get_market/3` raised `FunctionClauseError` on a
+  non-string name** (`:nasdaq`, `:equity`); they answer `{:unknown_movers_universe, _}` and
+  `{:unknown_market, _}` like any other value outside the enum.
+- **`Rest.get_symbol_quote/3` returned a non-object body as `{:ok, body}`**, against its own
+  `{:ok, map()}` spec; it answers `{:error, :unexpected_response_shape}` like the other
+  market-data reads.
+- **`get_transaction/4` and `get_user_preference/2` specs on the facade promised `map()`**
+  where the venue documents an array and the body is returned as sent; they now say
+  `map() | [map()]`.
+
 ## [0.2.97] - 2026-10-10
 
 ### Fixed

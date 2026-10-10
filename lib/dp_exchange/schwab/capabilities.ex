@@ -254,8 +254,10 @@ defmodule DpExchange.Schwab.Capabilities do
   year of one-minute data cannot be served and must be told so — handing back a coarser
   series instead is the substitution this family exists to refuse.
   """
+  # One list, owned by the module that builds the request: the declaration used to carry its
+  # own copy, two places that could drift apart about what `/pricehistory` serves.
   @spec timeframes() :: [String.t()]
-  def timeframes, do: ~w(1m 5m 10m 15m 30m 1d 1w 1M)
+  def timeframes, do: DpExchange.Schwab.Rest.timeframes()
 
   @doc """
   The declaration.

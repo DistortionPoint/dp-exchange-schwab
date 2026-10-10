@@ -840,9 +840,13 @@ defmodule DpExchange.Schwab do
     end
   end
 
-  @doc "One transaction by id. See `DpExchange.Schwab.Rest.get_transaction/4`."
+  @doc """
+  One transaction by id. See `DpExchange.Schwab.Rest.get_transaction/4`.
+
+  The venue documents an array here, so the body comes back as sent: an object or a list.
+  """
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
-          {:ok, map()} | {:error, term()} | {:refused, term()}
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts \\ []),
     do: Rest.get_transaction(credentials, account_hash, transaction_id, with_limiter(opts))
 
@@ -890,10 +894,11 @@ defmodule DpExchange.Schwab do
   @doc """
   The signed-in user's preferences — the same endpoint the streamer bootstraps from.
 
-  See `DpExchange.Schwab.Rest.get_user_preference/2`.
+  See `DpExchange.Schwab.Rest.get_user_preference/2`. The venue documents an array of
+  preferences, so the body comes back as sent: an object or a list.
   """
   @spec get_user_preference(map(), keyword()) ::
-          {:ok, map()} | {:error, term()} | {:refused, term()}
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_user_preference(credentials, opts \\ []),
     do: Rest.get_user_preference(credentials, with_limiter(opts))
 

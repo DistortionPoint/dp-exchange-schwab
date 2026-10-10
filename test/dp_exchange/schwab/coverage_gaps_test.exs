@@ -868,12 +868,19 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                {:error, {:missing_credentials, :schwab}}
 
       assert Fake.get_screener("$DJI") == {:error, {:missing_credentials, :schwab}}
-      assert Fake.get_transactions(%{}) == {:error, {:missing_credentials, :schwab}}
+
+      assert Fake.get_transactions(%{},
+               account_hash: "h",
+               from: ~U[2026-08-01 00:00:00Z],
+               to: ~U[2026-09-01 00:00:00Z],
+               types: "TRADE"
+             ) == {:error, {:missing_credentials, :schwab}}
     end
 
     test "the fake refuses the same three missing parameters, in the same order" do
-      # Credentials first, then the account hash, then the venue's own three — matching
-      # the order `Rest` checks them in.
+      # The account hash, then the venue's own three, then the credential — matching the
+      # order the facade and `Rest` check them in (the credential is looked at when the
+      # request is signed, which is last).
       assert {:error, {:missing_account_hash, :schwab}} = Fake.get_transactions(@creds)
 
       assert {:error, {:from_and_to_required, :schwab}} =
