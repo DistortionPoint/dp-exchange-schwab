@@ -456,6 +456,7 @@ defmodule DpExchange.Schwab.Rest do
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
     with {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
+         :ok <- check_range(range),
          {:ok, period} <- fetch_period(timeframe, period_type, range) do
       params =
         %{
@@ -491,6 +492,32 @@ defmodule DpExchange.Schwab.Rest do
   # documented default applies — "the endDate will default to the market close of previous
   # business day" (MD:2090) — which is the honest reading of "from start until now" a
   # caller who named no end is asking for.
+  #
+  # **A range with only `:end` was ignored.** Found 2026-10-10 by reading the path:
+  # `put_range_or_period/3` keys on `:start` alone, so `range: [end: ~U[2026-06-05 ...]]`
+  # fell through to `period` and answered the most recent window ending TODAY — the right
+  # kind of data, the wrong dates, with no sign anything was dropped. An end without a start
+  # names no window (the venue's `period` is relative to now, not to `endDate`), so it is
+  # refused by name; so is a start after its end, which would otherwise size `period` from a
+  # negative span and clamp it to one day.
+  defp check_range(range) do
+    case {Keyword.get(range, :start), Keyword.get(range, :end)} do
+      {nil, nil} ->
+        :ok
+
+      {nil, _finish} ->
+        {:error, {:range_start_required, :schwab}}
+
+      {%DateTime{} = start, %DateTime{} = finish} ->
+        if DateTime.compare(start, finish) == :gt,
+          do: {:error, {:range_start_after_end, :schwab}},
+          else: :ok
+
+      _start_only ->
+        :ok
+    end
+  end
+
   defp put_range_or_period(params, period, range) do
     case Keyword.get(range, :start) do
       %DateTime{} = start ->
@@ -555,6 +582,22 @@ defmodule DpExchange.Schwab.Rest do
     |> Enum.find(Enum.max(legal), fn period -> days_for(period, period_type) >= days end)
   end
 
+  # `empty: true` with no rows is matched FIRST. Found 2026-10-10 by reading the spec: the
+  # CandleList schema carries `candles`, `empty` and `symbol` as siblings, so the venue's
+  # own empty answer is `{"empty": true, "candles": []}`. With the rows clause first that
+  # shape returned `{:ok, []}` and the documented `{:refused, :not_listed}` never fired.
+  #
+  # **Ambiguity, unmeasured:** the document does not say whether `empty: true` can also
+  # mean "listed, but no bars in this window". This keeps the documented meaning — the
+  # venue's flag is a refusal — and a body with `empty: true` AND rows is read as rows, since
+  # data the venue actually sent outranks its flag.
+  defp candles(%{"empty" => true, "candles" => []}, _native, _timeframe),
+    do: {:refused, :not_listed}
+
+  defp candles(%{"empty" => true} = body, _native, _timeframe)
+       when not is_map_key(body, "candles"),
+       do: {:refused, :not_listed}
+
   defp candles(%{"candles" => rows}, native, timeframe) when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(native)
 
@@ -577,8 +620,7 @@ defmodule DpExchange.Schwab.Rest do
 
   # An empty series for a symbol the venue does not list. `empty: true` is Schwab's own
   # flag and is carried as a refusal, not as zero candles — a caller must be able to tell
-  # "no data" from "no such symbol".
-  defp candles(%{"empty" => true}, _native, _timeframe), do: {:refused, :not_listed}
+  # "no data" from "no such symbol". See the first clauses.
   defp candles(_other, _native, _timeframe), do: {:error, :unexpected_response_shape}
 
   # A bar is a `Core.Types.Candle`, not a `Quote`.
@@ -655,10 +697,19 @@ defmodule DpExchange.Schwab.Rest do
   defp read_is_open(body, market) when is_map(body) do
     case Map.get(body, market) do
       products when is_map(products) and map_size(products) > 0 ->
-        open? =
-          Enum.any?(products, fn {_code, product} -> is_map(product) and product["isOpen"] end)
+        # Found 2026-10-10 by reading the path: `Enum.any?` over `product["isOpen"]` read an
+        # ABSENT flag as `:closed` and the string "false" as truthy (`:open`). Only a real
+        # boolean is evidence; if no product carries one the venue said nothing.
+        flags =
+          for {_code, product} <- products,
+              is_map(product),
+              is_boolean(product["isOpen"]),
+              do: product["isOpen"]
 
-        {:ok, if(open?, do: :open, else: :closed)}
+        case flags do
+          [] -> {:error, :unexpected_response_shape}
+          _flags -> {:ok, if(Enum.any?(flags), do: :open, else: :closed)}
+        end
 
       _absent ->
         {:error, :unexpected_response_shape}
@@ -1512,7 +1563,7 @@ defmodule DpExchange.Schwab.Rest do
     query = query_string(%{"fields" => Keyword.get(opts, :fields)})
 
     with {:ok, body} <- get(trader_url(opts) <> "/accounts" <> query, credentials, opts) do
-      {:ok, List.wrap(body)}
+      list_body(body)
     end
   end
 
@@ -1543,7 +1594,7 @@ defmodule DpExchange.Schwab.Rest do
         })
 
       with {:ok, body} <- get(trader_url(opts) <> "/orders" <> query, credentials, opts) do
-        {:ok, List.wrap(body)}
+        list_body(body)
       end
     end
   end
@@ -1551,6 +1602,13 @@ defmodule DpExchange.Schwab.Rest do
   defp order_window(opts) do
     both_ends(Keyword.get(opts, :from), Keyword.get(opts, :to))
   end
+
+  # A list endpoint answers a list. Found 2026-10-10 by reading the path: `List.wrap/1` on
+  # a map body turned one error-shaped or summary-shaped object into a one-row list, a
+  # phantom account, order or transaction. `get_orders/3` already refused this; the other
+  # three list reads now do too.
+  defp list_body(body) when is_list(body), do: {:ok, body}
+  defp list_body(_other), do: {:error, :unexpected_response_shape}
 
   # Both ends or neither. A window with one end is a window this package would have to
   # complete, and either end it chose returns a real answer over a period the caller did not
@@ -1648,7 +1706,7 @@ defmodule DpExchange.Schwab.Rest do
       path = "/accounts/" <> URI.encode(account_hash) <> "/transactions" <> query
 
       with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
-        {:ok, List.wrap(body)}
+        list_body(body)
       end
     end
   end

@@ -133,7 +133,7 @@ registration.
 :order_limit_not_declared}` for a tree started without this option — never a silent
 120/minute, and never a bare `{:rate_limited, _}` that could be mistaken for the venue
 itself throttling you. Pass `0` explicitly if the application places no orders at all;
-that reaches the real limiter and is throttled for real, which is a different, honest
+that answers `{:error, :order_limit_zero}` locally, before any limiter call, which is a different, honest
 thing from never having been asked.
 
 ## Testing against it

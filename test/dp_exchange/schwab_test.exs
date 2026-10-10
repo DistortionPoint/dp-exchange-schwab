@@ -301,16 +301,16 @@ defmodule DpExchange.SchwabTest do
                )
     end
 
-    test "an EXPLICIT zero also reaches the venue path — it is a stated ceiling, not silence" do
-      # Distinct from the undeclared case on purpose: `0` said on purpose is this
-      # consumer's own answer, and `PermissiveLimiter` here stands in for the real
-      # limiter that would then throttle it for real — `Supervisor.limits/1`'s own tests
-      # cover that arithmetic. This test only proves the GATE does not confuse the two.
+    test "an EXPLICIT zero is refused locally as :order_limit_zero, distinct from silence" do
+      # Found 2026-10-10 by reading the path: `Supervisor.limits/1` floors the GCRA rate at 1
+      # so the limiter does not divide by zero, which silently granted a registration with
+      # no order throughput one write a minute. A stated `0` is its own answer, and a
+      # different one from `:order_limit_not_declared`.
       base = start_order_tree(order_limit_per_minute: 0)
       call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
 
-      assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
-               Schwab.place_order(@creds, @order_request, call_opts)
+      assert {:error, :order_limit_zero} = Schwab.place_order(@creds, @order_request, call_opts)
+      assert {:error, :order_limit_zero} = Schwab.cancel_order(@creds, "1", call_opts)
     end
 
     test "preview_order/3 is never gated — it is not a throttled order write on this venue" do

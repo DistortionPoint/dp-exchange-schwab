@@ -60,8 +60,9 @@ defmodule DpExchange.Schwab.Supervisor do
   tree's life, and `place_order/3`, `replace_order/4` and `cancel_order/3` consult it
   **before** any rate-limit call is made: a tree that was never told an order ceiling
   answers `{:error, :order_limit_not_declared}`, distinguishable on its face from
-  `{:rate_limited, _}`, and a tree told `0` reaches the limiter exactly as before and is
-  throttled for real, because that is what `0` means. A consumer who bypasses this
+  `{:rate_limited, _}`, and a tree told `0` answers `{:error, :order_limit_zero}` locally (the
+  limiter floors its rate at 1, which would otherwise grant one write a minute) and is
+  refused for real, because that is what `0` means. A consumer who bypasses this
   `Supervisor` entirely — calling `Rest.place_order/4` with a `:limiter` of its own, which
   this package has always allowed — gets no opinion from `OrderLimit` at all, not a
   refusal: see that module's moduledoc for why "I was never asked" and "I was told no" are

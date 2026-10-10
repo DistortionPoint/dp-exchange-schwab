@@ -222,7 +222,11 @@ defmodule DpExchange.Schwab.Orders do
   end
 
   defp fetch_duration(request) do
-    tif = Map.get(request, :time_in_force, :day)
+    # Found 2026-10-10 by reading the path: `Map.get/3` substitutes its default only for an
+    # ABSENT key, so `time_in_force: nil` (a forwarded unset option) was refused as an
+    # unsupported duration. nil is absent here, as on Robinhood; any other value is still
+    # checked, never defaulted.
+    tif = Map.get(request, :time_in_force) || :day
 
     case Map.fetch(@durations, tif) do
       {:ok, native} -> {:ok, native}

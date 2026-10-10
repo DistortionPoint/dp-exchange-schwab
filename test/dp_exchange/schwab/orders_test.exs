@@ -209,6 +209,11 @@ defmodule DpExchange.Schwab.OrdersTest do
                {:error, {:unsupported_time_in_force, :gtd}}
     end
 
+    test "a nil :time_in_force is absent and defaults to :day, as on Robinhood" do
+      assert {:ok, payload} = Orders.build(Map.put(@buy, :time_in_force, nil))
+      assert payload["duration"] == "DAY"
+    end
+
     test "the four durations the venue does serve all map" do
       for {tif, native} <- [
             day: "DAY",

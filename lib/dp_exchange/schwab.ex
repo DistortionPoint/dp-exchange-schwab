@@ -241,8 +241,8 @@ defmodule DpExchange.Schwab do
 
   `{:error, :order_limit_not_declared}` when this tree was supervised without
   `:order_limit_per_minute` — see `Supervisor`'s moduledoc and `OrderLimit`. That is
-  distinct from a real ceiling of `0`, which reaches the limiter and is throttled for
-  real, and distinct from a consumer that never supervises this module at all, which gets
+  distinct from a declared ceiling of `0`, which answers `{:error, :order_limit_zero}`
+  locally (a registration granting no throughput), and distinct from a consumer that never supervises this module at all, which gets
   no opinion from this check. Checked before `Orders.build/2`, so an undeclared ceiling is
   never masked by, or confused with, a separate refusal about the order's own shape.
   """
@@ -708,8 +708,12 @@ defmodule DpExchange.Schwab do
   defp ensure_order_limit_declared(opts) do
     case OrderLimit.status(Supervisor.order_limit_name(opts)) do
       {:error, :not_started} -> :ok
-      %{declared?: true} -> :ok
       %{declared?: false} -> {:error, :order_limit_not_declared}
+      # Found 2026-10-10 by reading the path: a declared `0` reached the limiter through
+      # `max(orders, 1)` and was permitted one write a minute, though the registration
+      # granted none. Refused here, before any limiter call, rather than quietly metered.
+      %{declared?: true, limit: 0} -> {:error, :order_limit_zero}
+      %{declared?: true} -> :ok
     end
   end
 

@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`dp_exchange_core` 0.3.61.** The fallback poll's `[:dp_exchange, :link, …]` telemetry now
+  names `provider: :schwab`, the same atom as its notices, instead of the label string
+  `"schwab-fallback-poll"`. A telemetry handler matching the string must match the atom.
+
+### Fixed
+
+- **`get_historical_prices/5` empty series.** The venue's `{"empty": true, "candles": []}`
+  (CandleList carries both as siblings) returned `{:ok, []}` because the rows clause matched
+  first; `{:refused, :not_listed}` now fires. Whether `empty: true` can also mean "listed,
+  no bars in window" is unmeasured and documented as ambiguous.
+- **`get_historical_prices/5` ranges.** A range with only `:end` was ignored (most recent
+  window ending now). It is now `{:error, {:range_start_required, :schwab}}`, and a start
+  after its end is `{:error, {:range_start_after_end, :schwab}}`.
+- **`market_status/2`** read an absent `isOpen` as `:closed` and the string `"false"` as
+  open. Only a boolean counts; none present is `{:error, :unexpected_response_shape}`.
+- **`get_account_summaries/2`, `get_all_orders/2`, `get_transactions/3`** wrapped a map body
+  into a one-row list. They now refuse it as `:unexpected_response_shape`.
+- **Declared order ceiling of `0`** was floored to 1/min by the limiter arithmetic and
+  permitted a write per minute. `place_order/3`, `replace_order/4` and `cancel_order/3` now
+  answer `{:error, :order_limit_zero}` locally.
+- **`time_in_force: nil`** is treated as absent (default `:day`) instead of refused.
+
 ## [0.2.95] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

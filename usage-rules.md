@@ -274,6 +274,12 @@ truncated and not downgraded to a coarser width — handle the error; do not ass
 
 An unsupported width returns `{:error, {:unsupported_timeframe, width}}`.
 
+A range needs a `:start`. `[end: t]` alone returns `{:error, {:range_start_required, :schwab}}`
+and a start after its end returns `{:error, {:range_start_after_end, :schwab}}` — the venue's
+`period` is relative to now, so an end alone would silently give the wrong dates. The
+venue's `empty: true` answer is `{:refused, :not_listed}`; the document does not say whether it
+can also mean "listed, no bars in the window", so treat it as "no such series".
+
 ## 6. Account calls need a hash, not an account number
 
 `get_accounts/2` returns `%{account_number: …, hash: …}`. **Every other account path takes
@@ -534,7 +540,9 @@ DpExchange.Schwab.place_order(creds, request)
 `place_order/3`, `replace_order/4` and `cancel_order/3` now check **before** touching the
 limiter at all, and answer `{:error, :order_limit_not_declared}` distinctly — never
 `{:rate_limited, _}` — when the tree behind them was started without
-`:order_limit_per_minute`. **State your own ceiling if you place orders at all**, matching
+`:order_limit_per_minute`, and `{:error, :order_limit_zero}` when it was declared as `0` (a
+registration granting no order throughput; the limiter's arithmetic floor of 1 must not
+grant one write a minute). **State your own ceiling if you place orders at all**, matching
 what your application was registered with, or `0` if it places none. A consumer that only
 ever reads quotes is unaffected either way, and a consumer using its own `:limiter`
 outside `DpExchange.Schwab.Supervisor` entirely gets no opinion from this check — it only

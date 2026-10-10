@@ -457,10 +457,45 @@ defmodule DpExchange.Schwab.RestTest do
     end
 
     test "the venue's own empty flag is a refusal, not zero candles" do
-      # A caller must be able to tell "no data in this window" from "no such symbol".
+      # A caller must be able to tell "no data in this window" from "no such symbol". The
+      # spec's CandleList carries `candles` as a sibling of `empty`, so that is the shape.
+      assert {:refused, :not_listed} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds,
+                 plug: responding(%{"empty" => true, "candles" => [], "symbol" => "AAPL"}),
+                 retry_attempts: 0
+               )
+
       assert {:refused, :not_listed} =
                Rest.get_historical_prices("AAPL", "1d", [], @creds,
                  plug: responding(%{"empty" => true}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a range with only an end is refused, not answered with the wrong dates" do
+      assert {:error, {:range_start_required, :schwab}} =
+               Rest.get_historical_prices("AAPL", "1d", [end: ~U[2026-06-05 00:00:00Z]], @creds,
+                 plug: responding(%{"candles" => []}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a range whose start is after its end is refused" do
+      range = [start: ~U[2026-06-05 00:00:00Z], end: ~U[2026-06-01 00:00:00Z]]
+
+      assert {:error, {:range_start_after_end, :schwab}} =
+               Rest.get_historical_prices("AAPL", "1d", range, @creds,
+                 plug: responding(%{"candles" => []}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a bare start is still accepted" do
+      range = [start: DateTime.add(DateTime.utc_now(), -2 * 86_400, :second)]
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL", "1d", range, @creds,
+                 plug: responding(%{"candles" => []}),
                  retry_attempts: 0
                )
     end
@@ -510,6 +545,37 @@ defmodule DpExchange.Schwab.RestTest do
         assert {:error, :unexpected_response_shape} =
                  Rest.market_status(@creds, plug: responding(body), retry_attempts: 0)
       end
+    end
+
+    test "an absent or non-boolean isOpen is unreadable, not closed and not open" do
+      for flag <- [:absent, "false", "true", nil, 0, 1] do
+        product = if flag == :absent, do: %{}, else: %{"isOpen" => flag}
+        body = %{"equity" => %{"EQ" => product}}
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.market_status(@creds, plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "a product without a flag does not outvote one that has it" do
+      body = %{"equity" => %{"EQ" => %{"isOpen" => true}, "X" => %{}}}
+
+      assert Rest.market_status(@creds, plug: responding(body), retry_attempts: 0) ==
+               {:ok, :open}
+    end
+
+    test "list reads refuse a map body rather than wrapping it into a phantom row" do
+      body = %{"message" => "not a list"}
+      opts = [plug: responding(body), retry_attempts: 0]
+      window = [from: ~U[2026-08-01 00:00:00Z], to: ~U[2026-08-02 00:00:00Z]]
+
+      assert {:error, :unexpected_response_shape} = Rest.get_account_summaries(@creds, opts)
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_all_orders(@creds, opts ++ window)
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_transactions(@creds, "hash-1", opts ++ window ++ [types: ["TRADE"]])
     end
 
     test "the market is selectable" do
