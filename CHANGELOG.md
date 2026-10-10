@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.93] - 2026-10-10
+
 ### Fixed
 
 - **A `Feed` without `:subscriber` subscribed itself, and every message looped.** The default
