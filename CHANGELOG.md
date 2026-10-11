@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.113] - 2026-10-11
+
 ### Changed
 
 - **BREAKING: `unsubscribe/2` judges every symbol.** `unsubscribe(["AAPL", :x, 42])`,
