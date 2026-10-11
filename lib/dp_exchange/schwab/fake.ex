@@ -496,17 +496,49 @@ defmodule DpExchange.Schwab.Fake do
       # Then what this process placed, in id order, narrowed by `opts[:status]` as the venue's
       # own filter narrows. The canned order leads, so a read made before anything is placed
       # still has an element to check.
-      placed = placed_bodies() |> Map.values() |> Enum.sort_by(& &1["orderId"])
+      with {:ok, bodies} <- windowed_bodies(opts), do: Orders.list_from_venue(bodies)
+    end
+  end
 
-      # The window is the venue's own: an order is returned only when it was entered inside
-      # `fromEnteredTime..toEnteredTime`, ends included. The canned order was entered on
-      # 2026-01-02, so a window that does not contain that date does not list it.
-      with {:ok, from, to} <- window_bounds(opts) do
+  @doc """
+  Orders across every account, as `DpExchange.Schwab.get_all_orders/2` answers them: the
+  venue's own rows, undecoded, as `Rest.get_all_orders/2` returns them.
+
+  Refuses what the real path refuses before any request, through the same
+  `Rest.check_all_orders_window/1`: a missing, reversed, over-long or unreadable window, a
+  `status` outside the venue's enum, and a `from` more than 60 days before now
+  (`opts[:now]` or the clock). No account hash is needed, as on the real endpoint. The
+  window narrows the rows exactly as `get_orders/2` does: the canned order was entered on
+  2026-01-02, so it is listed only by a window that contains that date and is recent enough
+  to pass the 60-day rule.
+  """
+  @spec get_all_orders(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_all_orders(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_all_orders(credentials, opts) end)
+  end
+
+  defp do_get_all_orders(credentials, opts) do
+    with :ok <- Rest.check_all_orders_window(opts),
+         :ok <- require_credentials(credentials: credentials) do
+      windowed_bodies(opts)
+    end
+  end
+
+  # The canned order, then what this process placed in id order, narrowed by `opts[:status]`
+  # and by the venue's own window: an order is returned only when it was entered inside
+  # `fromEnteredTime..toEnteredTime`, ends included. The canned order was entered on
+  # 2026-01-02, so a window that does not contain that date does not list it.
+  defp windowed_bodies(opts) do
+    placed = placed_bodies() |> Map.values() |> Enum.sort_by(& &1["orderId"])
+
+    with {:ok, from, to} <- window_bounds(opts) do
+      bodies =
         [fake_order_body(@order_id) | placed]
         |> Enum.filter(&status_wanted?(&1, Keyword.get(opts, :status)))
         |> Enum.filter(&entered_within?(&1, from, to))
-        |> Orders.list_from_venue()
-      end
+
+      {:ok, bodies}
     end
   end
 

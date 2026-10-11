@@ -132,8 +132,15 @@ defmodule DpExchange.Schwab.Orders do
   option symbol is `OPTION` whatever is said. Anything else is
   `{:error, {:unsupported_instrument_type, value}}` rather than a guessed `EQUITY`.
   """
-  @spec build(map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def build(request, opts \\ []) do
+  @spec build(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def build(request, opts \\ [])
+
+  # A keyword list or any other non-map used to raise `BadMapError` from `Map.get/2` in the
+  # caller's process, after a throttled-write gate had been passed.
+  def build(request, _opts) when not is_map(request),
+    do: {:error, {:invalid_order_request, request}}
+
+  def build(request, opts) do
     with {:ok, symbol} <- fetch(request, :symbol),
          {:ok, native} <- SymbolFormat.validate(symbol),
          {:ok, quantity} <- fetch_quantity(request),
@@ -231,8 +238,12 @@ defmodule DpExchange.Schwab.Orders do
   # `Decimal.to_float/1` raises on NaN, Infinity and anything past the float range, in the
   # caller's process. A quantity the venue could never read is `:invalid_quantity`, like any
   # other, and refused before a throttled write is spent on it.
+  #
+  # **The exponent is bounded before `to_float/1` expands it.** It builds `10 ** exp` as an
+  # integer, so `1E999999999` meant a billion-digit number computed in the caller's process.
+  # The same +-1000 limit `finite_number?/1` applies to a price; chosen, not measured.
   defp decimal_quantity(quantity) do
-    if Decimal.nan?(quantity) or Decimal.inf?(quantity),
+    if Decimal.nan?(quantity) or Decimal.inf?(quantity) or abs(quantity.exp) > 1000,
       do: {:error, {:invalid_quantity, quantity}},
       else: positive(Decimal.to_float(quantity))
   rescue
@@ -427,8 +438,37 @@ defmodule DpExchange.Schwab.Orders do
   # of a small number of writes per minute.
   defp check_prices(type, request) do
     with :ok <- require_fields(request, required_fields(type)),
-         do: refuse_meaningless(type, request)
+         :ok <- refuse_meaningless(type, request),
+         do: positive_prices(type, request)
   end
+
+  # A limit or stop at or below zero cannot be a valid single-instrument order. Only these
+  # four types are checked. The net types (NET_DEBIT, NET_CREDIT, NET_ZERO) are deliberately
+  # left alone: this builder cannot send them, and a net price is a spread's balance, where
+  # zero and negative values are legitimate. `finite_number?/1` has already run, so every
+  # value here reads as a finite number.
+  @positive_price_types ~w(LIMIT STOP STOP_LIMIT TRAILING_STOP_LIMIT)
+
+  defp positive_prices(type, request) when type in @positive_price_types do
+    Enum.reduce_while([:price, :stop_price], :ok, fn key, :ok ->
+      value = Map.get(request, key)
+
+      if is_nil(value) or positive_value?(value),
+        do: {:cont, :ok},
+        else: {:halt, {:error, {:invalid_price, value}}}
+    end)
+  end
+
+  defp positive_prices(_type, _request), do: :ok
+
+  defp positive_value?(value) when is_number(value), do: value > 0
+
+  defp positive_value?(value) when is_binary(value) do
+    {parsed, ""} = value |> String.trim() |> Decimal.parse()
+    Decimal.gt?(parsed, 0)
+  end
+
+  defp positive_value?(%Decimal{} = value), do: Decimal.gt?(value, 0)
 
   defp required_fields(type) when type in @trailing_types, do: [:stop_price_offset]
   defp required_fields("LIMIT_ON_CLOSE"), do: [:price]
@@ -535,6 +575,14 @@ defmodule DpExchange.Schwab.Orders do
     Map.put(payload, "stopPriceOffset", Jason.Fragment.new(to_string(value)))
   end
 
+  # A string offset (`check_finite/1` accepts one that reads as a finite number) is a number
+  # on the wire too, not the quoted text the generic clause below would send; it is read, then
+  # written out in full as a Decimal is.
+  defp maybe_put(payload, "stopPriceOffset", value) when is_binary(value) do
+    {parsed, ""} = value |> String.trim() |> Decimal.parse()
+    maybe_put(payload, "stopPriceOffset", parsed)
+  end
+
   # **`Decimal.to_string/1` defaults to SCIENTIFIC notation.** So a price carrying an
   # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue reads,
   # and a different order if it read one at all.
@@ -556,6 +604,17 @@ defmodule DpExchange.Schwab.Orders do
   # and `:normal` writes them out in full.
   defp maybe_put(payload, key, value) when is_float(value),
     do: Map.put(payload, key, value |> Decimal.from_float() |> Decimal.to_string(:normal))
+
+  # Text that `check_finite/1` accepted: sent as the number it reads as, with no surrounding
+  # blanks and no exponent (`" 1.5 "` and `"1E+2"` went out verbatim).
+  # Text that is not a number at all (an enum such as `stopPriceLinkBasis: "BID"`) goes out
+  # as written; only numeric text is rewritten.
+  defp maybe_put(payload, key, value) when is_binary(value) do
+    case value |> String.trim() |> Decimal.parse() do
+      {%Decimal{} = parsed, ""} -> maybe_put(payload, key, parsed)
+      _not_a_number -> Map.put(payload, key, value)
+    end
+  end
 
   defp maybe_put(payload, key, value), do: Map.put(payload, key, to_string(value))
 

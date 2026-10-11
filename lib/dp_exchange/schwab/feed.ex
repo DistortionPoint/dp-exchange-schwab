@@ -521,9 +521,14 @@ defmodule DpExchange.Schwab.Feed do
   with a live socket, its `:access_token` also reaches `Socket.update_access_token/2`
   immediately, so the socket's next `LOGIN` can use it. Does not force a reconnect.
   """
-  @spec update_credentials(GenServer.server(), map()) :: :ok
-  def update_credentials(feed, credentials),
+  @spec update_credentials(GenServer.server(), term()) ::
+          :ok | {:error, {:invalid_credentials, term()}}
+  def update_credentials(feed, credentials) when is_map(credentials),
     do: GenServer.call(feed, {:update_credentials, credentials}, @call_timeout)
+
+  # Refused in the caller: a non-map reached `handle_call/3`, raised there, and the restart
+  # lost every subscription made since start.
+  def update_credentials(_feed, credentials), do: {:error, {:invalid_credentials, credentials}}
 
   @doc "Child spec, so a consumer supervises this the same way it supervises any venue."
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -699,7 +704,11 @@ defmodule DpExchange.Schwab.Feed do
         kinds: Map.drop(state.kinds, symbols)
     }
 
-    {:reply, apply_symbols(state), state}
+    # No route yet: the set is recorded and `settle_route/2` applies it when one is dialled,
+    # so there is nothing to send and nothing that failed. `{:error, :no_route}` here told a
+    # consumer that unsubscribed before ever subscribing that its call had been refused.
+    reply = if state.route == nil, do: :ok, else: apply_symbols(state)
+    {:reply, reply, state}
   end
 
   def handle_call(:wanted, _from, state), do: {:reply, MapSet.to_list(state.wanted), state}
@@ -1308,7 +1317,12 @@ defmodule DpExchange.Schwab.Feed do
     # bootstrap starts with an empty reply list. `apply_symbols/1` is no longer called here
     # either: it runs in `handle_info({ref, result}, ...)` once the route is actually
     # settled, which is the only moment it can do anything but return `{:error, :no_route}`.
-    start_route_bootstrap(state, [])
+    #
+    # **Only when something is wanted.** A route that crashed after the last symbol was
+    # unsubscribed was redialled all the same: a Streamer session (or a poller) nobody asked
+    # for, which this package's rule that an unrequested venue must not find a socket open
+    # forbids. The next `subscribe/2` or `update_symbols/2` finds `route` nil and dials then.
+    if MapSet.size(state.wanted) == 0, do: state, else: start_route_bootstrap(state, [])
   end
 
   defp failure_reason({:error, reason}), do: reason

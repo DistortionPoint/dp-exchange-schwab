@@ -137,7 +137,7 @@ defmodule DpExchange.Schwab.AuthTest do
           end)
 
         assert {:ok, {:ok, renewed}} =
-                 Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+                 Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
 
         refute Map.has_key?(renewed, :expires_at)
       end

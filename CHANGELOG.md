@@ -31,6 +31,47 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `Decimal` quantity with an absurd exponent was expanded before it was refused.**
+  `Orders.build/2` checked NaN and Infinity, then called `Decimal.to_float/1`, which builds
+  `10 ** exp` as an integer: `1E999999999` meant a billion-digit number in the caller's
+  process. The exponent is now bounded to +-1000 (the limit `Rest` and prices already use;
+  chosen, not measured) and a quantity outside it is `{:error, {:invalid_quantity, value}}`.
+- **A price, stop price or offset written as text went out as written.** `" 6.45 "` kept its
+  blanks and `"1E+2"` its exponent, and a text `stopPriceOffset` was a quoted string though the
+  spec types it `number`. Text that reads as a finite number is now sent as that number, in
+  full notation, as a `Decimal` already was (the offset as a bare JSON number).
+- **`Orders.build/2` raised on a request that was not a map** (a keyword list, `nil`). It is
+  `{:error, {:invalid_order_request, request}}`; the `@spec` takes `term()`.
+- **The facade could raise after an order was placed.** `place_order/3` and `replace_order/4`
+  build the returned `Order` with `Decimal.new/1` on the request's price, which raises on a
+  text price with blanks that `Orders.build/2` had accepted; an unreadable value is now `nil`.
+  A request with an explicit `order_type: nil` (a market order) read back as `order_type: nil`
+  and now reads `:market`.
+- **`replace_order/4` checked the request before the order id.** `Fake.replace_order/4`
+  refuses an unusable id first, `Rest` does too but only after `Orders.build/2`, so a request
+  wrong both ways got two different refusals. The facade now checks the id (after the account
+  hash and the order-limit gate, before the request is built), so the facade, `Rest` and the
+  fake agree.
+- **`Fake.get_all_orders/2` did not exist** although the facade exposes `get_all_orders/2`.
+  Added: it refuses what `Rest.check_all_orders_window/1` refuses (the window, the status
+  enum, the 60-day rule with `opts[:now]`), needs no account hash, wants a credential, and
+  returns the venue-shaped rows undecoded, narrowed by the window and status as
+  `Fake.get_orders/2` is.
+- **`Feed.unsubscribe/2` answered `{:error, :no_route}` before any route existed**, for a
+  call with nothing to apply. It is `:ok` (the set is recorded and applied when a route is
+  dialled).
+- **A route that crashed after the last symbol was unsubscribed was redialled.** A Streamer
+  session or a poller nobody had asked for was opened. With nothing wanted the route is left
+  unset and the next `subscribe/2` or `update_symbols/2` dials it.
+- **A zero or negative `price` or `stop_price` was sent.** For LIMIT, STOP, STOP_LIMIT and
+  TRAILING_STOP_LIMIT it is now `{:error, {:invalid_price, value}}` before any request. The net
+  types (NET_DEBIT, NET_CREDIT, NET_ZERO) are not checked: zero and negative are legitimate
+  there, and this builder does not send them.
+- **`Feed.update_credentials/2` with a non-map** is `{:error, {:invalid_credentials, value}}`,
+  answered in the caller before the call, so the feed process is never reached.
+
 ## [0.2.105] - 2026-10-11
 
 ### Fixed

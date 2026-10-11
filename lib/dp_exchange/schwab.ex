@@ -273,7 +273,8 @@ defmodule DpExchange.Schwab do
            id: id,
            symbol: Map.get(request, :symbol),
            side: Map.get(request, :side),
-           order_type: Map.get(request, :order_type, :market),
+           # `Orders.build/2` reads an absent or `nil` type as a market order.
+           order_type: Map.get(request, :order_type) || :market,
            quantity: to_decimal(Map.get(request, :quantity)),
            price: to_decimal(Map.get(request, :price)),
            status: :pending,
@@ -286,7 +287,18 @@ defmodule DpExchange.Schwab do
   defp to_decimal(%Decimal{} = value), do: value
   defp to_decimal(value) when is_integer(value), do: Decimal.new(value)
   defp to_decimal(value) when is_float(value), do: Decimal.from_float(value)
-  defp to_decimal(value) when is_binary(value), do: Decimal.new(value)
+
+  # `Orders.build/2` has accepted a price written as text with surrounding blanks
+  # (`" 190.25 "`), which `Decimal.new/1` raises on in the caller's process, after the order
+  # was already placed. Read the way `build/2` reads it, and an unreadable value is `nil`.
+  defp to_decimal(value) when is_binary(value) do
+    case Decimal.parse(String.trim(value)) do
+      {%Decimal{} = parsed, ""} -> parsed
+      _unreadable -> nil
+    end
+  end
+
+  defp to_decimal(_other), do: nil
 
   @doc """
   **Not supported.** Schwab places one order per request.
@@ -336,8 +348,13 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def replace_order(credentials, order_id, request, opts \\ []) do
+    # The order id is checked before the request is built, as `Fake.replace_order/4` does:
+    # `Rest` refuses an unusable id as `{:invalid_path_segment, :schwab}` too, but only after
+    # `Orders.build/2`, so a request wrong in both ways answered with a different refusal here
+    # than in the fake.
     with {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
+         :ok <- Rest.check_path_segment(order_id),
          {:ok, payload} <- Orders.build(request, opts),
          {:ok, new_id} <-
            Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts)) do

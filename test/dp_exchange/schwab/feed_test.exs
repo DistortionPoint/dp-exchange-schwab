@@ -1212,6 +1212,42 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
+  describe "a feed with nothing wanted dials nothing" do
+    test "unsubscribing before any route exists is :ok, not :no_route" do
+      feed = start_feed([])
+
+      assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
+      assert Feed.wanted(feed) == []
+      assert %{route: nil} = Feed.status(feed)
+    end
+
+    test "a route that crashes after the last symbol left is not redialled" do
+      socket = fake_socket()
+
+      exploding = fn _conn -> raise "a route nobody asked for was dialled" end
+      feed = start_feed(socket: socket, plug: exploding, retry_attempts: 0)
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      _applied = Feed.unsubscribe(feed, ["AAPL"])
+      assert Feed.wanted(feed) == []
+
+      :sys.replace_state(feed, fn state ->
+        Process.link(socket)
+        state
+      end)
+
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
+
+      state = :sys.get_state(feed)
+      assert state.route == nil
+      assert state.route_bootstrap == nil
+      assert state.poller == nil
+      assert Process.alive?(feed)
+    end
+  end
+
   describe "symbols given at start are validated like every later call" do
     # `symbols: ["BTC-USD"]` skipped the equity-only refusal `subscribe/2` makes: it entered
     # `wanted` and was sent to the Streamer unchanged as an equities key.

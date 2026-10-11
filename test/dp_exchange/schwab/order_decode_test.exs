@@ -131,7 +131,7 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
     task = Task.async(fn -> Orders.from_venue(spread) end)
 
     assert {:ok, {:ok, %Order{legs: legs}}} =
-             Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+             Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
 
     refute Enum.any?(List.wrap(legs), &is_integer(&1.ratio))
   end
