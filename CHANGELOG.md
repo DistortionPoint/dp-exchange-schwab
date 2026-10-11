@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.100] - 2026-10-11
+
 ### Fixed
 
 - **A `MARKET` order carrying a `:price` was sent as a market order.** The caller may have
