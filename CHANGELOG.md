@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.110] - 2026-10-11
+
 ### Fixed
 
 - **Venue-supplied text is bounded before it enters an error tuple, a notice or telemetry.**
