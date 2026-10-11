@@ -258,7 +258,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_market_status(opts) do
-    with :ok <- require_credentials(opts) do
+    with :ok <- require_credentials(opts),
+         # The real path's question: a market the venue has no hours for is refused.
+         :ok <- Rest.check_market(Config.opt(opts, :market, "equity")) do
       {:ok, Config.opt(opts, :market_status, :open)}
     end
   end
@@ -763,6 +765,7 @@ defmodule DpExchange.Schwab.Fake do
     # The universe before the credential, as the real path: `Rest.get_movers/3` refuses a
     # universe the venue has no list for before it signs anything.
     with :ok <- Rest.check_movers_universe(name),
+         :ok <- Rest.check_movers_options(opts),
          :ok <- require_credentials(opts) do
       {:ok,
        [

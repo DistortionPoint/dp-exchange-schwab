@@ -113,7 +113,15 @@ defmodule DpExchange.Schwab.Orders do
   - the order type or time-in-force is outside what this venue serves
   - a limit order carries no price, or a stop order no stop price — the venue would
     reject it, and a locally-refused order has not spent a throttled write
+  - a field is present that the order type never reads: `{:price_not_allowed, type}` (a
+    `:price` on a market, stop or trailing-stop order),
+    `{:stop_price_not_allowed, type}` (a `:stop_price` on a market, limit or trailing
+    order), `{:trailing_field_not_allowed, key, type}` (an offset, link basis or link type
+    on a non-trailing order). A market order carrying a price is ambiguous - the caller may
+    believe they placed a limit - so it is refused rather than sent as a market order
   - the instruction does not match the asset type, per the venue's published matrix
+    (`{:instruction_not_valid_for_asset, instruction, asset}`), or is not a string
+    (`{:invalid_instruction, value}`, naming the value given)
   - `:instrument_type` names an asset this builder cannot send
 
   **`:instrument_type` sets the leg's `assetType`.** Nothing in a ticker tells a mutual fund
@@ -334,8 +342,9 @@ defmodule DpExchange.Schwab.Orders do
         {nil, :buy} -> "BUY"
         {nil, :sell} -> "SELL"
         {nil, nil} -> nil
+        {nil, other_side} -> {:not_a_string, other_side}
         {explicit, _side} when is_binary(explicit) -> String.upcase(explicit)
-        {_other, side} -> side
+        {other, _side} -> {:not_a_string, other}
       end
 
     with :ok <- instruction_agrees(instruction, Map.get(request, :side)),
@@ -371,20 +380,66 @@ defmodule DpExchange.Schwab.Orders do
     end
   end
 
-  defp validate_instruction(other, _native), do: {:error, {:invalid_instruction, other}}
+  # The offending value itself, never the side: `instruction: :buy` used to report
+  # `{:invalid_instruction, :sell}` (the request's side), naming a value the caller did not
+  # get wrong.
+  defp validate_instruction({:not_a_string, other}, _native),
+    do: {:error, {:invalid_instruction, other}}
 
   # A limit order without a price and a stop order without a stop price are both
   # rejected by the venue. Refusing here costs nothing; letting them through costs one
   # of a small number of writes per minute.
-  defp check_prices(type, request) when type in @trailing_types,
-    do: require_fields(request, [:stop_price_offset])
+  defp check_prices(type, request) do
+    with :ok <- require_fields(request, required_fields(type)),
+         do: refuse_meaningless(type, request)
+  end
 
-  defp check_prices("LIMIT_ON_CLOSE", request), do: require_fields(request, [:price])
+  defp required_fields(type) when type in @trailing_types, do: [:stop_price_offset]
+  defp required_fields("LIMIT_ON_CLOSE"), do: [:price]
+  defp required_fields("LIMIT"), do: [:price]
+  defp required_fields("STOP"), do: [:stop_price]
+  defp required_fields("STOP_LIMIT"), do: [:stop_price, :price]
+  defp required_fields(_market), do: []
 
-  defp check_prices("LIMIT", request), do: require_fields(request, [:price])
-  defp check_prices("STOP", request), do: require_fields(request, [:stop_price])
-  defp check_prices("STOP_LIMIT", request), do: require_fields(request, [:stop_price, :price])
-  defp check_prices(_market, _request), do: :ok
+  # **A field the order type never reads is refused, not sent.** `orderType: MARKET` with a
+  # `price` went out as a market order: the caller, who may well believe they placed a limit,
+  # got a fill at any price, and the venue does not object to the extra field. The same holds
+  # for a `stopPrice` on a LIMIT, or a trailing offset on a STOP. Which of the two the caller
+  # meant is not this package's to choose, so the request is refused by name.
+  #
+  # A trailing stop's trigger is derived from its offset, so it takes no `stop_price`;
+  # `TRAILING_STOP_LIMIT` is the only trailing type that also reads a `price`. This is read
+  # from the documented examples (a trailing stop carries only the offset triple), not probed.
+  @trailing_keys [:stop_price_offset, :stop_price_link_basis, :stop_price_link_type]
+
+  @meaningless %{
+    "MARKET" => [:price, :stop_price] ++ @trailing_keys,
+    "MARKET_ON_CLOSE" => [:price, :stop_price] ++ @trailing_keys,
+    "LIMIT" => [:stop_price] ++ @trailing_keys,
+    "LIMIT_ON_CLOSE" => [:stop_price] ++ @trailing_keys,
+    "STOP" => [:price] ++ @trailing_keys,
+    "STOP_LIMIT" => @trailing_keys,
+    "TRAILING_STOP" => [:price, :stop_price],
+    "TRAILING_STOP_LIMIT" => [:stop_price]
+  }
+
+  @wire_to_core Map.new(@order_types, fn {atom, wire} -> {wire, atom} end)
+
+  defp refuse_meaningless(type, request) do
+    core = Map.fetch!(@wire_to_core, type)
+
+    @meaningless
+    |> Map.fetch!(type)
+    |> Enum.find(&(Map.get(request, &1) != nil))
+    |> case do
+      nil -> :ok
+      key -> {:error, not_allowed(key, core)}
+    end
+  end
+
+  defp not_allowed(:price, type), do: {:price_not_allowed, type}
+  defp not_allowed(:stop_price, type), do: {:stop_price_not_allowed, type}
+  defp not_allowed(key, type), do: {:trailing_field_not_allowed, key, type}
 
   # Checked in order, so a stop_limit missing both names the stop price first — the field
   # that makes it a stop at all.

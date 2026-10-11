@@ -101,6 +101,9 @@ defmodule DpExchange.Schwab.Rest do
     "ytd" => [1]
   }
 
+  # The venue's `market_id` / `markets` enum (`PathParamMarket`, `QueryParamMarkets`).
+  @markets ~w(equity option bond future forex)
+
   @doc "Market-data base URL, overridable for tests."
   @spec market_data_url(keyword()) :: String.t()
   def market_data_url(opts), do: Config.opt(opts, :market_data_url, @market_data_url)
@@ -450,6 +453,10 @@ defmodule DpExchange.Schwab.Rest do
     width exists but cannot reach that far back. Minute candles cap at ten days. This is
     the refusal that matters: answering with ten days, or with daily candles, would be a
     plausible wrong answer.
+  - `{:error, {:invalid_range_bound, :start | :end, value}}` — a `:start` or `:end` that is
+    not a `DateTime`. It used to be ignored, and the most recent window answered instead.
+
+  The lookback is measured in whole days rounded up, so ten days and an hour is eleven.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
@@ -518,23 +525,39 @@ defmodule DpExchange.Schwab.Rest do
   # names no window (the venue's `period` is relative to now, not to `endDate`), so it is
   # refused by name; so is a start after its end, which would otherwise size `period` from a
   # negative span and clamp it to one day.
+  #
+  # **A bound that is not a `DateTime` is refused, not ignored.** `put_range_or_period/3` only
+  # acts on a `%DateTime{}` start, so an integer, `Date` or string start fell through to
+  # `period` and answered the most recent window ending today - the wrong dates with no sign
+  # the caller's range had been dropped. A `Date` is not converted either: which instant of
+  # that day is meant (and in which zone) is not this package's to choose.
   defp check_range(range) do
-    case {Keyword.get(range, :start), Keyword.get(range, :end)} do
-      {nil, nil} ->
-        :ok
+    start = Keyword.get(range, :start)
+    finish = Keyword.get(range, :end)
 
-      {nil, _finish} ->
-        {:error, {:range_start_required, :schwab}}
+    with :ok <- check_bound(:start, start),
+         :ok <- check_bound(:end, finish) do
+      case {start, finish} do
+        {nil, nil} ->
+          :ok
 
-      {%DateTime{} = start, %DateTime{} = finish} ->
-        if DateTime.compare(start, finish) == :gt,
-          do: {:error, {:range_start_after_end, :schwab}},
-          else: :ok
+        {nil, _finish} ->
+          {:error, {:range_start_required, :schwab}}
 
-      _start_only ->
-        :ok
+        {_start, nil} ->
+          :ok
+
+        {start, finish} ->
+          if DateTime.compare(start, finish) == :gt,
+            do: {:error, {:range_start_after_end, :schwab}},
+            else: :ok
+      end
     end
   end
+
+  defp check_bound(_key, nil), do: :ok
+  defp check_bound(_key, %DateTime{}), do: :ok
+  defp check_bound(key, value), do: {:error, {:invalid_range_bound, key, value}}
 
   defp put_range_or_period(params, period, range) do
     case Keyword.get(range, :start) do
@@ -584,15 +607,19 @@ defmodule DpExchange.Schwab.Rest do
   defp requested_days(range, now) do
     case {Keyword.get(range, :start), Keyword.get(range, :end)} do
       {%DateTime{} = start, %DateTime{} = finish} ->
-        finish |> DateTime.diff(start, :second) |> div(86_400) |> max(1)
+        finish |> DateTime.diff(start, :second) |> ceil_days()
 
       {%DateTime{} = start, nil} ->
-        now |> DateTime.diff(start, :second) |> div(86_400) |> max(1)
+        now |> DateTime.diff(start, :second) |> ceil_days()
 
       _no_range ->
         nil
     end
   end
+
+  # Rounded UP, like `days_for/2`: `div/2` truncated 10 days 23 hours to 10, which passed a
+  # minute-candle request one day past the venue's ten-day reach.
+  defp ceil_days(seconds), do: seconds |> Kernel.+(86_399) |> div(86_400) |> max(1)
 
   defp smallest_covering(legal, days, period_type) do
     legal
@@ -679,8 +706,14 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp candle_time(%{"datetime" => nil}), do: {:error, :missing_venue_timestamp}
-  defp candle_time(%{"datetime" => datetime}), do: parse_time(datetime)
+  # A zero (or negative) `datetime` is "not stated", exactly as it is for a quote's times:
+  # `DateTime.from_unix(0)` answered 1970-01-01 and placed the bar in the series at the epoch.
+  defp candle_time(%{"datetime" => datetime}) do
+    if positive_epoch?(datetime),
+      do: parse_time(datetime),
+      else: {:error, :missing_venue_timestamp}
+  end
+
   defp candle_time(_no_datetime), do: {:error, :missing_venue_timestamp}
 
   defp required(row, key) do
@@ -703,12 +736,27 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, :open | :closed} | {:error, term()} | {:refused, term()}
   def market_status(credentials, opts) do
     market = Config.opt(opts, :market, "equity")
-    path = "/markets?markets=" <> URI.encode(market)
 
-    with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
+    # Checked against the venue's own enum (`equity`, `option`, `bond`, `future`, `forex`)
+    # before the request, as `get_market/3` does: a non-string `:market` raised in
+    # `URI.encode/1` in the caller's process, and an unlisted one cost a read to learn it.
+    with :ok <- check_market(market),
+         path = "/markets?markets=" <> market,
+         {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
       read_is_open(body, market)
     end
   end
+
+  @doc """
+  Whether `market` is one the venue publishes hours for: `equity`, `option`, `bond`, `future`
+  or `forex`. Anything else is `{:error, {:unknown_market, market}}`.
+
+  The refusal `market_status/2` and `get_market/3` make before the request, public so
+  `DpExchange.Schwab.Fake` asks the same question.
+  """
+  @spec check_market(term()) :: :ok | {:error, {:unknown_market, term()}}
+  def check_market(market) when market in @markets, do: :ok
+  def check_market(market), do: {:error, {:unknown_market, market}}
 
   # The response nests: %{"equity" => %{"EQ" => %{"isOpen" => true}}}. The inner key is
   # a product code that varies, so it is searched rather than assumed.
@@ -868,19 +916,27 @@ defmodule DpExchange.Schwab.Rest do
   def get_chains(credentials, opts) do
     case Keyword.get(opts, :symbol) do
       symbol when is_binary(symbol) ->
-        query =
-          %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
-          |> put_chain_params(opts)
-          |> query_string()
-
         # `object/1` makes this function's own `@spec` true: it claimed `{:ok, map()}` and
         # passed on whatever JSON arrived, including an array — which the callers then read
         # with `body["callExpDateMap"]` and raised on.
-        with {:ok, body} <- get(market_data_url(opts) <> "/chains" <> query, credentials, opts),
+        with {:ok, opts} <- chain_dates(opts),
+             query =
+               %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
+               |> put_chain_params(opts)
+               |> query_string(),
+             {:ok, body} <- get(market_data_url(opts) <> "/chains" <> query, credentials, opts),
              do: object(body)
 
       _missing ->
         {:error, {:symbol_required, :schwab}}
+    end
+  end
+
+  # `fromDate` and `toDate` are `yyyy-MM-dd`; see `date_param/2`.
+  defp chain_dates(opts) do
+    with {:ok, from} <- date_param(:from_date, Keyword.get(opts, :from_date)),
+         {:ok, to} <- date_param(:to_date, Keyword.get(opts, :to_date)) do
+      {:ok, opts |> Keyword.put(:from_date, from) |> Keyword.put(:to_date, to)}
     end
   end
 
@@ -958,15 +1014,26 @@ defmodule DpExchange.Schwab.Rest do
   404. A value outside the enum is refused before the request rather than sent.
 
   `opts[:sort]` and `opts[:frequency]` are the venue's own enums and are sent only when
-  given. **`frequency` is a number of minutes**, not a count of rows: `0` means every mover
-  in the session and `60` means those that moved in the last hour.
+  given, and a value outside them is refused before the request: `sort` is `VOLUME`,
+  `TRADES`, `PERCENT_CHANGE_UP` or `PERCENT_CHANGE_DOWN` (`{:error, {:invalid_sort, v}}`),
+  `frequency` is the integer `0`, `1`, `5`, `10`, `30` or `60`
+  (`{:error, {:invalid_frequency, v}}`).
+
+  **What `frequency` means is not settled by the vendor.** The OpenAPI document gives it the
+  description "To return movers with the specified directions of up or down" against an
+  integer enum defaulting to `0` - a description that does not fit the values. An earlier
+  version of this doc stated it as a number of minutes; that was a reading, not a statement,
+  and is withdrawn. It is passed through unchanged and its meaning is not claimed.
   """
+  @movers_sorts ~w(VOLUME TRADES PERCENT_CHANGE_UP PERCENT_CHANGE_DOWN)
+  @movers_frequencies [0, 1, 5, 10, 30, 60]
   @movers_universes ~w($DJI $COMPX $SPX NYSE NASDAQ OTCBB INDEX_ALL EQUITY_ALL OPTION_ALL OPTION_PUT OPTION_CALL)
 
   @spec get_movers(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_movers(universe, credentials, opts) do
-    with :ok <- check_movers_universe(universe) do
+    with :ok <- check_movers_universe(universe),
+         :ok <- check_movers_options(opts) do
       query =
         query_string(%{
           "sort" => Keyword.get(opts, :sort),
@@ -980,6 +1047,26 @@ defmodule DpExchange.Schwab.Rest do
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
     end
   end
+
+  @doc """
+  Whether `opts[:sort]` and `opts[:frequency]` are values the venue's enums list, or absent.
+
+  `{:error, {:invalid_sort, value}}` or `{:error, {:invalid_frequency, value}}` otherwise.
+  Public so `DpExchange.Schwab.Fake` refuses the same requests, in the same order.
+  """
+  @spec check_movers_options(keyword()) :: :ok | {:error, term()}
+  def check_movers_options(opts) do
+    with :ok <- check_movers_sort(Keyword.get(opts, :sort)),
+         do: check_movers_frequency(Keyword.get(opts, :frequency))
+  end
+
+  defp check_movers_sort(nil), do: :ok
+  defp check_movers_sort(sort) when sort in @movers_sorts, do: :ok
+  defp check_movers_sort(sort), do: {:error, {:invalid_sort, sort}}
+
+  defp check_movers_frequency(nil), do: :ok
+  defp check_movers_frequency(frequency) when frequency in @movers_frequencies, do: :ok
+  defp check_movers_frequency(frequency), do: {:error, {:invalid_frequency, frequency}}
 
   @doc """
   Whether `universe` is one the venue publishes a mover list for.
@@ -1010,23 +1097,40 @@ defmodule DpExchange.Schwab.Rest do
 
   `market_id` is the venue's own enum: `equity`, `option`, `bond`, `future`, `forex`. A
   value outside it is refused before the request.
-  """
-  @markets ~w(equity option bond future forex)
 
+  `opts[:date]` is a `Date` or a `YYYY-MM-DD` string; anything else (a `DateTime` included,
+  whose calendar day depends on a zone this package will not pick) is
+  `{:error, {:invalid_date, :date, value}}`.
+  """
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market(market, credentials, opts) do
-    if market in @markets do
-      query = query_string(%{"date" => chain_value(Keyword.get(opts, :date))})
+    with :ok <- check_market(market),
+         {:ok, date} <- date_param(:date, Keyword.get(opts, :date)) do
+      query = query_string(%{"date" => date})
       path = "/markets/" <> market <> query
 
       # `object/1`, so the `{:ok, map()}` in this spec is true. It returned the body as sent,
       # and a caller reading market hours off a list got whatever the venue sent instead.
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
-    else
-      {:error, {:unknown_market, market}}
     end
   end
+
+  # The venue's date format is `yyyy-MM-dd` (`QueryParamDate`, `fromDate`, `toDate`). A
+  # `DateTime` used to be stringified by `to_string/1` into `"2026-06-01 12:00:00Z"`, which the
+  # venue rejects, and converting it to a date would pick a zone for the caller. A string is
+  # accepted only if it parses as an ISO date.
+  defp date_param(_key, nil), do: {:ok, nil}
+  defp date_param(_key, %Date{} = date), do: {:ok, Date.to_iso8601(date)}
+
+  defp date_param(key, value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> {:ok, Date.to_iso8601(date)}
+      {:error, _reason} -> {:error, {:invalid_date, key, value}}
+    end
+  end
+
+  defp date_param(key, value), do: {:error, {:invalid_date, key, value}}
 
   @doc "The markets this venue publishes hours for."
   @spec markets() :: [String.t()]
@@ -1042,7 +1146,9 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_instrument(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_instrument(cusip, credentials, opts) when is_binary(cusip) do
-    path = "/instruments/" <> URI.encode(cusip)
+    # One path segment, as in `get_symbol_quote/3`: `URI.encode/1` leaves `/`, `?` and `#`
+    # alone, so a CUSIP carrying one reached the venue as a different path or a query.
+    path = "/instruments/" <> URI.encode(cusip, &URI.char_unreserved?/1)
 
     with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
   end
@@ -1067,6 +1173,15 @@ defmodule DpExchange.Schwab.Rest do
   A row this package cannot address — no readable expiry, strike or right — is refused
   rather than dropped, for the same reason a hole in a chain that looks complete is worse
   than an error.
+
+  **Two contracts in one slot are refused too**: `{:error, {:ambiguous_chain_row, expiry,
+  strike, right}}`. The venue lists an array of contracts per strike and the grid has room for
+  one call and one put, so keeping "the last" would pick a contract for the caller. Use
+  `get_chains/2` for the raw array.
+
+  `opts[:from_date]` and `opts[:to_date]` take a `Date` or a `YYYY-MM-DD` string, else
+  `{:error, {:invalid_date, key, value}}`. Each contract's `last_trading_day` is the US
+  Eastern calendar day of the venue's epoch-millisecond stamp (`nil` before 2007).
   """
   @spec get_option_chain(String.t() | term(), map(), keyword()) ::
           {:ok, OptionChain.t()} | {:error, term()} | {:refused, term()}
@@ -1077,11 +1192,12 @@ defmodule DpExchange.Schwab.Rest do
   def get_option_chain(underlying, credentials, opts) do
     with {:ok, body} <- get_chains(credentials, Keyword.put(opts, :symbol, underlying)) do
       with {:ok, calls} <- chain_side(body["callExpDateMap"], underlying, :call),
-           {:ok, puts} <- chain_side(body["putExpDateMap"], underlying, :put) do
+           {:ok, puts} <- chain_side(body["putExpDateMap"], underlying, :put),
+           {:ok, expiries} <- merge_chain(calls ++ puts) do
         {:ok,
          %OptionChain{
            underlying: body["symbol"] || underlying,
-           expiries: merge_chain(calls ++ puts),
+           expiries: expiries,
            underlying_price: decimal(body["underlyingPrice"]),
            venue_time: nil,
            provider: :schwab
@@ -1192,25 +1308,64 @@ defmodule DpExchange.Schwab.Rest do
   defp boolean_or_nil(_other), do: nil
 
   # The venue sends this as epoch milliseconds on a chain row, unlike the expiry key.
+  #
+  # **The calendar day is the US Eastern one, not the UTC one.** The vendor's own examples stamp
+  # the day in the evening, Eastern: `1655510400000` is 2022-06-18T00:00Z, which is Friday
+  # 2022-06-17 20:00 EDT - the third Friday, the day options expired - and `1702602000000` is
+  # 2023-12-15T01:00Z, Thursday 2023-12-14 20:00 EST, the last trading day of an AM-settled
+  # contract. `DateTime.to_date/1` on the UTC instant read both one day late. Read from the
+  # vendor's examples, not probed.
   defp chain_last_trading_day(value) when is_integer(value) do
     case DateTime.from_unix(value, :millisecond) do
-      {:ok, at} -> DateTime.to_date(at)
+      {:ok, at} -> eastern_date(at)
       {:error, _reason} -> nil
     end
   end
 
   defp chain_last_trading_day(_other), do: nil
 
+  # The US rule (second Sunday of March 02:00 local to first Sunday of November 02:00 local),
+  # in force since 2007. Computed because this package carries no time-zone database, and
+  # before 2007 the rule differed, so an earlier instant has no honest date here: `nil`.
+  defp eastern_date(%DateTime{year: year} = at) when year >= 2007 do
+    dst_start = DateTime.new!(nth_sunday(year, 3, 2), ~T[07:00:00], "Etc/UTC")
+    dst_end = DateTime.new!(nth_sunday(year, 11, 1), ~T[06:00:00], "Etc/UTC")
+
+    offset =
+      if DateTime.compare(at, dst_start) != :lt and DateTime.compare(at, dst_end) == :lt,
+        do: -4 * 3600,
+        else: -5 * 3600
+
+    at |> DateTime.add(offset, :second) |> DateTime.to_date()
+  end
+
+  defp eastern_date(_before_2007), do: nil
+
+  defp nth_sunday(year, month, n) do
+    first = Date.new!(year, month, 1)
+    Date.add(first, rem(7 - Date.day_of_week(first), 7) + 7 * (n - 1))
+  end
+
+  # **Two contracts at one expiry, strike and right are refused, not collapsed.** Schwab lists
+  # contracts under a strike as an array, and more than one can share a slot - an index's
+  # monthly and weekly roots (`SPX` and `SPXW`) on the same date, or a standard and an adjusted
+  # contract. The grid has one slot per expiry, strike and side, and this used to overwrite:
+  # the LAST contract in the array silently became "the" call at that strike, a real, quoted
+  # contract that is not necessarily the one the caller meant. Which of the two is the
+  # right one is not this package's to choose, so the chain is refused by name; the raw
+  # `get_chains/2` still carries every contract for a caller that can choose.
   defp merge_chain(contracts) do
-    Enum.reduce(contracts, %{}, fn contract, grid ->
+    Enum.reduce_while(contracts, {:ok, %{}}, fn contract, {:ok, grid} ->
       strikes = Map.get(grid, contract.expiry, %{})
       row = Map.get(strikes, contract.strike, %{call: nil, put: nil})
 
-      Map.put(
-        grid,
-        contract.expiry,
-        Map.put(strikes, contract.strike, Map.put(row, contract.right, contract))
-      )
+      if Map.fetch!(row, contract.right) == nil do
+        updated = Map.put(strikes, contract.strike, Map.put(row, contract.right, contract))
+        {:cont, {:ok, Map.put(grid, contract.expiry, updated)}}
+      else
+        ambiguous = {:ambiguous_chain_row, contract.expiry, contract.strike, contract.right}
+        {:halt, {:error, ambiguous}}
+      end
     end)
   end
 

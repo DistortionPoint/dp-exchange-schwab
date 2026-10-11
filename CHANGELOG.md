@@ -31,6 +31,59 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `MARKET` order carrying a `:price` was sent as a market order.** The caller may have
+  believed they placed a limit; the order filled at any price. `Orders.build/2` now refuses
+  a field the order type never reads: `{:price_not_allowed, type}` (a price on market,
+  market-on-close, stop or trailing stop), `{:stop_price_not_allowed, type}` (a stop price on
+  market, limit, the on-close types, or either trailing type) and
+  `{:trailing_field_not_allowed, key, type}` (`:stop_price_offset`, `:stop_price_link_basis`
+  or `:stop_price_link_type` on a non-trailing order). A forwarded `nil` is absent. Required
+  fields are still reported first. Which fields each type reads is taken from the vendor's
+  worked examples, not probed live.
+
+- **`:invalid_instruction` named the side, not the bad value.** `instruction: :buy` reported
+  `{:invalid_instruction, :sell}` when the request's side was `:sell`. It now reports the
+  value the caller gave.
+
+- **An option chain slot holding two contracts silently kept the last.** Schwab lists an
+  array of contracts per strike, and an index's monthly and weekly roots (`SPX`/`SPXW`) can
+  share an expiry and strike. `get_option_chain/3` overwrote the first with the second. It
+  is now `{:error, {:ambiguous_chain_row, expiry, strike, right}}`; `get_chains/2` still
+  returns every contract.
+
+- **`last_trading_day` was a day late for evening stamps.** The venue stamps the day in the
+  evening Eastern (its own examples `1655510400000` and `1702602000000` are 20:00 EDT and
+  20:00 EST), and the UTC calendar day of that instant is the next one. The US Eastern day is
+  used (US rule, 2007 onward; `nil` before, as no honest date exists without a zone
+  database). Documentation-derived.
+
+- **A price-history range bound that was not a `DateTime` was ignored.** An integer, `Date`
+  or string `:start` fell through to `period` and the most recent window answered. It is now
+  `{:error, {:invalid_range_bound, :start | :end, value}}`.
+
+- **The lookback was truncated to whole days.** Ten days and an hour counted as ten and
+  passed a one-minute request the venue cannot serve. It is rounded up.
+
+- **A candle with `datetime: 0` was placed at 1970.** It is `:missing_venue_timestamp`, as a
+  quote's zero time already was.
+
+- **Dates the venue cannot read were sent anyway.** `get_chains/2` `:from_date`/`:to_date` and
+  `get_market/3` `:date` stringified a `DateTime` into `"2026-03-01 12:00:00Z"`. They take a
+  `Date` or a `YYYY-MM-DD` string, else `{:error, {:invalid_date, key, value}}`.
+
+- **`market_status/2` raised on a non-string `:market` and sent an unlisted one.** It is
+  checked against the venue's enum like `get_market/3`: `{:error, {:unknown_market, value}}`.
+
+- **`get_movers/3` and `get_screener/3` sent any `sort` or `frequency`.** Both are checked
+  against the venue's enums (`{:invalid_sort, v}`, `{:invalid_frequency, v}`). The doc's
+  claim that `frequency` is "a number of minutes" is withdrawn: the vendor's description
+  ("directions of up or down") does not say so. `Fake` refuses the same requests.
+
+- **`get_instrument/3` did not escape its CUSIP as one path segment**, so `/`, `?` or `#` in
+  it changed the path or query.
+
 ## [0.2.99] - 2026-10-10
 
 ### Fixed

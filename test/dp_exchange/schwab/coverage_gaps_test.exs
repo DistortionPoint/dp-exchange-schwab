@@ -355,7 +355,8 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                )
 
       call = chain.expiries[~D[2026-03-20]][Decimal.new("200.0")].call
-      assert call.last_trading_day == ~D[2026-03-21]
+      # 1_774_060_800_000 is 2026-03-21T02:40Z, which is 22:40 EDT on the 20th: the venue's day.
+      assert call.last_trading_day == ~D[2026-03-20]
     end
 
     test "isMini, isNonStandard and isIndexOption are read, not stated nil" do
