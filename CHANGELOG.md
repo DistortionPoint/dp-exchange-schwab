@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.112] - 2026-10-11
+
 ### Fixed
 
 - **`Feed.update_credentials/2` sent the credential map to the feed in the clear.** The
