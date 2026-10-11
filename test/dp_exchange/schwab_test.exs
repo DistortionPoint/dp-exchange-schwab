@@ -768,7 +768,7 @@ defmodule DpExchange.SchwabTest do
     test "a valid order is accepted, and the account hash is still required" do
       request = %{symbol: "AAPL", side: :buy, quantity: 1}
 
-      assert {:ok, %DpExchange.Core.Types.Order{id: "fake-order-1"}} =
+      assert {:ok, %DpExchange.Core.Types.Order{id: "1005439901", symbol: "AAPL", side: :buy}} =
                Fake.place_order(@creds, request, account_hash: "H")
 
       assert Fake.place_order(@creds, request, []) ==
@@ -776,15 +776,19 @@ defmodule DpExchange.SchwabTest do
     end
 
     test "accounts, balances, orders and connection all answer" do
-      assert {:ok, [%{hash: "FAKEHASH"}]} = Fake.get_accounts(@creds)
+      assert {:ok, [%{hash: "9ABCDEF0123456789ABCDEF01234567"}]} = Fake.get_accounts(@creds)
       assert {:ok, [balance]} = Fake.get_balances(@creds, account_hash: "H")
       assert balance.currency == "USD"
-      assert {:ok, :cancelled} = Fake.cancel_order(@creds, "1", account_hash: "H")
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      assert {:ok, placed} = Fake.place_order(@creds, request, account_hash: "H")
       # Was `{:ok, %{"orderId" => "1"}}` — the fake returning the raw venue map, which pinned
       # the same contract violation the real facade had. `Core.Venue.get_order/3` is typed
       # `result(Types.Order.t())`.
-      assert {:ok, %DpExchange.Core.Types.Order{id: "1"}} =
-               Fake.get_order(@creds, "1", account_hash: "H")
+      assert {:ok, %DpExchange.Core.Types.Order{} = read} =
+               Fake.get_order(@creds, placed.id, account_hash: "H")
+
+      assert read.id == placed.id
+      assert {:ok, :cancelled} = Fake.cancel_order(@creds, placed.id, account_hash: "H")
 
       # One decoded order now, not `[]` — an empty list made every check over its elements
       # vacuous. The real venue requires `fromEnteredTime`/`toEnteredTime` on this endpoint
@@ -792,12 +796,15 @@ defmodule DpExchange.SchwabTest do
       assert {:error, {:from_and_to_required, :schwab}} =
                Fake.get_orders(@creds, account_hash: "H")
 
-      assert {:ok, [%DpExchange.Core.Types.Order{id: "fake-order-1"}]} =
+      # The canned filled order, then the one placed above.
+      assert {:ok, [%DpExchange.Core.Types.Order{id: "1005439821"}, listed]} =
                Fake.get_orders(@creds,
                  account_hash: "H",
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z]
                )
+
+      assert listed.id == placed.id
 
       assert {:ok, %{accounts: 1}} = Fake.test_connection(@creds)
     end

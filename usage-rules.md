@@ -588,7 +588,17 @@ registration carrying a `nil` ceiling. `:interval_ms` on the fallback poll is va
 same way: a zero, negative or fractional value is refused at start rather than crashing on
 the first tick inside `Process.send_after/3`, in another process, as a restart loop.
 
-## 13. Making the fake fail on demand
+## 13. What the fake remembers, and making it fail on demand
+
+**The fake remembers the orders it placed, per process.** `place_order/3` issues a numeric
+id, a new one each time, and the order reads back as what you placed: its symbol,
+instruction, size and price, `WORKING` (so `:open`), nothing filled. `get_order/3` and
+`get_orders/2` (narrowed by `opts[:status]`) answer from that; `cancel_order/3` marks it
+`CANCELED`, and `replace_order/4` marks it `REPLACED` and issues a new working order. A
+cancel or replace of an order that is no longer working is `{:refused, {:venue_error, 400}}`,
+and an id the fake never issued is `{:refused, {:venue_error, 404}}` on every one of the
+three. `get_orders/2` leads with one canned filled AAPL order so a check over its elements
+is never vacuous; `1005439821` is that order's id.
 
 `DpExchange.Schwab.Fake` is wired to `DpExchange.Core.FakeInjection`, the same seam the
 other four venue packages expose. Until now this package was the only one without it.

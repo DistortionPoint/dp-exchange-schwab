@@ -79,6 +79,16 @@ defmodule DpExchange.Schwab.Fake do
   # venue's claim about an instant — so the fake states one.
   @as_of ~U[2026-08-31 14:30:00Z]
 
+  # Ids as the venue issues them. An order id is an int64 that `Orders.from_venue/1` returns
+  # as its decimal string (the `Location` header of a placement ends in it); the fake issued
+  # `fake-order-1`, which the venue's own numbering can never produce. An account hash is the
+  # opaque upper-case hex `accountNumbers` answers, here the spec fixture's own value (31
+  # characters; the spec states no length, so none is claimed)
+  # (`test/fixtures/spec_examples/accounts_and_trading/account_numbers_schema.json`); the
+  # fake issued `FAKEHASH`. A replacement is a NEW order, so it has a different id.
+  @order_id "1005439821"
+  @hash "9ABCDEF0123456789ABCDEF01234567"
+
   @doc "Symbols this fake lists."
   @spec listed() :: [String.t()]
   def listed, do: @listed
@@ -277,7 +287,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_get_accounts(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials) do
-      {:ok, [%{account_number: "123456789", hash: Config.opt(opts, :account_hash, "FAKEHASH")}]}
+      {:ok, [%{account_number: "123456789", hash: Config.opt(opts, :account_hash, @hash)}]}
     end
   end
 
@@ -322,10 +332,55 @@ defmodule DpExchange.Schwab.Fake do
     with {:ok, _hash} <- require_account(opts),
          # The real refusals, from the real module — a fake that accepted an order the
          # venue publishes as invalid would green-light code that cannot work.
-         {:ok, _payload} <- Orders.build(request, opts),
+         {:ok, payload} <- Orders.build(request, opts),
          :ok <- require_credentials(credentials: credentials) do
       # The read-back `Order`, as the real facade returns since 2026-10-10, not the bare id.
-      do_get_order(credentials, "fake-order-1", opts)
+      # Of the order that was placed: its symbol, instruction, size and price, and the
+      # venue's working state, not a filled AAPL buy whatever the request said.
+      id = next_order_id()
+      remember_body(id, working_body(id, payload))
+      do_get_order(credentials, id, opts)
+    end
+  end
+
+  # The venue's `Order` for a payload `Orders.build/2` produced, as it stands the moment
+  # after the placement: `WORKING` and nothing filled. Sent through JSON, as the real one
+  # is, so a `Decimal` price is the string the wire carries and the decode reads it back.
+  defp working_body(id, payload) do
+    [leg | _rest] = payload["orderLegCollection"]
+
+    entered = %{
+      "orderId" => wire_order_id(id),
+      "status" => "WORKING",
+      "quantity" => leg["quantity"],
+      "filledQuantity" => 0,
+      "enteredTime" => Calendar.strftime(@as_of, "%Y-%m-%dT%H:%M:%S+0000")
+    }
+
+    entered |> Map.merge(payload) |> Jason.encode!() |> Jason.decode!()
+  end
+
+  # Orders this process placed, as the venue-shaped bodies, by id.
+  @orders_key {__MODULE__, :orders}
+  @order_id_base 1_005_439_900
+
+  defp next_order_id do
+    Integer.to_string(@order_id_base + map_size(placed_bodies()) + 1)
+  end
+
+  defp placed_bodies, do: Process.get(@orders_key, %{})
+
+  defp remember_body(id, body), do: Process.put(@orders_key, Map.put(placed_bodies(), id, body))
+
+  # An order this process placed, else the one canned (filled, historical) order. Anything
+  # else is an id the fake never issued: the venue's 404, `{:refused, {:venue_error, 404}}`
+  # from `Rest.refusal/2` for a status with no readable detail. Every id used to read back
+  # as a filled AAPL buy.
+  defp find_body(order_id) do
+    case Map.fetch(placed_bodies(), order_id) do
+      {:ok, _body} = found -> found
+      :error when order_id == @order_id -> {:ok, fake_order_body(@order_id)}
+      :error -> {:refused, {:venue_error, 404}}
     end
   end
 
@@ -354,31 +409,47 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   @impl true
-  def replace_order(credentials, _order_id, request, opts \\ []) do
-    with_injection(nil, fn -> do_replace_order(credentials, request, opts) end)
+  def replace_order(credentials, order_id, request, opts \\ []) do
+    with_injection(nil, fn -> do_replace_order(credentials, order_id, request, opts) end)
   end
 
-  defp do_replace_order(credentials, request, opts) do
+  defp do_replace_order(credentials, order_id, request, opts) do
     with {:ok, _hash} <- require_account(opts),
-         {:ok, _payload} <- Orders.build(request, opts),
-         :ok <- require_credentials(credentials: credentials) do
+         {:ok, payload} <- Orders.build(request, opts),
+         :ok <- require_credentials(credentials: credentials),
+         {:ok, old} <- find_body(order_id),
+         :ok <- require_working(old) do
       # A replacement is a NEW order on this venue, so the id differs from the one
-      # replaced. A fake returning the old id would hide that from a consumer's test.
-      do_get_order(credentials, "fake-order-2", opts)
+      # replaced. A fake returning the old id would hide that from a consumer's test. The
+      # old one is `REPLACED`, which the decode reads as no status at all, and no longer
+      # cancellable; the new one is the working order the request describes.
+      id = next_order_id()
+      remember_body(order_id, %{old | "status" => "REPLACED"})
+      remember_body(id, working_body(id, payload))
+      do_get_order(credentials, id, opts)
     end
   end
 
   @impl true
-  def cancel_order(credentials, _order_id, opts \\ []) do
-    with_injection(nil, fn -> do_cancel_order(credentials, opts) end)
+  def cancel_order(credentials, order_id, opts \\ []) do
+    with_injection(nil, fn -> do_cancel_order(credentials, order_id, opts) end)
   end
 
-  defp do_cancel_order(credentials, opts) do
+  defp do_cancel_order(credentials, order_id, opts) do
     with {:ok, _hash} <- require_account(opts),
-         :ok <- require_credentials(credentials: credentials) do
+         :ok <- require_credentials(credentials: credentials),
+         {:ok, body} <- find_body(order_id),
+         :ok <- require_working(body) do
+      remember_body(order_id, %{body | "status" => "CANCELED"})
       {:ok, :cancelled}
     end
   end
+
+  # Only a working order can be cancelled or replaced. The venue answers a 400 for one that
+  # has filled, been cancelled or been replaced (`Rest.cancel_order/4` carries it as a
+  # refusal); the fake used to confirm a cancel for any id at all.
+  defp require_working(%{"status" => "WORKING"}), do: :ok
+  defp require_working(_closed), do: {:refused, {:venue_error, 400}}
 
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
@@ -392,7 +463,7 @@ defmodule DpExchange.Schwab.Fake do
       # the venue's own shape — so the fake cannot drift from the real decode. It returned the
       # raw map, the same contract violation the real facade had, which is why the suite
       # (driving fakes) could not see either.
-      Orders.from_venue(fake_order_body(order_id))
+      with {:ok, body} <- find_body(order_id), do: Orders.from_venue(body)
     end
   end
 
@@ -411,14 +482,27 @@ defmodule DpExchange.Schwab.Fake do
          :ok <- require_credentials(credentials: credentials) do
       # One order, not `[]`: an empty list makes every check over its elements vacuous, which
       # is the "third axis" `dp_exchange_core`'s assertion-coverage document records.
-      Orders.list_from_venue([fake_order_body("fake-order-1")])
+      #
+      # Then what this process placed, in id order, narrowed by `opts[:status]` as the venue's
+      # own filter narrows. The canned order leads, so a read made before anything is placed
+      # still has an element to check.
+      placed = placed_bodies() |> Map.values() |> Enum.sort_by(& &1["orderId"])
+
+      [fake_order_body(@order_id) | placed]
+      |> Enum.filter(&status_wanted?(&1, Keyword.get(opts, :status)))
+      |> Orders.list_from_venue()
     end
   end
+
+  defp status_wanted?(_body, nil), do: true
+
+  defp status_wanted?(body, wanted),
+    do: String.upcase(to_string(wanted)) == body["status"]
 
   # A venue-shaped `Order` object — the OpenAPI schema's own field names.
   defp fake_order_body(order_id) do
     %{
-      "orderId" => order_id,
+      "orderId" => wire_order_id(order_id),
       "status" => "FILLED",
       "orderType" => "LIMIT",
       "duration" => "DAY",
@@ -430,6 +514,18 @@ defmodule DpExchange.Schwab.Fake do
         %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}}
       ]
     }
+  end
+
+  # The venue sends `orderId` as an int64 (`"type": "integer"` in
+  # `accounts-and-trading-production.openapi.json`), and `Orders.from_venue/1` turns it into
+  # the string `Types.Order` carries. A numeric id goes through the decoder as the integer
+  # the wire has, so the fake exercises the same path; an id that is not the canonical
+  # decimal form of an integer (`"007"`, a caller's own string) is left exactly as given.
+  defp wire_order_id(order_id) when is_binary(order_id) do
+    case Integer.parse(order_id) do
+      {number, ""} -> if Integer.to_string(number) == order_id, do: number, else: order_id
+      _not_numeric -> order_id
+    end
   end
 
   @impl true

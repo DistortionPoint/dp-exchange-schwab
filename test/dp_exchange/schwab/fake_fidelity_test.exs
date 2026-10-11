@@ -236,6 +236,87 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     end
   end
 
+  describe "issued ids are the venue's own format, and round-trip" do
+    test "get_accounts -> get_balances takes the hash the fake issued, the spec's own value" do
+      assert {:ok, [%{hash: hash}]} = Fake.get_accounts(@creds)
+      # The spec fixture's `hashValue`. The spec states no length, so none is asserted.
+      assert hash == "9ABCDEF0123456789ABCDEF01234567"
+      assert hash =~ ~r/\A[0-9A-F]+\z/
+
+      assert {:ok, [_balance]} = Fake.get_balances(@creds, account_hash: hash)
+    end
+
+    test "place -> get -> replace -> cancel -> list run on numeric order ids" do
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      opts = [account_hash: "H"]
+
+      # `orderId` is an int64 on the wire; `Orders.from_venue/1` returns its decimal string.
+      assert {:ok, placed} = Fake.place_order(@creds, request, opts)
+      assert placed.id =~ ~r/\A\d+\z/
+
+      assert {:ok, read} = Fake.get_order(@creds, placed.id, opts)
+      assert read.id == placed.id
+
+      assert {:ok, replaced} = Fake.replace_order(@creds, placed.id, request, opts)
+      assert replaced.id =~ ~r/\A\d+\z/
+      refute replaced.id == placed.id
+
+      # The replaced order is no longer working, so the venue refuses to cancel it.
+      assert {:refused, {:venue_error, 400}} = Fake.cancel_order(@creds, placed.id, opts)
+      assert {:ok, :cancelled} = Fake.cancel_order(@creds, replaced.id, opts)
+
+      assert {:ok, [_canned, first, second]} = Fake.get_orders(@creds, opts ++ @window)
+      assert first.id =~ ~r/\A\d+\z/
+      assert second.id == replaced.id
+    end
+  end
+
+  describe "an order the fake placed is the order it reads back and cancels" do
+    test "the symbol, instruction and working state come back, not a filled AAPL buy" do
+      request = %{symbol: "MSFT", side: :sell, quantity: 5}
+      opts = [account_hash: "H"]
+
+      assert {:ok, placed} = Fake.place_order(@creds, request, opts)
+      assert placed.symbol == "MSFT"
+      assert placed.side == :sell
+      assert placed.status == :open
+      assert Decimal.equal?(placed.quantity, Decimal.new(5))
+
+      assert {:ok, read} = Fake.get_order(@creds, placed.id, opts)
+      assert read.symbol == "MSFT"
+      assert read.side == :sell
+      assert read.status == :open
+
+      assert {:ok, [_canned, listed]} = Fake.get_orders(@creds, opts ++ @window)
+      assert listed.id == placed.id
+      assert listed.symbol == "MSFT"
+
+      working = opts ++ @window ++ [status: :working]
+      assert {:ok, [only_working]} = Fake.get_orders(@creds, working)
+      assert only_working.id == placed.id
+    end
+
+    test "cancel marks the order cancelled, and a second cancel is refused" do
+      opts = [account_hash: "H"]
+
+      assert {:ok, placed} =
+               Fake.place_order(@creds, %{symbol: "AAPL", side: :buy, quantity: 1}, opts)
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@creds, placed.id, opts)
+      assert {:ok, %{status: :cancelled}} = Fake.get_order(@creds, placed.id, opts)
+      assert {:refused, {:venue_error, 400}} = Fake.cancel_order(@creds, placed.id, opts)
+    end
+
+    test "an id the fake never issued is the venue's 404 on a read, a cancel and a replace" do
+      opts = [account_hash: "H"]
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+
+      assert {:refused, {:venue_error, 404}} = Fake.get_order(@creds, "42", opts)
+      assert {:refused, {:venue_error, 404}} = Fake.cancel_order(@creds, "42", opts)
+      assert {:refused, {:venue_error, 404}} = Fake.replace_order(@creds, "42", request, opts)
+    end
+  end
+
   describe "the real endpoints these tests lean on" do
     test "a single-symbol quote that is not an object is refused" do
       assert {:error, :unexpected_response_shape} =

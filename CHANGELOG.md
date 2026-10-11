@@ -31,6 +31,31 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The fake read back a filled AAPL buy for every order, whatever was placed.**
+  `place_order/3`, `replace_order/4` and `get_order/3` decoded one canned `FILLED` order, and
+  `cancel_order/3` confirmed any id. The fake now remembers what was placed (per process) as
+  the venue's own `Order` body, sent through JSON like the wire: the order reads back with
+  its symbol, instruction, size and price in `WORKING` (`:open`) with nothing filled;
+  `cancel_order/3` marks it `CANCELED`, `replace_order/4` marks it `REPLACED` and issues a
+  new working order, and `get_orders/2` lists what was placed after one canned filled order,
+  narrowed by `opts[:status]`. Cancelling or replacing an order that is no longer working is
+  `{:refused, {:venue_error, 400}}`, and an id the fake never issued is
+  `{:refused, {:venue_error, 404}}` on a read, a cancel and a replace, as `Rest.refusal/2`
+  delivers them. Placed ids count up from `1005439901`; `1005439821` is the canned order.
+
+- **The fake issued order ids and an account hash in a format the venue never produces.**
+  `place_order/3`, `replace_order/4` and `get_orders/2` answered `fake-order-1` and
+  `fake-order-2`, and `get_accounts/2` answered the hash `FAKEHASH`. The venue's `orderId`
+  is an int64 (`accounts-and-trading-production.openapi.json`), which `Orders.from_venue/1`
+  returns as a decimal string, and `accountNumbers` answers an opaque upper-case hex
+  `hashValue`. A consumer that parsed the id as a number, or validated the hash, passed
+  against the venue and failed against the fake. The ids are now numeric (a
+  replacement is a new order), the hash is
+  `9ABCDEF0123456789ABCDEF01234567`, and a numeric id reaches `Orders.from_venue/1` as the
+  integer the wire carries.
+
 ## [0.2.102] - 2026-10-11
 
 ### Fixed
