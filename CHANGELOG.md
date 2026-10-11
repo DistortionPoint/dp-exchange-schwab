@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.103] - 2026-10-11
+
 ### Fixed
 
 - **The fake read back a filled AAPL buy for every order, whatever was placed.**
