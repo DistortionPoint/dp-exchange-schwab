@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.111] - 2026-10-11
+
 ### Fixed
 
 - **`subscribe/2` and `subscribe_notices/1` stored any `:to` term, and a string, integer or
