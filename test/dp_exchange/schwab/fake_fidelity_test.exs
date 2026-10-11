@@ -37,6 +37,13 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
   @creds %{access_token: "at-1"}
   @window [from: ~U[2026-08-01 00:00:00Z], to: ~U[2026-09-01 00:00:00Z]]
 
+  # Around now, where an order the fake just placed was entered. The canned order (entered
+  # 2026-01-02) is outside it, and no window of at most a year holds both for ever.
+  defp now_window do
+    now = DateTime.utc_now()
+    [from: DateTime.add(now, -3600, :second), to: DateTime.add(now, 3600, :second)]
+  end
+
   defp responding(body), do: fn conn -> Req.Test.json(conn, body) end
 
   defp capturing(body, test_pid) do
@@ -265,7 +272,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert {:refused, {:venue_error, 400}} = Fake.cancel_order(@creds, placed.id, opts)
       assert {:ok, :cancelled} = Fake.cancel_order(@creds, replaced.id, opts)
 
-      assert {:ok, [_canned, first, second]} = Fake.get_orders(@creds, opts ++ @window)
+      assert {:ok, [first, second]} = Fake.get_orders(@creds, opts ++ now_window())
       assert first.id =~ ~r/\A\d+\z/
       assert second.id == replaced.id
     end
@@ -287,11 +294,11 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert read.side == :sell
       assert read.status == :open
 
-      assert {:ok, [_canned, listed]} = Fake.get_orders(@creds, opts ++ @window)
+      assert {:ok, [listed]} = Fake.get_orders(@creds, opts ++ now_window())
       assert listed.id == placed.id
       assert listed.symbol == "MSFT"
 
-      working = opts ++ @window ++ [status: :working]
+      working = opts ++ now_window() ++ [status: :working]
       assert {:ok, [only_working]} = Fake.get_orders(@creds, working)
       assert only_working.id == placed.id
     end
@@ -314,6 +321,71 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert {:refused, {:venue_error, 404}} = Fake.get_order(@creds, "42", opts)
       assert {:refused, {:venue_error, 404}} = Fake.cancel_order(@creds, "42", opts)
       assert {:refused, {:venue_error, 404}} = Fake.replace_order(@creds, "42", request, opts)
+    end
+
+    test "a replacement id reads back and cancels, as the round trip requires" do
+      opts = [account_hash: "H"]
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+
+      assert {:ok, placed} = Fake.place_order(@creds, request, opts)
+      assert {:ok, replaced} = Fake.replace_order(@creds, placed.id, request, opts)
+      assert {:ok, %{id: id}} = Fake.get_order(@creds, replaced.id, opts)
+      assert id == replaced.id
+      assert {:ok, :cancelled} = Fake.cancel_order(@creds, replaced.id, opts)
+    end
+  end
+
+  describe "get_orders/2 honours the entered-time window" do
+    @request %{symbol: "AAPL", side: :buy, quantity: 1}
+
+    test "the canned order is listed only when its entry date is inside the window" do
+      opts = [account_hash: "H"]
+
+      inside = [from: ~U[2026-01-02 00:00:00Z], to: ~U[2026-01-03 00:00:00Z]]
+      assert {:ok, [%{id: "1005439821"}]} = Fake.get_orders(@creds, opts ++ inside)
+
+      before = [from: ~U[2026-02-01 00:00:00Z], to: ~U[2026-03-01 00:00:00Z]]
+      assert {:ok, []} = Fake.get_orders(@creds, opts ++ before)
+    end
+
+    test "a placed order is listed in a window around now and not in one in the past" do
+      opts = [account_hash: "H"]
+      assert {:ok, placed} = Fake.place_order(@creds, @request, opts)
+
+      now = DateTime.utc_now()
+      around = [from: DateTime.add(now, -3600, :second), to: DateTime.add(now, 3600, :second)]
+      assert {:ok, [listed]} = Fake.get_orders(@creds, opts ++ around)
+      assert listed.id == placed.id
+
+      past = [from: ~U[2026-02-01 00:00:00Z], to: ~U[2026-03-01 00:00:00Z]]
+      assert {:ok, []} = Fake.get_orders(@creds, opts ++ past)
+    end
+
+    test "the venue's string form is parsed" do
+      opts = [account_hash: "H"]
+      text = [from: "2026-01-02T00:00:00.000Z", to: "2026-01-03T00:00:00.000Z"]
+      assert {:ok, [%{id: "1005439821"}]} = Fake.get_orders(@creds, opts ++ text)
+    end
+
+    test "the fake refuses exactly what Rest refuses: unreadable, reversed and over a year" do
+      opts = [account_hash: "H"]
+
+      windows = [
+        {[from: "yesterday", to: "today"], {:order_window_invalid, :schwab}},
+        {[from: 1, to: 2], {:order_window_invalid, :schwab}},
+        {[from: ~U[2026-03-01 00:00:00Z], to: ~U[2026-02-01 00:00:00Z]],
+         {:order_window_reversed, :schwab}},
+        {[from: ~U[2025-01-01 00:00:00Z], to: ~U[2026-01-02 00:00:00Z]],
+         {:order_window_too_long, :schwab}}
+      ]
+
+      for {window, reason} <- windows do
+        assert Fake.get_orders(@creds, opts ++ window) == {:error, reason}
+        assert Rest.check_order_window(window) == {:error, reason}
+      end
+
+      exactly_a_year = [from: ~U[2025-01-01 00:00:00Z], to: ~U[2026-01-01 00:00:00Z]]
+      assert Rest.check_order_window(exactly_a_year) == :ok
     end
   end
 

@@ -820,6 +820,26 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_orders(@creds, "ABCDEF", from: ~U[2026-08-01 00:00:00Z], plug: exploding)
     end
 
+    test "a reversed, over-long or unreadable window is refused before any request" do
+      exploding = fn _conn -> raise "a request with an impossible window was sent" end
+
+      cases = [
+        {[from: ~U[2026-09-01 00:00:00Z], to: ~U[2026-08-01 00:00:00Z]],
+         {:order_window_reversed, :schwab}},
+        {[from: ~U[2024-08-01 00:00:00Z], to: ~U[2026-08-01 00:00:00Z]],
+         {:order_window_too_long, :schwab}},
+        {[from: "last week", to: "today"], {:order_window_invalid, :schwab}},
+        {[from: 1, to: 2], {:order_window_invalid, :schwab}}
+      ]
+
+      for {window, reason} <- cases do
+        assert {:error, ^reason} =
+                 Rest.get_orders(@creds, "ABCDEF", window ++ [plug: exploding])
+
+        assert {:error, ^reason} = Rest.get_all_orders(@creds, window ++ [plug: exploding])
+      end
+    end
+
     test "the window is sent in the venue's documented format" do
       capture = fn conn ->
         send(self(), {:request, conn.request_path, conn.query_string})

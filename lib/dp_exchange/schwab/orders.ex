@@ -143,7 +143,8 @@ defmodule DpExchange.Schwab.Orders do
          {:ok, session} <- fetch_session(request, opts),
          {:ok, asset} <- fetch_asset_type(request, native),
          :ok <- check_finite(request),
-         :ok <- check_prices(order_type, request) do
+         :ok <- check_prices(order_type, request),
+         :ok <- check_links(request) do
       {:ok,
        %{
          "orderType" => order_type,
@@ -242,18 +243,51 @@ defmodule DpExchange.Schwab.Orders do
   # A NaN or Infinity price went out as the string `"NaN"` / `"Infinity"`. Every field the
   # generic `maybe_put/3` stringifies is checked here, so a non-finite value is refused by
   # name instead of being sent to the venue as a price.
+  #
+  # **And a value that is not a number at all.** `maybe_put/3` ends in `to_string/1`, so
+  # `price: :market` went out as `"market"`, `price: "abc"` as `"abc"`, and `price: %{}`
+  # raised `Protocol.UndefinedError` in the caller's process. The schema types all three as
+  # `number` (`price`, `stopPrice`, `stopPriceOffset`), so anything that is not an integer,
+  # a float, a finite `Decimal` or a string that reads as a finite number is refused by name.
   defp check_finite(request) do
     Enum.reduce_while([:price, :stop_price, :stop_price_offset], :ok, fn key, :ok ->
-      case Map.get(request, key) do
-        %Decimal{} = value ->
-          if Decimal.nan?(value) or Decimal.inf?(value),
-            do: {:halt, {:error, {:invalid_order_field, key, value}}},
-            else: {:cont, :ok}
+      value = Map.get(request, key)
 
-        _other ->
-          {:cont, :ok}
-      end
+      if finite_number?(value),
+        do: {:cont, :ok},
+        else: {:halt, {:error, {:invalid_order_field, key, value}}}
     end)
+  end
+
+  defp finite_number?(nil), do: true
+  defp finite_number?(value) when is_number(value), do: true
+  defp finite_number?(%Decimal{} = value), do: not (Decimal.nan?(value) or Decimal.inf?(value))
+
+  defp finite_number?(value) when is_binary(value) do
+    case Decimal.parse(String.trim(value)) do
+      {parsed, ""} -> finite_number?(parsed)
+      _unreadable -> false
+    end
+  end
+
+  defp finite_number?(_other), do: false
+
+  # `stopPriceLinkBasis` and `stopPriceLinkType` are enums (`accounts-and-trading-production
+  # .openapi.json`). Sent as given, so a lower-case or atom value reached the venue as
+  # something that is not in the enum; refused by name instead, before a write is spent.
+  @link_bases ~w(MANUAL BASE TRIGGER LAST BID ASK ASK_BID MARK AVERAGE)
+  @link_types ~w(VALUE PERCENT TICK)
+
+  defp check_links(request) do
+    [stop_price_link_basis: @link_bases, stop_price_link_type: @link_types]
+    |> Enum.find(fn {key, allowed} ->
+      value = Map.get(request, key)
+      not is_nil(value) and value not in allowed
+    end)
+    |> case do
+      nil -> :ok
+      {key, _allowed} -> {:error, {:invalid_order_field, key, Map.get(request, key)}}
+    end
   end
 
   # **`session` is the venue's enum, not whatever the caller typed.** The venue accepts

@@ -504,7 +504,11 @@ convenience and treated the same as the bare string.
 `get_transactions/2` needs `:from`/`:to` — the venue requires `fromEnteredTime` and
 `toEnteredTime` on both its "every account" and its per-account orders read, and this
 package refuses locally with `{:error, {:from_and_to_required, :schwab}}` rather than
-picking one.
+picking one. A window whose `to` is before its `from` is
+`{:error, {:order_window_reversed, :schwab}}`, one longer than 365 days (the spec's "maximum
+date range is 1 year") is `{:error, {:order_window_too_long, :schwab}}`, and an end that is
+neither a `DateTime` nor an ISO-8601 string is `{:error, {:order_window_invalid, :schwab}}`;
+none of these is sent, because how the venue refuses them is not documented.
 
 ## 11. What this package does not implement
 
@@ -597,8 +601,11 @@ instruction, size and price, `WORKING` (so `:open`), nothing filled. `get_order/
 `CANCELED`, and `replace_order/4` marks it `REPLACED` and issues a new working order. A
 cancel or replace of an order that is no longer working is `{:refused, {:venue_error, 400}}`,
 and an id the fake never issued is `{:refused, {:venue_error, 404}}` on every one of the
-three. `get_orders/2` leads with one canned filled AAPL order so a check over its elements
-is never vacuous; `1005439821` is that order's id.
+three. `get_orders/2` leads with one canned filled AAPL order (entered 2026-01-02) so a
+check over its elements is not vacuous; `1005439821` is that order's id. The fake honours
+the `from`/`to` window like the venue: only orders entered inside it are listed, so a
+window that excludes 2026-01-02 omits the canned order. A placed order is entered at the
+moment it is placed.
 
 `DpExchange.Schwab.Fake` is wired to `DpExchange.Core.FakeInjection`, the same seam the
 other four venue packages expose. Until now this package was the only one without it.

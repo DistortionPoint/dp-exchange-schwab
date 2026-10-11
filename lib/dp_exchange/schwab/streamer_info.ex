@@ -61,7 +61,13 @@ defmodule DpExchange.Schwab.StreamerInfo do
   def from_user_preference([_first, _second | _rest]),
     do: {:error, :ambiguous_user_preference}
 
-  def from_user_preference(%{"streamerInfo" => [info | _rest]}), do: build(info)
+  # `streamerInfo` is an array in the schema (`UserPreference.streamerInfo`). One entry is
+  # read; with more than one there is no documented way to say which is this session's, and
+  # taking the first would be a guess at a socket URL and correlation id.
+  def from_user_preference(%{"streamerInfo" => [_first, _second | _rest]}),
+    do: {:error, :ambiguous_streamer_info}
+
+  def from_user_preference(%{"streamerInfo" => [info]}), do: build(info)
   def from_user_preference(%{"streamerInfo" => %{} = info}), do: build(info)
   def from_user_preference(_body), do: {:error, :no_streamer_info}
 
@@ -74,11 +80,15 @@ defmodule DpExchange.Schwab.StreamerInfo do
       function_id: info["schwabClientFunctionId"]
     ]
 
-    case Enum.filter(fields, fn {_key, value} -> is_nil(value) or value == "" end) do
+    # Missing means absent, empty, blank or not a string: a number or map in one of these is
+    # not an identifier the LOGIN could carry, and `struct!/2` would have stored it as one.
+    case Enum.reject(fields, fn {_key, value} -> present?(value) end) do
       [] -> {:ok, struct!(__MODULE__, fields)}
       missing -> {:error, {:incomplete_streamer_info, Enum.map(missing, &elem(&1, 0))}}
     end
   end
 
   defp build(_info), do: {:error, :no_streamer_info}
+
+  defp present?(value), do: is_binary(value) and String.trim(value) != ""
 end

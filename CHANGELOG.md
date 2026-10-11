@@ -31,6 +31,61 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The fake's `get_orders/2` ignored the `from`/`to` window.** The venue requires
+  `fromEnteredTime` and `toEnteredTime` on `/accounts/{accountNumber}/orders`
+  (`accounts-and-trading-production.openapi.json`) and returns only orders entered inside
+  them; the fake listed every order whatever the window. It now keeps an order only when
+  its `enteredTime` falls inside the window (ends included). The canned order was entered
+  `2026-01-02`, so a window that does not contain that date no longer lists it. A placed
+  order is entered at the moment of placement (it was the fixed `as_of` date), so a window
+  around now lists it.
+- **An impossible order window is refused locally.** `Rest.get_orders/3`, `get_all_orders/2`
+  and the fake (through `Rest.check_order_window/1`) now refuse, before any request, a window
+  whose `to` is before its `from` (`{:error, {:order_window_reversed, :schwab}}`), one longer
+  than a year (`{:error, {:order_window_too_long, :schwab}}`; the spec says "Maximum date
+  range is 1 year" for the account endpoint, read here as 365 days, the stricter reading)
+  and ends that are neither a `DateTime` nor a parseable ISO-8601 string
+  (`{:error, {:order_window_invalid, :schwab}}`). How the venue itself refuses these is not
+  documented and not measured, so none is sent. The all-accounts `/orders` endpoint documents
+  "within 60 days from today's date" for `fromEnteredTime`; that is relative to the call and
+  is not checked here.
+- Order ids the fake's `replace_order/4` issues are accepted by its own `get_order/3` and
+  `cancel_order/3` (covered by a test). `place_orders/3` and `close_position/3` are
+  `:unsupported` on this venue, so they mint no ids.
+- **A price, stop price or trailing offset that was not a number was sent as a string.**
+  `Orders.build/2` ended in `to_string/1`, so `price: :market` went out as `"market"`,
+  `price: "abc"` as `"abc"`, and `price: %{}` raised `Protocol.UndefinedError` in the
+  caller's process. Anything that is not an integer, a float, a finite `Decimal` or a string
+  reading as a finite number is now `{:error, {:invalid_order_field, key, value}}`, before
+  a throttled write is spent.
+- **`stop_price_link_basis` and `stop_price_link_type` were sent unchecked.** Both are enums
+  in the spec (`MANUAL BASE TRIGGER LAST BID ASK ASK_BID MARK AVERAGE`; `VALUE PERCENT TICK`).
+  A lower-case string or an atom reached the venue as something outside the enum. Any other
+  value is now `{:error, {:invalid_order_field, key, value}}`.
+- **`StreamerProtocol.subscribe/5` built requests the venue does not document.** `ADD`,
+  `UNSUBS` and `VIEW` with no keys sent `"keys": ""`, and a key that was blank, not a string
+  or contained a comma (read by the venue as two symbols) was joined into the request. Both
+  are now `{:error, {:invalid_keys, keys}}`. `SUBS` with no keys is still accepted, because
+  `Socket` turns it into an `UNSUBS` of what it holds, or nothing.
+- **`StreamerInfo.from_user_preference/1` took the first of several `streamerInfo` entries**
+  and accepted a non-string identifier. The schema makes `streamerInfo` an array; with more
+  than one entry nothing says which is this session's, so it is now
+  `{:error, :ambiguous_streamer_info}`, and a number, map or blank in the socket URL or any
+  of the four `LOGIN` identifiers is `{:incomplete_streamer_info, fields}`.
+
+### Reviewed, no change needed
+
+`order_limit.ex` (a plain `Agent`; `status/1` answers `{:error, :not_started}` when nothing
+runs under the name), `streamer_fields.ex` (every field number re-read against the
+`market-data-production.txt` tables for LEVELONE_EQUITIES, OPTIONS, FUTURES,
+FUTURES_OPTIONS, FOREX, the book services, CHART_EQUITY, CHART_FUTURES, SCREENER and
+ACCT_ACTIVITY: all match), `streamer_decode.ex` and `auth.ex` (stateless; the one-time
+refresh token is the host's to persist, as documented). The `LEVELONE_EQUITIES` sample frame
+in the vendor prose shows a number at field 34 where the field table says "Quote Time in
+Long"; the code follows the table and reads a non-integer there as no venue time.
+
 ## [0.2.103] - 2026-10-11
 
 ### Fixed

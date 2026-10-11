@@ -796,12 +796,22 @@ defmodule DpExchange.SchwabTest do
       assert {:error, {:from_and_to_required, :schwab}} =
                Fake.get_orders(@creds, account_hash: "H")
 
-      # The canned filled order, then the one placed above.
-      assert {:ok, [%DpExchange.Core.Types.Order{id: "1005439821"}, listed]} =
+      # The canned filled order, entered 2026-01-02.
+      assert {:ok, [%DpExchange.Core.Types.Order{id: "1005439821"}]} =
                Fake.get_orders(@creds,
                  account_hash: "H",
-                 from: ~U[2026-08-01 00:00:00Z],
-                 to: ~U[2026-09-01 00:00:00Z]
+                 from: ~U[2026-01-01 00:00:00Z],
+                 to: ~U[2026-02-01 00:00:00Z]
+               )
+
+      # The one placed above, entered now.
+      now = DateTime.utc_now()
+
+      assert {:ok, [listed]} =
+               Fake.get_orders(@creds,
+                 account_hash: "H",
+                 from: DateTime.add(now, -3600, :second),
+                 to: DateTime.add(now, 3600, :second)
                )
 
       assert listed.id == placed.id

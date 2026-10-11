@@ -354,7 +354,8 @@ defmodule DpExchange.Schwab.Fake do
       "status" => "WORKING",
       "quantity" => leg["quantity"],
       "filledQuantity" => 0,
-      "enteredTime" => Calendar.strftime(@as_of, "%Y-%m-%dT%H:%M:%S+0000")
+      # Entered when it was placed, so a window around "now" lists it, as the venue's would.
+      "enteredTime" => Calendar.strftime(DateTime.utc_now(), "%Y-%m-%dT%H:%M:%S+0000")
     }
 
     entered |> Map.merge(payload) |> Jason.encode!() |> Jason.decode!()
@@ -488,9 +489,40 @@ defmodule DpExchange.Schwab.Fake do
       # still has an element to check.
       placed = placed_bodies() |> Map.values() |> Enum.sort_by(& &1["orderId"])
 
-      [fake_order_body(@order_id) | placed]
-      |> Enum.filter(&status_wanted?(&1, Keyword.get(opts, :status)))
-      |> Orders.list_from_venue()
+      # The window is the venue's own: an order is returned only when it was entered inside
+      # `fromEnteredTime..toEnteredTime`, ends included. The canned order was entered on
+      # 2026-01-02, so a window that does not contain that date does not list it.
+      with {:ok, from, to} <- window_bounds(opts) do
+        [fake_order_body(@order_id) | placed]
+        |> Enum.filter(&status_wanted?(&1, Keyword.get(opts, :status)))
+        |> Enum.filter(&entered_within?(&1, from, to))
+        |> Orders.list_from_venue()
+      end
+    end
+  end
+
+  # The window as `DateTime`s. `Rest.check_order_window/1` has already run, so each end is a
+  # `DateTime` or the venue's own string form (`yyyy-MM-dd'T'HH:mm:ss.SSSZ`), in range.
+  defp window_bounds(opts) do
+    {:ok, window_end(Keyword.fetch!(opts, :from)), window_end(Keyword.fetch!(opts, :to))}
+  end
+
+  defp window_end(%DateTime{} = at), do: at
+
+  defp window_end(text) when is_binary(text) do
+    {:ok, at, _offset} = DateTime.from_iso8601(text)
+    at
+  end
+
+  defp entered_within?(body, from, to) do
+    # Read by the facade's own decode (`created_at`), which also copes with the venue's
+    # colon-less `+0000` offset, rather than a second parser here.
+    case Orders.from_venue(body) do
+      {:ok, %{created_at: %DateTime{} = entered}} ->
+        DateTime.compare(entered, from) != :lt and DateTime.compare(entered, to) != :gt
+
+      _unreadable ->
+        false
     end
   end
 

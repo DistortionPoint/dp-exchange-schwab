@@ -13,6 +13,54 @@ defmodule DpExchange.Schwab.OrdersRefusalsTest do
 
   @buy %{symbol: "AAPL", side: :buy, quantity: 15}
 
+  describe "a price that is not a number is refused, not stringified" do
+    test "atoms, junk strings, maps and non-finite strings are named" do
+      for value <- [:market, "abc", %{}, "NaN", "Inf"] do
+        request = Map.merge(@buy, %{order_type: :limit, price: value})
+
+        assert Orders.build(request) == {:error, {:invalid_order_field, :price, value}}
+      end
+
+      stop = Map.merge(@buy, %{order_type: :stop, stop_price: "x"})
+      assert Orders.build(stop) == {:error, {:invalid_order_field, :stop_price, "x"}}
+
+      trailing = Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: :ten})
+      assert Orders.build(trailing) == {:error, {:invalid_order_field, :stop_price_offset, :ten}}
+    end
+
+    test "a numeric string is still sent as given" do
+      request = Map.merge(@buy, %{order_type: :limit, price: "6.45"})
+      assert {:ok, %{"price" => "6.45"}} = Orders.build(request)
+    end
+  end
+
+  describe "the trailing link fields are the venue's enums" do
+    @trailing Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: 10})
+
+    test "a value outside the enum is refused by name" do
+      for {key, value} <- [
+            stop_price_link_basis: "bid",
+            stop_price_link_basis: :bid,
+            stop_price_link_basis: "NEAREST",
+            stop_price_link_type: "PIPS"
+          ] do
+        request = Map.put(@trailing, key, value)
+        assert Orders.build(request) == {:error, {:invalid_order_field, key, value}}
+      end
+    end
+
+    test "every documented value is accepted" do
+      for basis <- ~w(MANUAL BASE TRIGGER LAST BID ASK ASK_BID MARK AVERAGE),
+          type <- ~w(VALUE PERCENT TICK) do
+        request =
+          Map.merge(@trailing, %{stop_price_link_basis: basis, stop_price_link_type: type})
+
+        assert {:ok, %{"stopPriceLinkBasis" => ^basis, "stopPriceLinkType" => ^type}} =
+                 Orders.build(request)
+      end
+    end
+  end
+
   describe "a field the order type never reads is refused" do
     test "an explicit market order carrying a price is refused, not sent as a market order" do
       request = Map.merge(@buy, %{order_type: :market, price: Decimal.new("150")})

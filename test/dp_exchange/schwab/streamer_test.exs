@@ -92,6 +92,32 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerInfo.from_user_preference(body)
     end
 
+    test "more than one streamerInfo entry is ambiguous, not resolved to the first" do
+      info = %{
+        "streamerSocketUrl" => "wss://x",
+        "schwabClientCustomerId" => "c",
+        "schwabClientCorrelId" => "r",
+        "schwabClientChannel" => "IO",
+        "schwabClientFunctionId" => "F"
+      }
+
+      assert {:error, :ambiguous_streamer_info} =
+               StreamerInfo.from_user_preference(%{"streamerInfo" => [info, info]})
+    end
+
+    test "a non-string or blank identifier counts as missing" do
+      info = %{
+        "streamerSocketUrl" => "wss://x",
+        "schwabClientCustomerId" => 12_345,
+        "schwabClientCorrelId" => "  ",
+        "schwabClientChannel" => "IO",
+        "schwabClientFunctionId" => "F"
+      }
+
+      assert {:error, {:incomplete_streamer_info, [:customer_id, :correl_id]}} =
+               StreamerInfo.from_user_preference(%{"streamerInfo" => [info]})
+    end
+
     test "a response with no streamerInfo is an error" do
       assert {:error, :no_streamer_info} = StreamerInfo.from_user_preference(%{})
     end
@@ -212,6 +238,23 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL))
 
       refute Map.has_key?(without["parameters"], "fields")
+    end
+
+    test "ADD, UNSUBS and VIEW of no keys are refused; SUBS of none is passed to Socket" do
+      for command <- ~w(ADD UNSUBS VIEW) do
+        assert {:error, {:invalid_keys, []}} =
+                 StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", command, [])
+      end
+
+      # `Socket` turns this into an `UNSUBS` of what it holds, or nothing; it is never sent.
+      assert {:ok, _request} = StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "SUBS", [])
+    end
+
+    test "a blank, comma-bearing or non-string key is refused, not sent as other symbols" do
+      for keys <- [[""], [" "], ["AAPL,MSFT"], [:aapl], ["AAPL", nil]] do
+        assert {:error, {:invalid_keys, ^keys}} =
+                 StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "SUBS", keys)
+      end
     end
 
     test "the envelope is always the array form" do

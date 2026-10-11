@@ -95,13 +95,32 @@ defmodule DpExchange.Schwab.StreamerProtocol do
           {:ok, map()} | {:error, term()}
   def subscribe(%StreamerInfo{} = info, service, command, keys, opts \\ []) do
     with :ok <- known_service(service),
-         :ok <- subscription_command(command) do
+         :ok <- subscription_command(command),
+         :ok <- check_keys(command, keys) do
       parameters =
         %{"keys" => Enum.join(keys, ",")}
         |> put_fields(Keyword.get(opts, :fields))
 
       {:ok, request(info, service, command, Config.opt(opts, :request_id, 1), parameters)}
     end
+  end
+
+  # `keys` is a required string of comma-separated symbols (`market-data-production.txt`,
+  # every service's request table). An empty list would send `"keys": ""`, a request the
+  # vendor does not document, and `UNSUBS`/`ADD`/`VIEW` of nothing is no request at all.
+  # **`SUBS` with no keys is allowed through** because `Socket` reads it as "nothing wanted
+  # for this service any more" and turns it into an `UNSUBS` of what the session holds (or
+  # nothing) rather than sending it. A key that is blank or contains a comma would be
+  # read by the venue as a different set of symbols than the caller named, so it is refused.
+  defp check_keys("SUBS", []), do: :ok
+  defp check_keys(_command, []), do: {:error, {:invalid_keys, []}}
+
+  defp check_keys(_command, keys) when is_list(keys) do
+    if Enum.all?(keys, &valid_key?/1), do: :ok, else: {:error, {:invalid_keys, keys}}
+  end
+
+  defp valid_key?(key) do
+    is_binary(key) and String.trim(key) != "" and not String.contains?(key, ",")
   end
 
   defp put_fields(parameters, nil), do: parameters

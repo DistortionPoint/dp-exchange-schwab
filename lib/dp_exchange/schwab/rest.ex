@@ -1813,8 +1813,46 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # Both ends, then a window that can mean something. The spec documents a maximum range of
+  # one year for `GET /accounts/{accountNumber}/orders` ("Maximum date range is 1 year"),
+  # and an end before the start asks for nothing. How the venue refuses either is not
+  # documented, so neither is sent: refused here, before any request. The year is taken as
+  # 365 days, the stricter reading (unmeasured whether the venue counts a leap year as 366).
+  # Ends are `DateTime`s or the venue's own ISO-8601 string; anything unreadable cannot be
+  # range-checked and is refused rather than passed on unread.
+  @max_order_window_days 365
+
   defp order_window(opts) do
-    both_ends(Keyword.get(opts, :from), Keyword.get(opts, :to))
+    from = Keyword.get(opts, :from)
+    to = Keyword.get(opts, :to)
+
+    with {:ok, from_text, to_text} <- both_ends(from, to),
+         {:ok, from_at} <- window_instant(from),
+         {:ok, to_at} <- window_instant(to),
+         :ok <- check_window_range(from_at, to_at) do
+      {:ok, from_text, to_text}
+    end
+  end
+
+  defp window_instant(%DateTime{} = at), do: {:ok, at}
+
+  defp window_instant(text) when is_binary(text) do
+    case DateTime.from_iso8601(text) do
+      {:ok, at, _offset} -> {:ok, at}
+      {:error, _reason} -> {:error, {:order_window_invalid, :schwab}}
+    end
+  end
+
+  defp window_instant(_other), do: {:error, {:order_window_invalid, :schwab}}
+
+  defp check_window_range(from, to) do
+    seconds = DateTime.diff(to, from, :second)
+
+    cond do
+      seconds < 0 -> {:error, {:order_window_reversed, :schwab}}
+      seconds > @max_order_window_days * 86_400 -> {:error, {:order_window_too_long, :schwab}}
+      true -> :ok
+    end
   end
 
   # A list endpoint answers a list. Found 2026-10-10 by reading the path: `List.wrap/1` on

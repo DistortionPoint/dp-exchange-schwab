@@ -31,5 +31,18 @@ defmodule DpExchange.SchwabContractTest do
       {:get_orders, 2} => [account_hash: "contract-account"],
       {:place_order, 3} => [account_hash: "contract-account"],
       {:get_order, 3} => [account_hash: "contract-account"]
+    },
+    # A replace on this venue is a whole new order (`Fake.replace_order/4` builds it with
+    # `Orders.build/2`), so the suite's generic price-only edit is refused as missing its
+    # symbol. The replacement is the placed order with a new price.
+    order_args: %{
+      order_changes: %{
+        symbol: "AAPL",
+        side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
+        quantity: Decimal.new("1"),
+        price: Decimal.new("2")
+      }
     }
 end
