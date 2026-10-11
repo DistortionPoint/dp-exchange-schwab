@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.108] - 2026-10-11
+
 ### Fixed
 
 - **Error text quotes a venue body bounded.** Four unexpected-status branches in `Rest` and
