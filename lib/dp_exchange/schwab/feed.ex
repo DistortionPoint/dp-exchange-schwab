@@ -585,6 +585,10 @@ defmodule DpExchange.Schwab.Feed do
       # `start_poller/1`: a closure over `state.credentials` froze the token the poller
       # started with, and `update_credentials/2` never reached it.
       credentials_cell: new_credentials_cell(credentials),
+      # Bumped by every `update_credentials/2`. A bootstrap records the value it started
+      # under, so one that FAILS after the credentials changed under it is retried at once
+      # instead of being judged against a credential it never used.
+      credentials_generation: 0,
       # `:credentials` stripped rather than carried twice — see the moduledoc's "Why
       # `Feed` no longer stores the raw `opts` it was started with". Nothing below reads
       # `:credentials` back out of `state.opts`; only `state.credentials` is ever signed
@@ -634,6 +638,10 @@ defmodule DpExchange.Schwab.Feed do
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),
+      # The tag of the socket this feed built itself; `nil` for an injected one, whose
+      # messages arrive untagged. Messages from a replaced socket carry its old tag and are
+      # dropped — see the `:from_socket` clause of `handle_info/2`.
+      socket_tag: nil,
       poller: nil,
       # The current poller's delivery tag — see `start_poller/1`.
       poll_tag: nil,
@@ -791,7 +799,13 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call({:update_credentials, credentials}, _from, state) do
     push_access_token(state, Map.get(credentials, :access_token))
-    state = %{state | credentials: Credentials.wrap(credentials)}
+
+    state = %{
+      state
+      | credentials: Credentials.wrap(credentials),
+        credentials_generation: state.credentials_generation + 1
+    }
+
     true = :ets.insert(state.credentials_cell, {:credentials, state.credentials})
     {:reply, :ok, maybe_upgrade(state, :credentials_changed)}
   end
@@ -909,6 +923,20 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   @impl true
+  # A frame or notice from the socket currently serving the route is handled as if it had
+  # arrived bare. One from a socket since replaced (it crashed, or the route was rebuilt) was
+  # still in the mailbox when its successor took over, and used to be counted against the new
+  # session: a late `:link_down` wiped the new socket's coverage, and a late frame reported a
+  # symbol `:stream` that the new session had not delivered.
+  def handle_info(
+        {:dp_exchange, :schwab, {:from_socket, tag, payload}},
+        %{socket_tag: tag} = state
+      ),
+      do: handle_info({:dp_exchange, :schwab, payload}, state)
+
+  def handle_info({:dp_exchange, :schwab, {:from_socket, _stale_tag, _payload}}, state),
+    do: {:noreply, state}
+
   def handle_info({:dp_exchange, :schwab, %Notice{kind: :link_down} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
     {:noreply, %{state | delivering: %{}, kinds: %{}}}
@@ -1015,12 +1043,15 @@ defmodule DpExchange.Schwab.Feed do
   # a superseded bootstrap cannot settle the current one.
   def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, upgrade?: true}} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, complete_upgrade(%{state | route_bootstrap: nil}, result)}
+    bootstrap = state.route_bootstrap
+    state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
   def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, waiting: waiting}} = state) do
     Process.demonitor(ref, [:flush])
 
+    bootstrap = state.route_bootstrap
     state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
     applied = apply_symbols(state)
 
@@ -1028,7 +1059,7 @@ defmodule DpExchange.Schwab.Feed do
     # that has already timed out is a no-op, so no bookkeeping is needed for that case.
     Enum.each(waiting, &GenServer.reply(&1, applied))
 
-    {:noreply, state}
+    {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -1062,16 +1093,24 @@ defmodule DpExchange.Schwab.Feed do
   # tail — clear the bootstrap, complete it, apply the symbol set, answer everyone parked on
   # it — because a bootstrap that failed by dying is not a different KIND of failure from one
   # that failed by answering `{:error, _}`, and giving it its own path is how the two drift.
-  defp settle_failed_bootstrap(%{route_bootstrap: %{upgrade?: true}} = state, result),
-    do: {:noreply, complete_upgrade(%{state | route_bootstrap: nil}, result)}
+  defp settle_failed_bootstrap(
+         %{route_bootstrap: %{upgrade?: true} = bootstrap} = state,
+         result
+       ) do
+    state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    {:noreply, retry_if_credentials_changed(state, bootstrap)}
+  end
 
-  defp settle_failed_bootstrap(%{route_bootstrap: %{waiting: waiting}} = state, result) do
+  defp settle_failed_bootstrap(
+         %{route_bootstrap: %{waiting: waiting} = bootstrap} = state,
+         result
+       ) do
     state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
     applied = apply_symbols(state)
 
     Enum.each(waiting, &GenServer.reply(&1, applied))
 
-    {:noreply, state}
+    {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
   # --- routing ------------------------------------------------------------
@@ -1145,8 +1184,28 @@ defmodule DpExchange.Schwab.Feed do
     )
 
     arm_bootstrap_reply(state, task.ref, waiting)
-    %{state | route_bootstrap: %{ref: task.ref, pid: task.pid, waiting: waiting}}
+
+    %{
+      state
+      | route_bootstrap: %{
+          ref: task.ref,
+          pid: task.pid,
+          waiting: waiting,
+          generation: state.credentials_generation
+        }
+    }
   end
+
+  # A bootstrap that started under older credentials and settled on the poll route would
+  # otherwise be judged by `maybe_upgrade/2` against a refusal of a credential that has since
+  # been replaced: `update_credentials/2` found a bootstrap in flight and retried nothing, and
+  # the tick skips a REFUSED credential. The feed then polled for good although the new token
+  # was fine. Retried once, here, when the generations differ.
+  defp retry_if_credentials_changed(state, %{generation: generation})
+       when generation != state.credentials_generation,
+       do: maybe_upgrade(state, :credentials_changed)
+
+  defp retry_if_credentials_changed(state, _bootstrap), do: state
 
   # Armed once per caller that joins, so the last to arrive is covered too. Nothing to arm
   # for an upgrade, which nobody waits on.
@@ -1171,7 +1230,7 @@ defmodule DpExchange.Schwab.Feed do
 
   defp complete_route_bootstrap(state, {:ok, body}) do
     case build_socket(state, body) do
-      {:ok, socket} -> %{state | socket: socket, route: :stream}
+      {:ok, socket, tag} -> %{state | socket: socket, socket_tag: tag, route: :stream}
       other -> fall_back_to_poll(state, failure_reason(other))
     end
   end
@@ -1182,17 +1241,25 @@ defmodule DpExchange.Schwab.Feed do
   defp build_socket(state, body) do
     with {:ok, info} <- StreamerInfo.from_user_preference(body),
          {:ok, token} <- access_token(state.credentials) do
-      Socket.start_link(
-        Keyword.merge(
-          # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
-          # chooses deliberate defaults rather than inheriting websockex's, which do not
-          # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
-          Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
-          streamer_info: info,
-          access_token: token,
-          subscriber: self()
+      # Tagged, so frames and notices still queued from a socket that has since been replaced
+      # are dropped rather than counted against its successor. See `socket_tag` in state.
+      tag = make_ref()
+
+      result =
+        Socket.start_link(
+          Keyword.merge(
+            # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
+            # chooses deliberate defaults rather than inheriting websockex's, which do not
+            # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
+            Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
+            streamer_info: info,
+            access_token: token,
+            subscriber: self(),
+            tag: tag
+          )
         )
-      )
+
+      with {:ok, socket} <- result, do: {:ok, socket, tag}
     end
   end
 
@@ -1226,12 +1293,13 @@ defmodule DpExchange.Schwab.Feed do
   # re-issues `wanted` on the new socket, where it is held until the LOGIN succeeds.
   defp complete_upgrade(state, {:ok, body}) do
     case build_socket(state, body) do
-      {:ok, socket} ->
+      {:ok, socket, tag} ->
         poller = state.poller
 
         state = %{
           state
           | socket: socket,
+            socket_tag: tag,
             poller: nil,
             route: :stream,
             last_error: nil,
@@ -1292,7 +1360,15 @@ defmodule DpExchange.Schwab.Feed do
   # `state.delivering`/`state.kinds` reset because this feed has exactly one active
   # route at a time: whichever one crashed was the only thing delivering.
   defp isolate_crashed_route(state, reason) do
-    state = %{state | socket: nil, poller: nil, route: nil, delivering: %{}, kinds: %{}}
+    state = %{
+      state
+      | socket: nil,
+        socket_tag: nil,
+        poller: nil,
+        route: nil,
+        delivering: %{},
+        kinds: %{}
+    }
 
     notify(
       state,
@@ -1339,8 +1415,11 @@ defmodule DpExchange.Schwab.Feed do
     cell = state.credentials_cell
     request_opts = state.request_opts
 
+    # Tagged like the quotes below, for the same reason: a refusal or a "delivering nothing"
+    # notice already in the mailbox when the route upgrades to the stream describes a poll
+    # that no longer exists, and would reach consumers as if it were current.
     refuse = fn symbol, reason ->
-      send(subscriber, {:dp_exchange, :schwab, {:refused, symbol, reason}})
+      send(subscriber, {:dp_exchange, :schwab, {:polled, tag, {:refused, symbol, reason}}})
     end
 
     snapshot = state.config_snapshot
@@ -1380,7 +1459,9 @@ defmodule DpExchange.Schwab.Feed do
         # below the same way any other notice from this process does, and fans out to
         # `state.notice_subscribers` — no new clause needed, because that handler is already
         # generic over `kind`.
-        on_notice: fn notice -> send(subscriber, {:dp_exchange, :schwab, notice}) end,
+        on_notice: fn notice ->
+          send(subscriber, {:dp_exchange, :schwab, {:polled, tag, notice}})
+        end,
         # One `/quotes` request per 100 symbols a cycle, not one per symbol: at the default
         # 120-a-minute read ceiling, per-symbol polling could not finish a 30 s cycle past
         # about 60 symbols. See `Rest.get_prices/3`.

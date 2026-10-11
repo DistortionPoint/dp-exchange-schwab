@@ -749,7 +749,9 @@ feed fell back to polling (`coverage/1` says `:internal_poll`), it retries the S
 that same 60-second timer and switches back when it can. The poll stops, your `wanted`
 set moves to the socket, and an `:info` `:coverage_change` notice says the Streamer is
 back. A credential the venue *refused* is not retried on the timer, because it would be
-refused again. Calling `update_credentials/2` with a refreshed one retries at once.
+refused again. Calling `update_credentials/2` with a refreshed one retries at once, and so
+does a bootstrap that was already in flight when you called it and then failed: it is
+retried with the new credential rather than judged against the old one.
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the crash-isolation path above, or anything that kills the `Feed` pid directly.

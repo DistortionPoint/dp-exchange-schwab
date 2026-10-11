@@ -210,6 +210,77 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     wait_until(fn -> calls(agent) > before end)
   end
 
+  test "a frame and a link_down from a replaced socket are dropped, the current one's are not" do
+    {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    url = websocket_endpoint()
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+
+    answer(agent, user_preference(url), 200)
+    send(feed, :resubscribe)
+
+    assert_receive {:dp_exchange, :schwab,
+                    %Notice{kind: :coverage_change, severity: :info, details: %{route: :stream}}},
+                   5_000
+
+    tag = :sys.get_state(feed).socket_tag
+    assert is_reference(tag)
+    stale = make_ref()
+    quoted = quote_for("AAPL")
+
+    send(feed, {:dp_exchange, :schwab, {:from_socket, stale, quoted}})
+    assert Feed.coverage(feed) == %{}
+    refute_received {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{}}
+
+    send(feed, {:dp_exchange, :schwab, {:from_socket, tag, quoted}})
+    assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 5_000
+    assert Feed.coverage(feed) == %{"AAPL" => :stream}
+
+    down = Notice.new(:link_down, :schwab)
+    send(feed, {:dp_exchange, :schwab, {:from_socket, stale, down}})
+    assert Feed.coverage(feed) == %{"AAPL" => :stream}
+
+    send(feed, {:dp_exchange, :schwab, {:from_socket, tag, down}})
+    assert Feed.coverage(feed) == %{}
+  end
+
+  test "credentials replaced while a bootstrap is in flight retry it once it has failed" do
+    # `update_credentials/2` finds a bootstrap in flight and starts nothing, and the tick skips
+    # a REFUSED credential, so a bootstrap that started under the old token and was refused
+    # left the feed polling for good although the new token was never tried.
+    {agent, plug} = switchable({:hang, self()})
+    feed = start_feed(plug: plug, retry_attempts: 0)
+
+    subscribing = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
+    assert_receive {:hanging, request}, 5_000
+    assert calls(agent) == 1
+
+    :ok = Feed.update_credentials(feed, credentials())
+    answer(agent, %{"error" => "unavailable"}, 503)
+    send(request, {:release, %{"error" => "unauthorized"}, 401})
+
+    assert :ok = Task.await(subscribing, 5_000)
+    wait_until(fn -> calls(agent) >= 2 end)
+  end
+
+  test "a refusal or notice from a poll that was replaced is dropped, a current one is not" do
+    {_agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    feed = start_feed(plug: plug, retry_attempts: 0)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+
+    send(feed, {:dp_exchange, :schwab, {:polled, make_ref(), {:refused, "AAPL", :stale}}})
+    assert %{route: :internal_poll} = Feed.status(feed)
+    refute_received {:dp_exchange, :schwab, {:refused, "AAPL", :stale}}
+
+    tag = :sys.get_state(feed).poll_tag
+    send(feed, {:dp_exchange, :schwab, {:polled, tag, {:refused, "AAPL", :current}}})
+    assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :current}}, 5_000
+  end
+
   defp wait_until(fun, timeout \\ 5_000) do
     cond do
       fun.() ->

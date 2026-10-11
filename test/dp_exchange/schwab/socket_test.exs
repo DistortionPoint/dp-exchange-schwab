@@ -472,6 +472,16 @@ defmodule DpExchange.Schwab.SocketTest do
       assert_received {:dp_exchange, :schwab, :relogged_in, ^me}
     end
 
+    test "a socket started with a :tag wraps what it sends; without one it sends bare" do
+      tag = make_ref()
+      tagged = state(%{tag: tag})
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, tagged)
+      assert_received {:dp_exchange, :schwab, {:from_socket, ^tag, %Notice{kind: :link_down}}}
+
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
+    end
+
     test "a successful LOGIN resets the login-failure streak" do
       response = %{
         "response" => [

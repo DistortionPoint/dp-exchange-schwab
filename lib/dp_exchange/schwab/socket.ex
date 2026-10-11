@@ -206,6 +206,11 @@ defmodule DpExchange.Schwab.Socket do
       # prints its state via the same OTP crash report `Feed`'s does.
       credentials: opts |> Keyword.fetch!(:access_token) |> Credentials.wrap_token(),
       subscriber: Keyword.fetch!(opts, :subscriber),
+      # Optional `:tag`. When given, every payload reaches the subscriber wrapped as
+      # `{:dp_exchange, :schwab, {:from_socket, tag, payload}}`, so a subscriber that replaces
+      # sockets can tell a late message from a dead one apart from the current one's. Absent,
+      # the subscriber protocol is unchanged.
+      tag: Keyword.get(opts, :tag),
       logged_in?: false,
       request_id: 1,
       # Consecutive rejected LOGINs, reset to 0 on the next success. Drives
@@ -973,8 +978,12 @@ defmodule DpExchange.Schwab.Socket do
     end)
   end
 
-  defp notify(%{subscriber: subscriber}, payload),
-    do: send(subscriber, {:dp_exchange, :schwab, payload})
+  defp notify(%{subscriber: subscriber} = state, payload) do
+    case Map.get(state, :tag) do
+      nil -> send(subscriber, {:dp_exchange, :schwab, payload})
+      tag -> send(subscriber, {:dp_exchange, :schwab, {:from_socket, tag, payload}})
+    end
+  end
 
   # A reconnect clears the venue's subscriptions (see "Reconnection is not
   # resubscription"), and `Feed` re-asserts on a 60s timer regardless, which left up to a

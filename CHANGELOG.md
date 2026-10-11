@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Frames and notices already queued from a replaced `Socket` were counted against its
+  successor.** A socket carried no identity in what it sent, so a `:link_down` still in
+  `Feed`'s mailbox when a crashed socket was replaced wiped the new session's coverage, and a
+  late frame reported a symbol `:stream` that the new session had not delivered. `Socket`
+  takes an optional `:tag` and, when given, sends `{:dp_exchange, :schwab, {:from_socket, tag,
+  payload}}`; without one the subscriber protocol is unchanged. `Feed` tags each socket it
+  builds, handles messages bearing the current tag as before, and drops any other.
+- **`Feed` stayed on the fallback poll for good when credentials were replaced while the
+  Streamer bootstrap was in flight.** `update_credentials/2` starts a retry only when no
+  bootstrap is running, and the periodic tick deliberately skips a credential the venue
+  REFUSED. A bootstrap that started under the old token and was refused therefore left
+  `last_error` as `{:refused, _}`, the new token was never tried against `/userPreference`,
+  and the feed polled (no candles) until restarted. A bootstrap now records the credential
+  generation it started under; if it settles on the poll route and the generation has since
+  moved, the Streamer is retried once with the current credential. Covers the initial
+  bootstrap, a background upgrade, and the timeout/task-down paths.
+- **A stale fallback-poll refusal or "delivering nothing" notice could reach consumers after
+  the route upgraded to the Streamer.** Quotes were already tagged with the poller that
+  produced them; `on_refusal` and `on_notice` were not, so one queued in `Feed`'s mailbox
+  when the poll was stopped was delivered as if current. Both are now tagged and dropped
+  unless they come from the poller serving the route.
+
 ## [0.2.110] - 2026-10-11
 
 ### Fixed
