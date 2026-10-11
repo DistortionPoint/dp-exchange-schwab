@@ -77,7 +77,7 @@ defmodule DpExchange.Schwab.Fake do
 
   alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
   alias DpExchange.Schwab
-  alias DpExchange.Schwab.{Auth, OrderLimit, Orders, Rest, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, Feed, OrderLimit, Orders, Rest, SymbolFormat}
 
   @listed ~w(AAPL MSFT GOOGL AMZN NVDA F BRK.B)
 
@@ -679,8 +679,8 @@ defmodule DpExchange.Schwab.Fake do
   # The fake used to drop it silently and answer `:ok`, so a consumer's test passed a pair
   # shaped symbol here that the real package refuses by name.
   def subscribe(symbols, opts \\ []) do
-    with {:ok, symbols} <- checked_symbols(symbols) do
-      to = Config.opt(opts, :to, self())
+    with {:ok, symbols} <- checked_symbols(symbols),
+         {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
       covered = Enum.filter(symbols, &(&1 in @listed))
 
       Process.put(@wanted_key, Enum.uniq(wanted_symbols() ++ symbols))
@@ -714,7 +714,8 @@ defmodule DpExchange.Schwab.Fake do
   @impl true
   def update_symbols(symbols, opts \\ []) do
     # Checked before the set is cleared: the real feed refuses first and changes nothing.
-    with {:ok, symbols} <- checked_symbols(symbols) do
+    with {:ok, symbols} <- checked_symbols(symbols),
+         {:ok, _to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
       Process.put(@wanted_key, [])
       Process.put(__MODULE__, [])
       subscribe(symbols, opts)
@@ -823,12 +824,10 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(
-      Config.opt(opts, :to, self()),
-      {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)}
-    )
-
-    :ok
+    with {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      send(to, {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)})
+      :ok
+    end
   end
 
   defp subscribed, do: Process.get(__MODULE__, [])

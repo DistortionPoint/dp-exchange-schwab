@@ -510,6 +510,10 @@ defmodule DpExchange.Schwab do
   read the current set out of `coverage/1` and re-sent the union, which silently dropped
   every symbol that had been subscribed and not yet quoted — a real loss dressed as an
   idempotent update.
+
+  Refuses what the feed cannot hold, recording nothing: `{:error, {:invalid_symbols, term}}`,
+  then `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a
+  registered name (an atom other than `nil`, `true` or `false`).
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
@@ -657,6 +661,9 @@ defmodule DpExchange.Schwab do
   `update_symbols/2` already applies — answers `{:error, :feed_not_started}` on the same
   terms rather than reporting `:ok` for a registration nothing will ever fire.
 
+  `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a registered
+  name; nothing is recorded.
+
   See `DpExchange.Schwab.Feed.subscribe_notices/2`, which this delegates to.
   """
   @impl true
@@ -738,9 +745,11 @@ defmodule DpExchange.Schwab do
 
   defp feed(opts), do: Config.opt(opts, :feed, Supervisor.feed_name(opts))
 
-  defp alive?(name) when is_atom(name), do: is_pid(Process.whereis(name))
+  # `{:global, _}` and `{:via, _, _}` feeds are running feeds too: `Process.whereis/1` only
+  # knows local atoms, so a registered-elsewhere feed read as absent and coverage answered
+  # empty for a live one. `GenServer.whereis/1` resolves every `GenServer.server()` shape.
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
-  defp alive?(_other), do: false
+  defp alive?(server), do: is_pid(GenServer.whereis(server))
 
   # **A streaming call answers; it does not exit in the caller's process.** Every
   # streaming callback's spec is a value (`:ok | {:error, term()}`, or a map). A bare

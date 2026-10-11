@@ -381,6 +381,11 @@ defmodule DpExchange.Schwab.Feed do
   instead of exiting. The symbols are already wanted, and are applied when the route
   settles. See the moduledoc's "A caller waiting on the bootstrap is answered before its
   call times out".
+
+  **`{:error, {:invalid_symbols, term}}` and `{:error, {:invalid_subscriber, term}}` record
+  nothing.** `:to` must be a pid or a registered name (an atom other than `nil`, `true` or
+  `false`): a string, integer or `{:global, _}` tuple used to be stored and raise inside this
+  shared process on the first delivery. Symbols are judged first.
   """
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts \\ []) do
@@ -509,9 +514,30 @@ defmodule DpExchange.Schwab.Feed do
   # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
   # uses to *hear that something is wrong* was the one call that could kill the host's
   # calling process for asking during exactly the conditions it exists to report.
-  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
+  @spec subscribe_notices(GenServer.server(), keyword()) ::
+          :ok | {:error, {:invalid_subscriber, term()}}
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
+
+  @doc """
+  The subscriber as given if it is a pid or a registered name, or the refusal.
+
+  That is all `Core.Fanout.resolve/1` has a clause for. Anything else (`"consumer"`, `42`,
+  `{:global, name}`, `{:via, ...}`, a ref) was stored and raised `FunctionClauseError`
+  inside this shared process on the first payload or notice sent to it, and the restart
+  dropped every other consumer's subscription. `nil` and booleans are atoms that resolve to
+  no process: a subscriber that silently receives nothing.
+
+  Exposed so `DpExchange.Schwab.Fake` refuses exactly as the real feed does.
+  """
+  @spec valid_subscriber(term()) ::
+          {:ok, pid() | atom()} | {:error, {:invalid_subscriber, term()}}
+  def valid_subscriber(pid) when is_pid(pid), do: {:ok, pid}
+
+  def valid_subscriber(name) when is_atom(name) and name not in [nil, true, false],
+    do: {:ok, name}
+
+  def valid_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
   @doc """
   Replaces the credentials this feed signs and connects with — see the moduledoc's
@@ -686,19 +712,20 @@ defmodule DpExchange.Schwab.Feed do
   def handle_call({:subscribe, symbols, subscriber}, from, state) do
     symbols = canonical_symbols(symbols)
 
-    case invalid_symbols(symbols) do
-      [] ->
-        state = %{
-          state
-          | subscribers: MapSet.put(state.subscribers, subscriber),
-            monitors: Fanout.watch(subscriber, state.monitors),
-            wanted: MapSet.union(state.wanted, MapSet.new(symbols))
-        }
+    # Symbols are judged first, then the subscriber, and nothing is recorded on either refusal.
+    with [] <- invalid_symbols(symbols),
+         {:ok, subscriber} <- valid_subscriber(subscriber) do
+      state = %{
+        state
+        | subscribers: MapSet.put(state.subscribers, subscriber),
+          monitors: Fanout.watch(subscriber, state.monitors),
+          wanted: MapSet.union(state.wanted, MapSet.new(symbols))
+      }
 
-        settle_route(state, from)
-
-      invalid ->
-        {:reply, {:error, {:invalid_symbols, invalid}}, state}
+      settle_route(state, from)
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+      invalid when is_list(invalid) -> {:reply, {:error, {:invalid_symbols, invalid}}, state}
     end
   end
 
@@ -788,13 +815,19 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
-    state = %{
-      state
-      | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
-        monitors: Fanout.watch(subscriber, state.monitors)
-    }
+    case valid_subscriber(subscriber) do
+      {:ok, subscriber} ->
+        state = %{
+          state
+          | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
+            monitors: Fanout.watch(subscriber, state.monitors)
+        }
 
-    {:reply, :ok, state}
+        {:reply, :ok, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:update_credentials, credentials}, _from, state) do

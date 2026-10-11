@@ -33,6 +33,18 @@ an acceptable changelog line.
 
 ### Fixed
 
+- **`subscribe/2` and `subscribe_notices/1` stored any `:to` term, and a string, integer or
+  `{:global, _}` tuple crashed the shared `Feed` on first delivery.** `Core.Fanout.resolve/1`
+  has clauses for a pid and an atom only, so the `FunctionClauseError` was raised inside
+  `Feed` and the restart dropped every consumer. Both now answer
+  `{:error, {:invalid_subscriber, term}}` (a pid or a registered atom other than `nil`,
+  `true`, `false` is accepted) before recording anything, after the symbol check.
+  `Feed.valid_subscriber/1` is shared with `DpExchange.Schwab.Fake`, which refuses in the
+  same order.
+- **The facade read a running `{:global, _}` or `{:via, _, _}` feed as absent.** `alive?/1`
+  handled only pids and local atoms, so `coverage/1`, `wanted/1`, `status/1` and
+  `subscribe/2` answered empty or `:feed_not_started` for a live feed. It now resolves any
+  `GenServer.server()` through `GenServer.whereis/1`.
 - **Frames and notices already queued from a replaced `Socket` were counted against its
   successor.** A socket carried no identity in what it sent, so a `:link_down` still in
   `Feed`'s mailbox when a crashed socket was replaced wiped the new session's coverage, and a

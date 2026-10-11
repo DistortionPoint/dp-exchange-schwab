@@ -258,6 +258,12 @@ repository has no sandbox and no credential to test the difference. Plan for a p
 re-authenticate at least once every seven days regardless of how often you refresh in
 between — the safe reading is the vendor's literal words, not the more convenient one.
 
+**`:to` on `subscribe/2` and `subscribe_notices/1` must be a pid or a registered name** (an
+atom other than `nil`, `true`, `false`). Anything else — a string, an integer, a
+`{:global, _}` or `{:via, _, _}` tuple — answers `{:error, {:invalid_subscriber, term}}` and
+records nothing; symbols are judged first. Register a process and pass its pid. A feed itself
+may be registered under `{:global, _}` or `{:via, _, _}` and passed as `feed:`.
+
 **If you hold a running feed (you called `subscribe/2` or started this package supervised),
 also call `DpExchange.Schwab.update_credentials/2` with the refreshed credential.** The
 Streamer is meant to stay up far longer than one 30-minute access token, and a feed's
