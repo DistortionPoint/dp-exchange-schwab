@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.105] - 2026-10-11
+
 ### Fixed
 
 - **A caller-supplied order id, transaction id or account hash could change the request
