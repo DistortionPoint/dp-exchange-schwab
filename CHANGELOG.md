@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.106] - 2026-10-11
+
 ### Fixed
 
 - **A `Decimal` quantity with an absurd exponent was expanded before it was refused.**
