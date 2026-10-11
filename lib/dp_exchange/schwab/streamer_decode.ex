@@ -58,7 +58,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
   """
   @spec to_quote(map(), String.t(), DateTime.t()) :: {:ok, Quote.t()} | {:error, term()}
   def to_quote(%{last: last} = fields, symbol, observed_at) when last != nil do
-    with {:ok, price} <- required_decimal(last, :price) do
+    with {:ok, price} <- required_decimal(last, :price),
+         :ok <- traded_price(price) do
       # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size` is
       # the trade's own, so this quote's volume is one print, and says so in
       # `volume_window` (dp-exchange-core issue #42). Read rather than required: `:volume`
@@ -100,6 +101,16 @@ defmodule DpExchange.Schwab.StreamerDecode do
   end
 
   def to_quote(_fields, _symbol, _observed_at), do: {:error, :no_traded_price}
+
+  # **Zero is not a traded price.** An option that has not traded today, or an equity before
+  # its first print, streams `last` as `0` rather than omitting it, and a `Quote` built from
+  # that reports a price at which nothing traded - the same "nearby substitute" the REST arm
+  # refuses (`Rest.get_price/3` skips a zero `lastPrice`, and falls to `mark` there). The
+  # streamer has no `mark` field here to fall to, so the frame yields no quote. A negative
+  # `last` is refused with it, as on the REST arm. Whether the venue streams a zero for an
+  # untraded instrument is read from the REST arm's own precedent and not measured.
+  defp traded_price(price),
+    do: if(Decimal.positive?(price), do: :ok, else: {:error, :no_traded_price})
 
   @doc """
   A `TopOfBook` from a `LEVELONE_*` frame.

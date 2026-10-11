@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST top of book could be dated by the last trade.** `get_top_of_book/3` took
+  `venue_time` from `quoteTime` and, when that was absent or zero, from `tradeTime`. The
+  latter dates the last print and can be hours older than the book on the same row, so the
+  book wore a time that was not its own. `quoteTime` alone is read (as
+  `StreamerDecode.to_top_of_book/3` already did); without it `venue_time` is `nil`.
+- **A streamed `last` of zero was published as a traded price.** `StreamerDecode.to_quote/3`
+  accepted `last: 0`, which an instrument with no print yet (an untraded option) streams in
+  place of omitting it, and built a `Quote` at price zero. REST has skipped a zero `lastPrice`
+  since early on. A zero or negative `last` is now `{:error, :no_traded_price}`, so the socket
+  delivers no quote for the frame (its top of book is unaffected). The venue streaming zero for
+  an untraded instrument is inferred from the REST arm's precedent, not measured.
+- **`Rest.get_order/4` returned a non-object body as sent**, against its `{:ok, map()}` spec; a
+  list body is now `{:error, :unexpected_response_shape}`.
+- **A forwarded `extended_hours: nil` reached `/pricehistory` as a blank value.**
+  `get_historical_prices/5` read the option with `Keyword.get/3`, which returns a present
+  `nil`; `needExtendedHoursData=` went out empty. It is read with `Config.opt/3` like the
+  rest of the family, so `nil` is absent and the parameter is `false`.
+- **Option chain decode was quadratic.** `chain_side/3` and `chain_strikes/4` appended each
+  expiry's and strike's contracts with `acc ++ rows`, copying the accumulator every time; an
+  index chain with thousands of contracts did O(n^2) work. Contracts are collected per
+  strike/expiry and flattened once; order and results are unchanged.
+
 ## [0.2.106] - 2026-10-11
 
 ### Fixed

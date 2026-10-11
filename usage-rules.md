@@ -92,6 +92,23 @@ if it moved one, is still delivered). `Core.Types.Quote` enforces `:price`, and 
 no price is not a weaker quote — it is not a quote. The frame's **size** is not enforced and an unreadable one still yields
 `volume: nil` beside a good price.
 
+## A streamed quote with a zero or negative last is refused too
+
+A `LEVELONE_*` frame whose `last` reads as zero or less delivers no `Quote`
+(`{:error, :no_traded_price}`), exactly as a frame with no `last`. An option that has not
+traded today is the case: a zero there is the absence of a print, and a `Quote` built from it
+reports a price at which nothing traded. REST has refused a zero `lastPrice` the same way
+(falling to `mark`) for longer; the streamer now agrees. The frame's top of book is still
+delivered if it moved one.
+
+## A REST top of book is dated by `quoteTime` alone
+
+`get_top_of_book/2` sets `venue_time` from `quoteTime` ("the last time a bid or ask updated")
+and from nothing else. It used to fall back to `tradeTime`, which dates the last print and
+can be much older than the book on the same row. A row without a usable `quoteTime` has
+`venue_time: nil`, as the streamed book does when a frame carries no quote time. (`get_price/2`
+is unchanged: a quote's price is dated by `tradeTime` first when the price is `lastPrice`.)
+
 ## A screener row the venue did not name is dropped
 
 Also 0.2.30. `get_screener/2` used to publish such a row with `symbol: ""`, which satisfied

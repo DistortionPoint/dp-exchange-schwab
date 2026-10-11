@@ -280,12 +280,12 @@ defmodule DpExchange.Schwab.Rest do
   # a guess about what an empty market looks like.
   defp book_fields?(row), do: Map.has_key?(row, "bidPrice") or Map.has_key?(row, "askPrice")
 
-  defp top_of_book_time(row) do
-    case venue_time(row) do
-      {:ok, at} -> at
-      _no_venue_time -> nil
-    end
-  end
+  # **`quoteTime` only.** It is "the last time a bid or ask updated", which is what dates a
+  # book. `tradeTime` dates the last print and can be hours older than the book on the same
+  # row (`StreamerDecode.to_top_of_book/3` reads `quote_time` alone for the same reason), so
+  # falling back to it stamped a book with a time that is not its own. A row with no usable
+  # `quoteTime` has an undated book: `nil`, never a neighbouring field's instant.
+  defp top_of_book_time(row), do: venue_time_or_nil(row, ["quoteTime"])
 
   # `QuoteResponseObject` — the type of each value in the `/quotes` map keyed by symbol —
   # is documented as a `oneOf` eight schemas: the seven per-asset-class quote shapes and
@@ -410,7 +410,7 @@ defmodule DpExchange.Schwab.Rest do
   # `quoted_price/1` stopped at a zero price, and `DateTime.from_unix(0)` answered a venue time
   # of 1970-01-01, which every staleness check then reads as fifty years old. The first
   # POSITIVE time is used; with none, the time is unstated.
-  defp venue_time(row, keys \\ ["quoteTime", "tradeTime"]) do
+  defp venue_time(row, keys) do
     case keys |> Enum.map(&row[&1]) |> Enum.find(&positive_epoch?/1) do
       nil -> {:error, :missing_venue_timestamp}
       raw -> parse_time(raw)
@@ -471,7 +471,10 @@ defmodule DpExchange.Schwab.Rest do
           "periodType" => period_type,
           "frequencyType" => frequency_type,
           "frequency" => frequency,
-          "needExtendedHoursData" => Keyword.get(opts, :extended_hours, false)
+          # `Config.opt/3`, not `Keyword.get/3`: a forwarded `extended_hours: nil` is silence,
+          # and `Keyword.get/3` returned that `nil`, which `URI.encode_query/1` sent as a
+          # blank `needExtendedHoursData=`.
+          "needExtendedHoursData" => Config.opt(opts, :extended_hours, false)
         }
         |> put_range_or_period(period, range)
 
@@ -1208,12 +1211,16 @@ defmodule DpExchange.Schwab.Rest do
 
   defp chain_side(nil, _underlying, _right), do: {:ok, []}
 
+  # Accumulated as a list of per-expiry lists and flattened once at the end. `acc ++ contracts`
+  # copied the whole accumulator for every expiry, which is quadratic on an index chain with
+  # thousands of contracts. The order is the same as before (map iteration order).
   defp chain_side(%{} = side, underlying, right) do
-    Enum.reduce_while(side, {:ok, []}, fn {expiry_key, strikes}, {:ok, acc} ->
+    side
+    |> Enum.reduce_while({:ok, []}, fn {expiry_key, strikes}, {:ok, acc} ->
       case chain_expiry(expiry_key) do
         {:ok, expiry} ->
           case chain_strikes(strikes, underlying, expiry, right) do
-            {:ok, contracts} -> {:cont, {:ok, acc ++ contracts}}
+            {:ok, contracts} -> {:cont, {:ok, [contracts | acc]}}
             error -> {:halt, error}
           end
 
@@ -1221,6 +1228,10 @@ defmodule DpExchange.Schwab.Rest do
           {:halt, {:error, {:unreadable_chain_expiry, expiry_key}}}
       end
     end)
+    |> case do
+      {:ok, per_expiry} -> {:ok, per_expiry |> Enum.reverse() |> Enum.concat()}
+      error -> error
+    end
   end
 
   defp chain_side(_other, _underlying, _right), do: {:error, :unexpected_response_shape}
@@ -1241,7 +1252,8 @@ defmodule DpExchange.Schwab.Rest do
   defp chain_expiry(_key), do: :error
 
   defp chain_strikes(%{} = strikes, underlying, expiry, right) do
-    Enum.reduce_while(strikes, {:ok, []}, fn {strike_key, contracts}, {:ok, acc} ->
+    strikes
+    |> Enum.reduce_while({:ok, []}, fn {strike_key, contracts}, {:ok, acc} ->
       case chain_strike(strike_key) do
         nil ->
           {:halt, {:error, {:unreadable_chain_strike, strike_key}}}
@@ -1254,12 +1266,16 @@ defmodule DpExchange.Schwab.Rest do
           # caller's process. Found by mutating real response bodies, 2026-09-27.
           if Enum.all?(contracts, &is_map/1) do
             rows = Enum.map(contracts, &to_contract(&1, underlying, expiry, strike, right))
-            {:cont, {:ok, acc ++ rows}}
+            {:cont, {:ok, [rows | acc]}}
           else
             {:halt, {:error, :unexpected_response_shape}}
           end
       end
     end)
+    |> case do
+      {:ok, per_strike} -> {:ok, per_strike |> Enum.reverse() |> Enum.concat()}
+      error -> error
+    end
   end
 
   defp chain_strikes(_other, _underlying, _expiry, _right),
@@ -2522,9 +2538,11 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_order(map(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, account_hash, order_id, opts) do
-    with {:ok, path} <- account_path(account_hash, ["orders", order_id]) do
-      get(trader_url(opts) <> path, credentials, opts)
-    end
+    # `object/1` makes the `{:ok, map()}` in this spec true: a list body used to be returned as
+    # sent to callers that read it as one order.
+    with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
+         {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
+         do: object(body)
   end
 
   @doc """
