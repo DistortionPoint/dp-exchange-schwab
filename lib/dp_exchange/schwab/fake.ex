@@ -378,12 +378,18 @@ defmodule DpExchange.Schwab.Fake do
   # from `Rest.refusal/2` for a status with no readable detail. Every id used to read back
   # as a filled AAPL buy.
   defp find_body(order_id) do
-    case Map.fetch(placed_bodies(), order_id) do
+    key = order_key(order_id)
+
+    case Map.fetch(placed_bodies(), key) do
       {:ok, _body} = found -> found
-      :error when order_id == @order_id -> {:ok, fake_order_body(@order_id)}
+      :error when key == @order_id -> {:ok, fake_order_body(@order_id)}
       :error -> {:refused, {:venue_error, 404}}
     end
   end
+
+  # `Rest` puts an integer id into the path as its digits, so the fake reads it the same way.
+  defp order_key(order_id) when is_integer(order_id), do: Integer.to_string(order_id)
+  defp order_key(order_id), do: order_id
 
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
@@ -416,6 +422,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_replace_order(credentials, order_id, request, opts) do
     with {:ok, _hash} <- require_account(opts),
+         :ok <- Rest.check_path_segment(order_id),
          {:ok, payload} <- Orders.build(request, opts),
          :ok <- require_credentials(credentials: credentials),
          {:ok, old} <- find_body(order_id),
@@ -425,7 +432,7 @@ defmodule DpExchange.Schwab.Fake do
       # old one is `REPLACED`, which the decode reads as no status at all, and no longer
       # cancellable; the new one is the working order the request describes.
       id = next_order_id()
-      remember_body(order_id, %{old | "status" => "REPLACED"})
+      remember_body(order_key(order_id), %{old | "status" => "REPLACED"})
       remember_body(id, working_body(id, payload))
       do_get_order(credentials, id, opts)
     end
@@ -438,10 +445,11 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_cancel_order(credentials, order_id, opts) do
     with {:ok, _hash} <- require_account(opts),
+         :ok <- Rest.check_path_segment(order_id),
          :ok <- require_credentials(credentials: credentials),
          {:ok, body} <- find_body(order_id),
          :ok <- require_working(body) do
-      remember_body(order_id, %{body | "status" => "CANCELED"})
+      remember_body(order_key(order_id), %{body | "status" => "CANCELED"})
       {:ok, :cancelled}
     end
   end
@@ -459,6 +467,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_get_order(credentials, order_id, opts) do
     with {:ok, _hash} <- require_account(opts),
+         :ok <- Rest.check_path_segment(order_id),
          :ok <- require_credentials(credentials: credentials) do
       # Decoded through the same `Orders.from_venue/1` the real facade uses, from a body in
       # the venue's own shape — so the fake cannot drift from the real decode. It returned the
@@ -528,8 +537,9 @@ defmodule DpExchange.Schwab.Fake do
 
   defp status_wanted?(_body, nil), do: true
 
-  defp status_wanted?(body, wanted),
-    do: String.upcase(to_string(wanted)) == body["status"]
+  # `Rest.check_order_window/1` has already refused anything outside the venue's
+  # `apiOrderStatus` enum, so this is an exact match, as the venue's filter is.
+  defp status_wanted?(body, wanted), do: wanted == body["status"]
 
   # A venue-shaped `Order` object — the OpenAPI schema's own field names.
   defp fake_order_body(order_id) do

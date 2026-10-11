@@ -596,6 +596,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
                Schwab.get_all_orders(@creds,
                  from: ~U[2026-01-01 00:00:00Z],
                  to: ~U[2026-01-03 00:00:00Z],
+                 now: ~U[2026-01-15 00:00:00Z],
                  plug: capturing(body),
                  retry_attempts: 0
                )

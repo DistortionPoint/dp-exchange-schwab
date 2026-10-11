@@ -31,6 +31,63 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A caller-supplied order id, transaction id or account hash could change the request
+  path.** `Rest` encoded these with `URI.encode/1`, which leaves `/`, `?` and `#` alone, so
+  `cancel_order/4` (a `DELETE`) with `"1/../../orders"` addressed a different path and a `?`
+  or `#` cut the path short; an integer id raised `FunctionClauseError` in the caller's
+  process. Every segment is now encoded as one (`/` becomes `%2F`), an integer is its digits,
+  and an empty or non-text value is `{:error, {:invalid_path_segment, :schwab}}` before any
+  request. Applies to `get_balances/3`, `get_transactions/3`, `get_transaction/4`,
+  `place_order/4`, `preview_order/4`, `replace_order/5`, `cancel_order/4`, `get_order/4`
+  and `get_orders/3`.
+- **`get_transactions/3` did not check its window.** The spec documents "Maximum date range
+  is 1 year" for `/accounts/{accountNumber}/transactions` as it does for orders, but only the
+  orders window was checked. A reversed window is now
+  `{:error, {:transaction_window_reversed, :schwab}}`, one over 365 days
+  `{:transaction_window_too_long, :schwab}` and an unreadable end
+  `{:transaction_window_invalid, :schwab}`, before any request (also in the fake, through
+  `Rest.check_transactions/1`). How the venue refuses these is not documented and not
+  measured.
+- **`get_accounts/2` returned rows it could not use.** A row that was not an object raised in
+  `Access`, and a `hashValue` that was a number or blank was returned and then failed in every
+  `/accounts/{hash}` path built from it. Either is now `{:error, :unexpected_response_shape}`.
+- **A list passed as a query value raised in the caller's process** (`fields: ["positions"]`
+  on `get_account_summaries/2` or `get_symbol_quote/3`). A list is now joined with commas,
+  the form the venue documents for `fields`.
+- **A `Decimal` struct, or a string, with an absurd exponent was accepted as a number.**
+  `Rest`'s decimal reader passed a `Decimal` struct through untouched (NaN and Infinity
+  included), and no reader limited the exponent: `"1e999999999"` parses as finite and the
+  first compare or add against it allocates a billion-digit integer. `Rest`, `StreamerDecode`
+  and `Orders` now treat NaN, Infinity and an exponent beyond +-1000 as not a number (the limit
+  is chosen, not measured). A chain strike key goes through the same reader. In `Orders.build/2`
+  such a price, stop price or offset is `{:error, {:invalid_order_field, key, value}}`.
+- **`get_all_orders/2` did not apply the `/orders` 60-day rule.** The spec's `fromEnteredTime`
+  on `GET /orders` reads "Date must be within 60 days from today's date"
+  (`accounts-and-trading-production.openapi.json`, the `/orders` operation; the per-account
+  endpoint has no such sentence). A start more than 60 days before now is
+  `{:error, {:order_window_start_too_old, :schwab}}` before any request. Now is `opts[:now]`
+  (a `DateTime`, for tests) or the clock. `Rest.check_all_orders_window/1` is the public check.
+  How the venue itself refuses it is not documented and not measured.
+- **`status` was sent unchecked on both orders endpoints.** It is the spec's `apiOrderStatus`
+  enum (21 values, `Rest.order_statuses/0`). Anything else (a lower-case string, an atom) is
+  `{:error, {:invalid_order_status, value}}` before any request, in `get_orders/3`,
+  `get_all_orders/2` and the fake. `types` on `get_transactions/3` was already checked against
+  the `TransactionType` enum. **Breaking for the fake:** `Fake.get_orders/2` used to accept
+  `status: :working`; it now needs the venue's `"WORKING"`.
+- **The fake accepted order ids the real path refuses.** `Fake.get_order/3`, `cancel_order/3`
+  and `replace_order/4` now refuse an empty or non-text/integer id with
+  `{:error, {:invalid_path_segment, :schwab}}` before looking at the credential, as `Rest`
+  does, and read an integer id as its digits.
+
+### Reviewed, no change needed
+
+`get_price/3`, `get_prices/3`, `get_historical_prices/5` (period/startDate/endDate handling),
+`market_status/2`, `get_market/3`, `get_movers/3`, `get_chains/2`, `get_option_chain/3`,
+`get_positions/2` and `get_balances/3` decoding were re-read against the market-data and
+trader specs; no other defect found.
+
 ## [0.2.104] - 2026-10-11
 
 ### Fixed

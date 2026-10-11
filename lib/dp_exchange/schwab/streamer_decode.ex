@@ -347,7 +347,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # `nil` for absent, never zero. Zero is a price and a size, and a field the venue did not
   # send is neither.
   defp decimal(nil), do: nil
-  defp decimal(%Decimal{} = value), do: value
+  defp decimal(%Decimal{} = value), do: finite_decimal(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
@@ -368,13 +368,16 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # which is why this comment is in each of them now rather than one of them.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
-
-      _unparsable ->
-        nil
+      {parsed, ""} -> finite_decimal(parsed)
+      _unparsable -> nil
     end
   end
 
   defp decimal(_other), do: nil
+
+  # NaN, Infinity and an exponent beyond +-1000 (`1E999999999` is finite to `Decimal`, and
+  # the first compare or add against it allocates a huge integer) are not a number here.
+  defp finite_decimal(%Decimal{exp: exp} = value) do
+    if Decimal.nan?(value) or Decimal.inf?(value) or abs(exp) > 1000, do: nil, else: value
+  end
 end

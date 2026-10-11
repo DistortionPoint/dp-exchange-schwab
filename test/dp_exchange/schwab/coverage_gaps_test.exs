@@ -709,6 +709,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                Rest.get_all_orders(@creds,
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
+                 now: ~U[2026-08-15 00:00:00Z],
                  status: "WORKING",
                  max_results: 50,
                  plug: capturing([], me),
@@ -729,6 +730,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                Rest.get_all_orders(@creds,
                  from: "2026-08-01T00:00:00.000Z",
                  to: "2026-09-01T00:00:00.000Z",
+                 now: ~U[2026-08-15 00:00:00Z],
                  plug: capturing([], me),
                  retry_attempts: 0
                )
@@ -972,6 +974,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                DpExchange.Schwab.get_all_orders(@creds,
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
+                 now: ~U[2026-08-15 00:00:00Z],
                  plug: responding([]),
                  retry_attempts: 0
                )

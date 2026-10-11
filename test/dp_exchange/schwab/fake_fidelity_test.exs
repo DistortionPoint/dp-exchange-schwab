@@ -298,7 +298,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert listed.id == placed.id
       assert listed.symbol == "MSFT"
 
-      working = opts ++ now_window() ++ [status: :working]
+      working = opts ++ now_window() ++ [status: "WORKING"]
       assert {:ok, [only_working]} = Fake.get_orders(@creds, working)
       assert only_working.id == placed.id
     end
@@ -386,6 +386,51 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
       exactly_a_year = [from: ~U[2025-01-01 00:00:00Z], to: ~U[2026-01-01 00:00:00Z]]
       assert Rest.check_order_window(exactly_a_year) == :ok
+    end
+
+    test "the fake refuses a status outside the venue's enum, as Rest does" do
+      window = [from: ~U[2026-01-01 00:00:00Z], to: ~U[2026-01-03 00:00:00Z]]
+
+      for status <- [:working, "working", "SOMETHING_ELSE", 1] do
+        reason = {:error, {:invalid_order_status, status}}
+        assert Fake.get_orders(@creds, [account_hash: "H", status: status] ++ window) == reason
+        assert Rest.check_order_window([status: status] ++ window) == reason
+      end
+    end
+
+    test "the fake refuses an unusable order id before the credential, as Rest does" do
+      refused = {:error, {:invalid_path_segment, :schwab}}
+      opts = [account_hash: "H"]
+      request = %{symbol: "AAPL", quantity: 1}
+
+      for bad <- ["", :nope, nil] do
+        assert Fake.get_order(@creds, bad, opts) == refused
+        assert Fake.cancel_order(@creds, bad, opts) == refused
+        assert Fake.replace_order(@creds, bad, request, opts) == refused
+        assert Rest.check_path_segment(bad) == refused
+      end
+    end
+
+    test "an integer order id reads the order the fake issued, as Rest sends its digits" do
+      opts = [account_hash: "H"]
+      assert {:ok, %{id: "1005439821"}} = Fake.get_order(@creds, 1_005_439_821, opts)
+    end
+
+    test "the fake refuses what Rest refuses for a transactions window" do
+      opts = [account_hash: "H", types: ["TRADE"]]
+
+      windows = [
+        {[from: ~U[2026-03-01 00:00:00Z], to: ~U[2026-02-01 00:00:00Z]],
+         {:transaction_window_reversed, :schwab}},
+        {[from: ~U[2025-01-01 00:00:00Z], to: ~U[2026-01-02 00:00:00Z]],
+         {:transaction_window_too_long, :schwab}},
+        {[from: "yesterday", to: "today"], {:transaction_window_invalid, :schwab}}
+      ]
+
+      for {window, reason} <- windows do
+        assert Fake.get_transactions(@creds, opts ++ window) == {:error, reason}
+        assert Rest.check_transactions(opts ++ window) == {:error, reason}
+      end
     end
   end
 

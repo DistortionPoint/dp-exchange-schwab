@@ -509,6 +509,15 @@ picking one. A window whose `to` is before its `from` is
 date range is 1 year") is `{:error, {:order_window_too_long, :schwab}}`, and an end that is
 neither a `DateTime` nor an ISO-8601 string is `{:error, {:order_window_invalid, :schwab}}`;
 none of these is sent, because how the venue refuses them is not documented.
+`get_all_orders/2` also refuses a `from` more than 60 days before now
+(`{:order_window_start_too_old, :schwab}`; the spec: "Date must be within 60 days from
+today's date"), and `:status` on both orders reads must be one of the venue's 21 uppercase
+`apiOrderStatus` strings (`Rest.order_statuses/0`), else `{:invalid_order_status, value}`.
+`get_transactions/2` applies the same window rules (the spec also says "maximum date range is
+1 year" there) under the names `:transaction_window_reversed`, `:transaction_window_too_long`
+and `:transaction_window_invalid`. An order id, transaction id or account hash that is empty
+or not text/an integer is `{:error, {:invalid_path_segment, :schwab}}`, and one containing
+`/`, `?` or `#` is escaped into a single path segment rather than changing the path.
 
 ## 11. What this package does not implement
 

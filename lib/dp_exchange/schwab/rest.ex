@@ -1267,13 +1267,6 @@ defmodule DpExchange.Schwab.Rest do
 
   # `Decimal.new/1` raises on a string that is not a number, and a raise inside a chain read
   # would take the whole grid down over one key. This refuses that key by name instead.
-  defp chain_strike(key) when is_binary(key) do
-    case Decimal.parse(key) do
-      {value, ""} -> value
-      _other -> nil
-    end
-  end
-
   defp chain_strike(key), do: decimal(key)
 
   # **The venue does name these three on a chain row** — the comment that used to sit here
@@ -1798,7 +1791,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_all_orders(credentials, opts) do
-    with {:ok, from, to} <- order_window(opts) do
+    with :ok <- check_all_orders_window(opts),
+         {:ok, from, to} <- all_orders_window(opts) do
       query =
         query_string(%{
           "fromEnteredTime" => from,
@@ -1822,38 +1816,50 @@ defmodule DpExchange.Schwab.Rest do
   # range-checked and is refused rather than passed on unread.
   @max_order_window_days 365
 
-  defp order_window(opts) do
+  defp order_window(opts), do: checked_window(opts, :order)
+
+  # The same window rules for both endpoints that document "Maximum date range is 1 year":
+  # orders and transactions. `kind` only names the refusal (`:order_window_*` or
+  # `:transaction_window_*`).
+  defp checked_window(opts, kind) do
     from = Keyword.get(opts, :from)
     to = Keyword.get(opts, :to)
 
     with {:ok, from_text, to_text} <- both_ends(from, to),
-         {:ok, from_at} <- window_instant(from),
-         {:ok, to_at} <- window_instant(to),
-         :ok <- check_window_range(from_at, to_at) do
+         {:ok, from_at} <- window_instant(from, kind),
+         {:ok, to_at} <- window_instant(to, kind),
+         :ok <- check_window_range(from_at, to_at, kind) do
       {:ok, from_text, to_text}
     end
   end
 
-  defp window_instant(%DateTime{} = at), do: {:ok, at}
+  defp window_instant(%DateTime{} = at, _kind), do: {:ok, at}
 
-  defp window_instant(text) when is_binary(text) do
+  defp window_instant(text, kind) when is_binary(text) do
     case DateTime.from_iso8601(text) do
       {:ok, at, _offset} -> {:ok, at}
-      {:error, _reason} -> {:error, {:order_window_invalid, :schwab}}
+      {:error, _reason} -> {:error, window_error(kind, :invalid)}
     end
   end
 
-  defp window_instant(_other), do: {:error, {:order_window_invalid, :schwab}}
+  defp window_instant(_other, kind), do: {:error, window_error(kind, :invalid)}
 
-  defp check_window_range(from, to) do
+  defp check_window_range(from, to, kind) do
     seconds = DateTime.diff(to, from, :second)
 
     cond do
-      seconds < 0 -> {:error, {:order_window_reversed, :schwab}}
-      seconds > @max_order_window_days * 86_400 -> {:error, {:order_window_too_long, :schwab}}
+      seconds < 0 -> {:error, window_error(kind, :reversed)}
+      seconds > @max_order_window_days * 86_400 -> {:error, window_error(kind, :too_long)}
       true -> :ok
     end
   end
+
+  defp window_error(:order, :invalid), do: {:order_window_invalid, :schwab}
+  defp window_error(:order, :reversed), do: {:order_window_reversed, :schwab}
+  defp window_error(:order, :too_long), do: {:order_window_too_long, :schwab}
+  defp window_error(:transaction, :invalid), do: {:transaction_window_invalid, :schwab}
+  defp window_error(:transaction, :reversed), do: {:transaction_window_reversed, :schwab}
+  defp window_error(:transaction, :too_long), do: {:transaction_window_too_long, :schwab}
 
   # A list endpoint answers a list. Found 2026-10-10 by reading the path: `List.wrap/1` on
   # a map body turned one error-shaped or summary-shaped object into a one-row list, a
@@ -1955,17 +1961,17 @@ defmodule DpExchange.Schwab.Rest do
           "symbol" => Keyword.get(opts, :symbol)
         })
 
-      path = "/accounts/" <> URI.encode(account_hash) <> "/transactions" <> query
-
-      with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
+      with {:ok, path} <- account_path(account_hash, ["transactions"]),
+           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts) do
         list_body(body)
       end
     end
   end
 
-  defp transaction_window(opts) do
-    both_ends(Keyword.get(opts, :from), Keyword.get(opts, :to))
-  end
+  # The spec documents "Maximum date range is 1 year" for transactions as for orders
+  # (`accounts-and-trading-production.openapi.json`, `/accounts/{accountNumber}/transactions`),
+  # so the same local refusals apply; how the venue refuses them is unmeasured.
+  defp transaction_window(opts), do: checked_window(opts, :transaction)
 
   @doc """
   The refusals `get_transactions/3` makes before any request, in its order: the window, then
@@ -1985,7 +1991,58 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec check_order_window(keyword()) :: :ok | {:error, term()}
   def check_order_window(opts) do
-    with {:ok, _from, _to} <- order_window(opts), do: :ok
+    with {:ok, _from, _to} <- order_window(opts),
+         do: check_order_status(Keyword.get(opts, :status))
+  end
+
+  @doc """
+  The refusals `get_all_orders/2` makes before any request: everything
+  `check_order_window/1` checks, and that `from` is not more than 60 days before now.
+
+  The spec's `fromEnteredTime` on `GET /orders` reads "Date must be within 60 days from
+  today's date" (`accounts-and-trading-production.openapi.json`, the `/orders` operation);
+  the per-account orders endpoint carries no such sentence. Now is `opts[:now]` (a `DateTime`,
+  a test seam) or the clock. A refusal is `{:error, {:order_window_start_too_old, :schwab}}`.
+  How the venue itself refuses it is not documented and not measured.
+  """
+  @spec check_all_orders_window(keyword()) :: :ok | {:error, term()}
+  def check_all_orders_window(opts) do
+    with {:ok, _from, _to} <- all_orders_window(opts),
+         do: check_order_status(Keyword.get(opts, :status))
+  end
+
+  defp all_orders_window(opts) do
+    with {:ok, from, to} <- order_window(opts),
+         {:ok, from_at} <- window_instant(Keyword.get(opts, :from), :order) do
+      now =
+        case Keyword.get(opts, :now) do
+          %DateTime{} = at -> at
+          _clock -> DateTime.utc_now()
+        end
+
+      if DateTime.diff(now, from_at, :second) > 60 * 86_400,
+        do: {:error, {:order_window_start_too_old, :schwab}},
+        else: {:ok, from, to}
+    end
+  end
+
+  @order_statuses ~w(AWAITING_PARENT_ORDER AWAITING_CONDITION AWAITING_STOP_CONDITION
+                     AWAITING_MANUAL_REVIEW ACCEPTED AWAITING_UR_OUT PENDING_ACTIVATION QUEUED
+                     WORKING REJECTED PENDING_CANCEL CANCELED PENDING_REPLACE REPLACED FILLED
+                     EXPIRED NEW AWAITING_RELEASE_TIME PENDING_ACKNOWLEDGEMENT PENDING_RECALL
+                     UNKNOWN)
+
+  @doc "The order statuses the venue's `apiOrderStatus` enum lists (21 of them)."
+  @spec order_statuses() :: [String.t()]
+  def order_statuses, do: @order_statuses
+
+  # `status` is the spec's `apiOrderStatus` enum (`$ref` on both orders endpoints). Anything
+  # else - a lower-case string, an atom - is refused by name rather than sent for the venue
+  # to reject.
+  defp check_order_status(nil), do: :ok
+
+  defp check_order_status(status) do
+    if status in order_statuses(), do: :ok, else: {:error, {:invalid_order_status, status}}
   end
 
   # **Every shape is answered, none raises.** A type that was not a string (`types: :TRADE`)
@@ -2033,13 +2090,8 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts)
       when is_binary(account_hash) do
-    path =
-      "/accounts/" <>
-        URI.encode(account_hash) <>
-        "/transactions/" <>
-        URI.encode(to_string(transaction_id))
-
-    with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
+    with {:ok, path} <- account_path(account_hash, ["transactions", transaction_id]),
+         {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
          do: object_or_list(body)
   end
 
@@ -2067,15 +2119,67 @@ defmodule DpExchange.Schwab.Rest do
   defp object_or_list(body) when is_map(body) or is_list(body), do: {:ok, body}
   defp object_or_list(_other), do: {:error, :unexpected_response_shape}
 
+  # **A path segment is one segment.** `URI.encode/1` leaves `/`, `?` and `#` alone (it encodes
+  # a whole URI), so an order id of `"1/../../orders"` on `cancel_order/4` - a DELETE - became a
+  # different path, and a `?` or `#` cut the path short. A non-string id (an integer is what the
+  # venue sends) raised `FunctionClauseError` in the caller's process. Every caller-supplied
+  # segment is encoded with `URI.char_unreserved?/1` (so `/` is `%2F`); an integer is its
+  # decimal digits; an empty or other value is `{:error, {:invalid_path_segment, :schwab}}`
+  # before any request.
+  defp account_path(account_hash, rest \\ []) do
+    with {:ok, segments} <- path_segments([account_hash | rest]) do
+      {:ok, "/accounts/" <> Enum.join(segments, "/")}
+    end
+  end
+
+  @doc """
+  Whether `value` can be one path segment: a non-empty string or an integer. Anything else is
+  `{:error, {:invalid_path_segment, :schwab}}`. Public so `DpExchange.Schwab.Fake` refuses an
+  unusable order id in the place `Rest` does, before the credential is looked at.
+  """
+  @spec check_path_segment(term()) :: :ok | {:error, {:invalid_path_segment, :schwab}}
+  def check_path_segment(value) do
+    case path_segment(value) do
+      {:ok, _segment} -> :ok
+      :error -> {:error, {:invalid_path_segment, :schwab}}
+    end
+  end
+
+  defp path_segments(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case path_segment(value) do
+        {:ok, segment} -> {:cont, {:ok, acc ++ [segment]}}
+        :error -> {:halt, {:error, {:invalid_path_segment, :schwab}}}
+      end
+    end)
+  end
+
+  defp path_segment(value) when is_integer(value),
+    do: {:ok, Integer.to_string(value)}
+
+  defp path_segment(value) when is_binary(value) and value != "",
+    do: {:ok, URI.encode(value, &URI.char_unreserved?/1)}
+
+  defp path_segment(_other), do: :error
+
   # Only the parameters the caller actually gave. An empty query string is no `?` at all,
   # because a bare `?` is a different URL and this venue signs nothing, so the only cost of
   # sending one is a reader wondering what was filtered.
   defp query_string(params) do
     case params |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Enum.sort() do
       [] -> ""
-      pairs -> "?" <> URI.encode_query(pairs)
+      pairs -> "?" <> URI.encode_query(Enum.map(pairs, &query_pair/1))
     end
   end
+
+  # The venue's list parameters (`fields`) are comma-separated. A list of strings or atoms
+  # used to raise in `URI.encode_query/1` inside the caller's process; it is joined the way
+  # the venue documents instead. Anything else non-scalar still raises there, and is a caller
+  # bug rather than venue input.
+  defp query_pair({key, values}) when is_list(values),
+    do: {key, Enum.map_join(values, ",", &to_string/1)}
+
+  defp query_pair(pair), do: pair
 
   # --- accounts and trading -----------------------------------------------
 
@@ -2098,15 +2202,22 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   defp account_numbers(rows) when is_list(rows) do
-    accounts =
-      Enum.map(rows, fn row ->
-        %{account_number: row["accountNumber"], hash: row["hashValue"]}
+    # A row that is not an object raised in `Access`, and a hash that is not a non-empty string
+    # (a number, say) was returned and then raised in every `/accounts/{hash}` path built from
+    # it. Both are an unreadable reply.
+    readable? =
+      Enum.all?(rows, fn
+        %{"hashValue" => hash} when is_binary(hash) and hash != "" -> true
+        _unreadable -> false
       end)
 
-    if Enum.any?(accounts, &is_nil(&1.hash)) do
-      {:error, :unexpected_response_shape}
+    if readable? do
+      {:ok,
+       Enum.map(rows, fn row ->
+         %{account_number: row["accountNumber"], hash: row["hashValue"]}
+       end)}
     else
-      {:ok, accounts}
+      {:error, :unexpected_response_shape}
     end
   end
 
@@ -2130,9 +2241,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_balances(map(), String.t(), keyword()) ::
           {:ok, [DpExchange.Core.Types.Balance.t()]} | {:error, term()} | {:refused, term()}
   def get_balances(credentials, account_hash, opts) do
-    path = "/accounts/" <> URI.encode(account_hash)
-
-    with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
+    with {:ok, path} <- account_path(account_hash),
+         {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
       balances(body)
     end
   end
@@ -2236,9 +2346,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec place_order(map(), String.t(), map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, account_hash, payload, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/orders"
-
-    with {:ok, headers} <- Auth.headers(credentials, opts),
+    with {:ok, path} <- account_path(account_hash, ["orders"]),
+         {:ok, headers} <- Auth.headers(credentials, opts),
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
 
@@ -2322,9 +2431,9 @@ defmodule DpExchange.Schwab.Rest do
   @spec preview_order(map(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, account_hash, payload, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/previewOrder"
-
-    post_json(credentials, trader_url(opts) <> path, payload, opts)
+    with {:ok, path} <- account_path(account_hash, ["previewOrder"]) do
+      post_json(credentials, trader_url(opts) <> path, payload, opts)
+    end
   end
 
   @doc """
@@ -2342,9 +2451,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec replace_order(map(), String.t(), String.t(), map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, account_hash, order_id, payload, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/orders/" <> URI.encode(order_id)
-
-    with {:ok, headers} <- Auth.headers(credentials, opts),
+    with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
+         {:ok, headers} <- Auth.headers(credentials, opts),
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
       url = trader_url(opts) <> path
@@ -2390,9 +2498,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec cancel_order(map(), String.t(), String.t(), keyword()) ::
           :ok | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, account_hash, order_id, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/orders/" <> URI.encode(order_id)
-
-    with {:ok, headers} <- Auth.headers(credentials, opts) do
+    with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
+         {:ok, headers} <- Auth.headers(credentials, opts) do
       url = trader_url(opts) <> path
 
       case HttpClient.request(:delete, url, headers, nil, order_write_request_opts(opts)) do
@@ -2415,8 +2522,9 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_order(map(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, account_hash, order_id, opts) do
-    path = "/accounts/" <> URI.encode(account_hash) <> "/orders/" <> URI.encode(order_id)
-    get(trader_url(opts) <> path, credentials, opts)
+    with {:ok, path} <- account_path(account_hash, ["orders", order_id]) do
+      get(trader_url(opts) <> path, credentials, opts)
+    end
   end
 
   @doc """
@@ -2436,7 +2544,8 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_orders(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, account_hash, opts) do
-    with {:ok, from, to} <- order_window(opts) do
+    with {:ok, from, to} <- order_window(opts),
+         :ok <- check_order_status(Keyword.get(opts, :status)) do
       query =
         query_string(%{
           "fromEnteredTime" => from,
@@ -2445,9 +2554,8 @@ defmodule DpExchange.Schwab.Rest do
           "maxResults" => Keyword.get(opts, :max_results)
         })
 
-      path = "/accounts/" <> URI.encode(account_hash) <> "/orders" <> query
-
-      with {:ok, body} <- get(trader_url(opts) <> path, credentials, opts) do
+      with {:ok, path} <- account_path(account_hash, ["orders"]),
+           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts) do
         if is_list(body), do: {:ok, body}, else: {:error, :unexpected_response_shape}
       end
     end
@@ -2606,7 +2714,11 @@ defmodule DpExchange.Schwab.Rest do
 
   defp decimal(nil), do: nil
   defp decimal(""), do: nil
-  defp decimal(%Decimal{} = value), do: value
+  # A `Decimal` struct a caller passes in is held to the same standard as a string: NaN and
+  # Infinity are refused, and so is an exponent beyond +-1000 (`1E999999999` parses as finite,
+  # and the first compare or add against it allocates a billion-digit integer). The limit is
+  # chosen, not measured: no price, size or balance has an exponent anywhere near it.
+  defp decimal(%Decimal{} = value), do: finite_decimal(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
@@ -2630,15 +2742,22 @@ defmodule DpExchange.Schwab.Rest do
   # which is why this comment is in each of them now rather than one of them.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
-
-      _unparsable ->
-        nil
+      {parsed, ""} -> finite_decimal(parsed)
+      _unparsable -> nil
     end
   end
 
   defp decimal(_other), do: nil
+
+  @max_decimal_exponent 1000
+
+  defp finite_decimal(%Decimal{exp: exp} = value) do
+    cond do
+      Decimal.nan?(value) or Decimal.inf?(value) -> nil
+      abs(exp) > @max_decimal_exponent -> nil
+      true -> value
+    end
+  end
 
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's field list does not check that a value is

@@ -261,7 +261,9 @@ defmodule DpExchange.Schwab.Orders do
 
   defp finite_number?(nil), do: true
   defp finite_number?(value) when is_number(value), do: true
-  defp finite_number?(%Decimal{} = value), do: not (Decimal.nan?(value) or Decimal.inf?(value))
+
+  defp finite_number?(%Decimal{exp: exp} = value),
+    do: not (Decimal.nan?(value) or Decimal.inf?(value)) and abs(exp) <= 1000
 
   defp finite_number?(value) when is_binary(value) do
     case Decimal.parse(String.trim(value)) do
@@ -743,7 +745,7 @@ defmodule DpExchange.Schwab.Orders do
 
   defp number(value) when is_binary(value) do
     case Decimal.parse(String.trim(value)) do
-      {parsed, ""} -> if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+      {parsed, ""} -> if finite_number?(parsed), do: parsed, else: nil
       _unreadable -> nil
     end
   end

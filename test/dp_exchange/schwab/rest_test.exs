@@ -572,7 +572,7 @@ defmodule DpExchange.Schwab.RestTest do
       assert {:error, :unexpected_response_shape} = Rest.get_account_summaries(@creds, opts)
 
       assert {:error, :unexpected_response_shape} =
-               Rest.get_all_orders(@creds, opts ++ window)
+               Rest.get_all_orders(@creds, opts ++ window ++ [now: ~U[2026-08-15 00:00:00Z]])
 
       assert {:error, :unexpected_response_shape} =
                Rest.get_transactions(@creds, "hash-1", opts ++ window ++ [types: ["TRADE"]])
