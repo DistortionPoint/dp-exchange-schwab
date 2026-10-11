@@ -104,18 +104,31 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
   end
 
   describe "timestamps" do
-    test "a seconds epoch is read as seconds, and milliseconds as milliseconds" do
-      # A threshold rather than a fallback: guessing wrong puts a 2026 quote in 1970 or
-      # in the year 58,000, and both are loud.
-      seconds = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => 1_787_936_147}}}
+    test "an epoch is always milliseconds; the unit is never inferred from the magnitude" do
+      # The spec types these int64 epoch milliseconds. 1_787_936_147 is read as what it
+      # says (January 1970), not as seconds in 2026.
+      small = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => 1_787_936_147}}}
       millis = %{"AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => 1_787_936_147_000}}}
 
-      assert {:ok, from_seconds} = Rest.get_price("AAPL", @creds, opts(responding(seconds)))
+      assert {:ok, as_millis} = Rest.get_price("AAPL", @creds, opts(responding(small)))
       assert {:ok, from_millis} = Rest.get_price("AAPL", @creds, opts(responding(millis)))
 
-      # Same instant; the millisecond parse carries {0, 3} precision and the second parse
-      # {0, 0}, which is a difference in stated precision rather than in time.
-      assert DateTime.compare(from_seconds.venue_time, from_millis.venue_time) == :eq
+      assert as_millis.venue_time == ~U[1970-01-21 16:38:56.147Z]
+      assert from_millis.venue_time.year == 2026
+    end
+
+    test "an early-history candle in milliseconds is not mistaken for seconds" do
+      # 50_000_000_000 ms is 1971-08-02; read as seconds it would be the year 3554.
+      body = %{
+        "candles" => [
+          %{"open" => 1, "high" => 1, "low" => 1, "close" => 1, "datetime" => 50_000_000_000}
+        ]
+      }
+
+      assert {:ok, [bar]} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
+
+      assert bar.opened_at == ~U[1971-08-02 16:53:20.000Z]
     end
 
     test "an epoch delivered as a string is read" do

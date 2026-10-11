@@ -493,9 +493,21 @@ defmodule DpExchange.Schwab.Socket do
     # `last_top` goes with the session, and for the same reason. A book carried across
     # this boundary would be this package continuing to assert a level on behalf of a session
     # the venue no longer has; the fresh session re-states what is true when it resubscribes.
+    #
+    # `login_deadline` and `liveness` go with the session too. Their timers are not
+    # cancelled, so one that fired during the backoff above (or while reconnecting) sits in
+    # the mailbox AHEAD of the new connection's `:login` and, with the old ref still in the
+    # state, matched: it closed the freshly connected session over a LOGIN that belonged to
+    # the dead one. Cleared, no stale ref matches any clause but the ignoring catch-all.
     {:reconnect,
      state
-     |> Map.merge(%{logged_in?: false, last_top: %{}, subscribed: %{}})
+     |> Map.merge(%{
+       logged_in?: false,
+       last_top: %{},
+       subscribed: %{},
+       login_deadline: nil,
+       liveness: nil
+     })
      |> Map.put(:delayed_reported, MapSet.new())}
   end
 

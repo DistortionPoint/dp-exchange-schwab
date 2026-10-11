@@ -51,10 +51,10 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
   end
 
   test "a value Core has no word for is nil, never the nearest atom" do
-    # TRAILING_STOP is not :stop; REPLACED is not :cancelled; EXCHANGE is not a side.
+    # CABINET is not :limit; REPLACED is not :cancelled; EXCHANGE is not a side.
     odd = %{
       @limit_buy
-      | "orderType" => "TRAILING_STOP",
+      | "orderType" => "CABINET",
         "status" => "REPLACED",
         "duration" => "END_OF_WEEK",
         "orderLegCollection" => [
@@ -64,6 +64,19 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
 
     assert {:ok, %Order{order_type: nil, status: nil, time_in_force: nil, side: nil}} =
              Orders.from_venue(odd)
+  end
+
+  test "every order type the package can send reads back as the atom it was sent from" do
+    for {wire, atom} <- [
+          {"TRAILING_STOP", :trailing_stop},
+          {"TRAILING_STOP_LIMIT", :trailing_stop_limit},
+          {"MARKET_ON_CLOSE", :market_on_close},
+          {"LIMIT_ON_CLOSE", :limit_on_close},
+          {"STOP_LIMIT", :stop_limit}
+        ] do
+      assert {:ok, %Order{order_type: ^atom}} =
+               Orders.from_venue(%{@limit_buy | "orderType" => wire})
+    end
   end
 
   test "a spread with an unreadable leg is refused, not read as a single-leg order" do

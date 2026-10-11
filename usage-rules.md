@@ -9,7 +9,8 @@ README; it is what the Hex tarball ships for consumers.
 They used to return the venue's raw JSON map, against the `Core.Venue` contract. If you
 wrote `order["status"]` against this package, it is now `order.status` — an atom from
 `Core.Types.Order`'s vocabulary, or `nil` where Schwab's own value has no equivalent there
-(`REPLACED`, `TRAILING_STOP`, `END_OF_WEEK`). A spread has `symbol: nil` and `side: nil` at
+(`REPLACED`, `CABINET`, `END_OF_WEEK`; `TRAILING_STOP`, `TRAILING_STOP_LIMIT`,
+`MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE` read back as their own atoms since Core 0.3.74). A spread has `symbol: nil` and `side: nil` at
 the top and carries its `legs`. An order with no `orderId` is refused rather than returned.
 
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
@@ -321,7 +322,13 @@ DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
 account in one call, and `Position` has no account field. So with more than one account,
 leave out `:account_number` and you get `{:error, {:account_number_required, n}}` rather than
 one list mixing every account. A row holding both a long and a short leg comes back as two
-positions. `notional_value` is unsigned, because `:side` carries the direction.
+positions. `notional_value` is unsigned, because `:side` carries the direction. A negative
+`longQuantity` or `shortQuantity` refuses the whole read as `{:error,
+{:unexpected_position_quantity, :negative}}`: the spec leaves the sign of a short unstated, and
+reading it as a flat position would drop the short from the reply.
+
+Venue times (`quoteTime`, `tradeTime`, a candle's `datetime`) are read as epoch **milliseconds**
+always; a small integer is not guessed to be seconds.
 
 A margin account's `available_balance` is `availableFunds`, not `buyingPower`. Buying power
 is leveraged and can exceed the balance it would sit inside.

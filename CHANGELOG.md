@@ -31,6 +31,31 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST epoch below 1e11 was read as SECONDS.** `Rest.parse_time/1` guessed the unit from
+  the magnitude, though the spec types `quoteTime`, `tradeTime` and a candle's `datetime` as
+  int64 epoch milliseconds. A genuine early-history bar (a `datetime` before March 1973, 50e9
+  ms for instance) was read as seconds and placed in the year 3554. Always milliseconds now;
+  the unit is not inferred. A value the spec does not offer is read as what it says.
+- **A negative position quantity dropped the position.** `position_side/2` only takes a
+  positive leg, so a short sent as `shortQuantity: -40` (the spec leaves the sign unstated,
+  unmeasured) fell through to "flat" and vanished from `get_positions/1`. A negative
+  `longQuantity` or `shortQuantity` now refuses the reply as
+  `{:error, {:unexpected_position_quantity, :negative}}`.
+- **Trailing-stop and on-close orders read back as `order_type: nil`.** Core 0.3.74 names
+  `:trailing_stop`, `:trailing_stop_limit`, `:market_on_close` and `:limit_on_close`, but
+  `Orders.from_venue/1` kept a four-atom filter, so an order this package placed with one of
+  them came back typeless. The read-back table is now the full inverse of the send table, and
+  the dependency floor is `~> 0.3.74`.
+- **A `LIMIT_ON_CLOSE` price of zero or below was sent.** It was the one limit type left out
+  of the positive-price check `LIMIT`, `STOP`, `STOP_LIMIT` and `TRAILING_STOP_LIMIT` get.
+- **A stale LOGIN deadline or liveness check closed a fresh session.** `Socket` did not clear
+  `login_deadline` and `liveness` when the connection dropped. A timer that fired during the
+  reconnect backoff sat in the mailbox ahead of the new `:login`, still matched the old ref in
+  the state, and closed the freshly connected session with a bogus `:login_unanswered`
+  notice. Both are cleared with the rest of the session in `handle_disconnect/2`.
+
 ## [0.2.108] - 2026-10-11
 
 ### Fixed

@@ -195,6 +195,21 @@ defmodule DpExchange.Schwab.SocketTest do
       assert_received {:dp_exchange, :schwab, %Notice{kind: :credentials_rejected}}
     end
 
+    test "a deadline and a liveness check from a dropped connection do nothing after it" do
+      sent = logging_in()
+      check = make_ref()
+      armed = %{sent | liveness: check}
+
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, armed)
+      assert dropped.login_deadline == nil
+      assert dropped.liveness == nil
+
+      # Timers that fired while the socket was down arrive ahead of the new `:login`.
+      assert {:ok, ^dropped} = Socket.handle_info({:login_deadline, sent.login_deadline}, dropped)
+      assert {:ok, ^dropped} = Socket.handle_info({:liveness, check}, dropped)
+      refute_received {:dp_exchange, :schwab, %Notice{details: %{reason: :login_unanswered}}}
+    end
+
     test "a deadline from an earlier LOGIN does nothing once a new one is out" do
       first = logging_in()
       {:reply, _frame, second} = Socket.handle_info(:login, first)

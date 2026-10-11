@@ -85,6 +85,16 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
       end
     end
 
+    test "a LIMIT_ON_CLOSE price is held to the same rule as a LIMIT price" do
+      for value <- [0, -1, "0", Decimal.new("-0.01")] do
+        assert Orders.build(Map.merge(@buy, %{order_type: :limit_on_close, price: value})) ==
+                 {:error, {:invalid_price, value}}
+      end
+
+      assert {:ok, %{"orderType" => "LIMIT_ON_CLOSE"}} =
+               Orders.build(Map.merge(@buy, %{order_type: :limit_on_close, price: 1}))
+    end
+
     test "a positive price still builds" do
       assert {:ok, %{"price" => "0.01"}} =
                Orders.build(Map.merge(@buy, %{order_type: :limit, price: "0.01"}))

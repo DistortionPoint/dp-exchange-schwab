@@ -681,6 +681,29 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       end
     end
 
+    test "a negative leg quantity REFUSES the reply, it is not read as a flat position" do
+      # The spec leaves the sign of `shortQuantity` unstated. A short sent as -40 used to fall
+      # through to "flat" and vanish from the reply.
+      for {long, short} <- [{0.0, -40.0}, {-5.0, 0.0}, {10.0, -40.0}] do
+        body = [
+          %{
+            "securitiesAccount" => %{
+              "positions" => [
+                %{
+                  "instrument" => %{"symbol" => "AAPL"},
+                  "longQuantity" => long,
+                  "shortQuantity" => short
+                }
+              ]
+            }
+          }
+        ]
+
+        assert {:error, {:unexpected_position_quantity, :negative}} =
+                 Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
+      end
+    end
+
     test "an account with no positions block yields none rather than raising" do
       body = [%{"securitiesAccount" => %{"accountNumber" => "1"}}]
       assert {:ok, []} = Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)

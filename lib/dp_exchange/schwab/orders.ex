@@ -446,8 +446,9 @@ defmodule DpExchange.Schwab.Orders do
   # four types are checked. The net types (NET_DEBIT, NET_CREDIT, NET_ZERO) are deliberately
   # left alone: this builder cannot send them, and a net price is a spread's balance, where
   # zero and negative values are legitimate. `finite_number?/1` has already run, so every
-  # value here reads as a finite number.
-  @positive_price_types ~w(LIMIT STOP STOP_LIMIT TRAILING_STOP_LIMIT)
+  # value here reads as a finite number. `LIMIT_ON_CLOSE` is a limit order like `LIMIT`: its
+  # price is a single-instrument price and was the one limit type left unchecked.
+  @positive_price_types ~w(LIMIT LIMIT_ON_CLOSE STOP STOP_LIMIT TRAILING_STOP_LIMIT)
 
   defp positive_prices(type, request) when type in @positive_price_types do
     Enum.reduce_while([:price, :stop_price], :ok, fn key, :ok ->
@@ -620,22 +621,15 @@ defmodule DpExchange.Schwab.Orders do
 
   # --- reading an order back --------------------------------------------------
 
-  # `Core.Types.Order.order_type/0` is `:market | :limit | :stop | :stop_limit |
-  # :post_only | :ioc | :fok` — this venue never builds the last three, and of the eight
-  # it does build, only these four have an atom on that type. `build/2`'s own
-  # `@order_types` above can also send `TRAILING_STOP`, `TRAILING_STOP_LIMIT`,
-  # `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE`, none of which `Core.Types.Order.order_type/0`
-  # names, so reading one of those back has nowhere honest to land but `nil`.
+  # `Core.Types.Order.order_type/0` names all eight order types `build/2` can send
+  # (`:trailing_stop`, `:trailing_stop_limit`, `:market_on_close` and `:limit_on_close` joined
+  # it in Core 0.3.74; before that they read back as `nil`). The venue's CABINET,
+  # NON_MARKETABLE, EXERCISE and NET_* types have no Core atom and read back as `nil`.
   #
-  # Built FROM `@order_types` rather than a second hand-typed table, restricted to the
-  # types Core actually has an atom for — so an order type added to `@order_types` cannot
-  # silently drift from what comes back here the way two independently maintained tables
-  # could. `@durations_in` below does the same inversion for the same reason.
-  @core_order_types ~w(market limit stop stop_limit)a
-
-  @order_types_in @order_types
-                  |> Map.filter(fn {atom, _wire} -> atom in @core_order_types end)
-                  |> Map.new(fn {atom, wire} -> {wire, atom} end)
+  # Built FROM `@order_types` rather than a second hand-typed table, so an order type added
+  # to `@order_types` cannot silently drift from what comes back here. `@durations_in` below
+  # does the same inversion for the same reason.
+  @order_types_in Map.new(@order_types, fn {atom, wire} -> {wire, atom} end)
 
   # The inverse of `@durations`, which is what this module SENDS — so reading back an order
   # this package placed yields the same atom it was placed with.

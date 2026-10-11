@@ -428,10 +428,13 @@ defmodule DpExchange.Schwab.Rest do
 
   defp positive_epoch?(_absent), do: false
 
-  defp parse_time(value) when is_integer(value) and value > 100_000_000_000,
+  # **Milliseconds, always.** The vendor types `quoteTime`, `tradeTime` and a candle's
+  # `datetime` as int64 epoch milliseconds. A value below 1e11 was once read as SECONDS on a
+  # guess about the unit; but 1e11 ms is only March 1973, so the guess also moved a genuine
+  # early-history bar (a 1960s-70s `datetime` in `/pricehistory`) to the year 3000+. A unit
+  # the spec does not offer is not inferred from the magnitude.
+  defp parse_time(value) when is_integer(value),
     do: DateTime.from_unix(value, :millisecond)
-
-  defp parse_time(value) when is_integer(value), do: DateTime.from_unix(value)
 
   defp parse_time(value) when is_binary(value) do
     case Integer.parse(value) do
@@ -1641,6 +1644,21 @@ defmodule DpExchange.Schwab.Rest do
     long = decimal(row["longQuantity"])
     short = decimal(row["shortQuantity"])
 
+    # **A negative leg is refused, not read as flat.** The spec types both quantities as bare
+    # `number`s and says nothing of their sign, so a short sent as `shortQuantity: -40` is a
+    # sign convention this package has not measured. `position_side/2` only takes a POSITIVE
+    # leg, so such a row used to fall through to "flat" and the short vanished from the
+    # reply. The reply is refused, the way an unattributable row is.
+    case {negative?(long), negative?(short)} do
+      {false, false} -> to_positions(row, instrument, long, short)
+      _signed -> [{:error, {:unexpected_position_quantity, :negative}}]
+    end
+  end
+
+  defp negative?(nil), do: false
+  defp negative?(value), do: Decimal.negative?(value)
+
+  defp to_positions(row, instrument, long, short) do
     case {positive?(long), positive?(short)} do
       {true, true} ->
         [
