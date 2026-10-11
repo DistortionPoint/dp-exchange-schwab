@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.102] - 2026-10-11
+
 ### Fixed
 
 - **An expired access token on the fallback poll reported every wanted symbol as refused.**
