@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.104] - 2026-10-11
+
 ### Fixed
 
 - **The fake's `get_orders/2` ignored the `from`/`to` window.** The venue requires
