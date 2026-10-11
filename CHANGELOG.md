@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.107] - 2026-10-11
+
 ### Fixed
 
 - **A REST top of book could be dated by the last trade.** `get_top_of_book/3` took
