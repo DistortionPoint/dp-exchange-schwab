@@ -31,6 +31,33 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Feed.update_credentials/2` sent the credential map to the feed in the clear.** The
+  state redaction in `Credentials` does not reach the call message, which OTP prints in full
+  in the caller's exit reason when the call times out
+  (`{:timeout, {GenServer, :call, [feed, {:update_credentials, %{refresh_token: ...}}, _]}}`)
+  and in the feed's "Last message" line if it dies handling it. The map is now wrapped in the
+  caller, before it is sent.
+- **`StreamerInfo` printed the customer and correlation ids.** `Socket` keeps the struct in
+  its state for the life of the connection, so any crash report carried
+  `schwabClientCustomerId` and `schwabClientCorrelId`. Its `Inspect` now omits both; the LOGIN
+  still reads the real values.
+- **`Feed.start_link/1` and `Supervisor.start_link/1` stored a raw `:credentials` map** when
+  reached without `child_spec/1`; both now wrap it (`Credentials.wrap_opt/1`), so the
+  supervisor's init arguments and the feed's start arguments print redacted.
+- **`Auth.refresh/2` held up to 16 MiB of whatever answered the token URL.** A token response
+  is a couple of kilobytes. The cap is now 1 MiB (`:max_body_bytes` overrides it) and an
+  oversized reply is `{:error, {:exchange_error, :schwab, {:response_too_large, limit}}}`.
+
+### Checked, no change
+
+- Load: `Rest.get_prices/3` batches 100 symbols per request, `get_option_chain/3` flattens
+  once, `Feed`'s `delivering`/`kinds` are bounded by the wanted set, `Socket`'s `held` by 64
+  and its delayed-symbol set by 5_000. Streamer symbol limits per `SUBS` are not documented
+  and not measured, so no cap is invented. A burst of frames is not back-pressured between
+  `Socket` and `Feed` (consumers are, through `Core.Fanout`); unmeasured against the venue.
+
 ## [0.2.111] - 2026-10-11
 
 ### Fixed

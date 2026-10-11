@@ -28,6 +28,11 @@ defmodule DpExchange.Schwab.StreamerInfo do
   visible here, named for what it is, is how that mistake stops being repeatable.
   """
 
+  # `Socket` keeps this struct in its state for the life of the connection, and OTP prints a
+  # process's state in full in a crash report. The customer id and correlation id identify the
+  # signed-in customer's Streamer session; they are not credentials, but nobody pasting a crash
+  # report into an issue should be handing them over. Redacted the way `Credentials` is.
+  @derive {Inspect, except: [:customer_id, :correl_id]}
   @enforce_keys [:socket_url, :customer_id, :correl_id, :channel, :function_id]
   defstruct [:socket_url, :customer_id, :correl_id, :channel, :function_id]
 

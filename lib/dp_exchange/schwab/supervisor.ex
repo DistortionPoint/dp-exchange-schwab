@@ -107,6 +107,10 @@ defmodule DpExchange.Schwab.Supervisor do
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
+    # Wrapped here too: a caller that reached this function without `child_spec/1` (see
+    # `Credentials`) would otherwise leave the raw map in this supervisor's init args, which
+    # OTP prints with the supervisor's state if it ever terminates.
+    opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 

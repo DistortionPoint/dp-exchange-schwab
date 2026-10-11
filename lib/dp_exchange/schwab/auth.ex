@@ -362,11 +362,14 @@ defmodule DpExchange.Schwab.Auth do
   @spec token_url(keyword()) :: String.t()
   def token_url(opts), do: Config.opt(opts, :token_url, @token_url)
 
+  @max_token_body_bytes 1_048_576
+
   defp request_opts(opts) do
     opts
     |> Keyword.take([
       :limiter,
       :timeout,
+      :max_body_bytes,
       :log_requests,
       :plug,
       :req_adapter,
@@ -377,6 +380,9 @@ defmodule DpExchange.Schwab.Auth do
       :rate_limit_blocking
     ])
     |> Keyword.merge(provider: :schwab, raw_status: true, retry_attempts: 0)
+    # A token response is a couple of kilobytes. Core's default cap is 16 MiB, which is what a
+    # captive portal or a hostile host answering the token URL could make this process hold.
+    |> Keyword.put_new(:max_body_bytes, @max_token_body_bytes)
 
     # `:retry_attempts` is dropped from the caller's options above and forced to 0 here,
     # deliberately and not as a default. A refresh is at-most-once: a retry after a

@@ -290,6 +290,11 @@ is useful to see mid-incident. This is not a claim about your own code: if you r
 `state.credentials` yourself via `:sys.get_state/1` or similar, you get the same struct —
 call `Map.from_struct/1` on it to get the plain map back.
 
+The same holds for the message `update_credentials/2` sends the feed (wrapped before it is
+sent, so a timed-out call's exit reason does not print the tokens) and for the Streamer's
+`customer_id` and `correl_id` in `StreamerInfo`, which `Socket` keeps in its state and which
+`inspect/1` now hides.
+
 ## 4. A symbol is one instrument, not a pair
 
 `"AAPL"`, not `"AAPL-USD"`. Pair-shaped input is refused, and this matters more than it

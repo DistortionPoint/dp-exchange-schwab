@@ -361,7 +361,11 @@ defmodule DpExchange.Schwab.Feed do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    opts = Keyword.put_new(opts, :config_snapshot, Config.snapshot(@config_keys))
+    opts =
+      opts
+      |> Credentials.wrap_opt()
+      |> Keyword.put_new(:config_snapshot, Config.snapshot(@config_keys))
+
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
@@ -549,8 +553,14 @@ defmodule DpExchange.Schwab.Feed do
   """
   @spec update_credentials(GenServer.server(), term()) ::
           :ok | {:error, {:invalid_credentials, term()}}
-  def update_credentials(feed, credentials) when is_map(credentials),
-    do: GenServer.call(feed, {:update_credentials, credentials}, @call_timeout)
+  def update_credentials(feed, credentials) when is_map(credentials) do
+    # Wrapped BEFORE it is sent. OTP prints the call message in full in two places the feed's
+    # own state redaction cannot reach: the caller's exit reason when the call times out
+    # (`{:timeout, {GenServer, :call, [feed, message, timeout]}}`), and the feed's "Last
+    # message" line if it dies handling it. A plain map there put the refresh token and
+    # client secret into a crash report.
+    GenServer.call(feed, {:update_credentials, Credentials.wrap(credentials)}, @call_timeout)
+  end
 
   # Refused in the caller: a non-map reached `handle_call/3`, raised there, and the restart
   # lost every subscription made since start.
