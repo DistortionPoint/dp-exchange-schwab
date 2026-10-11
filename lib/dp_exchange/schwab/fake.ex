@@ -44,14 +44,31 @@ defmodule DpExchange.Schwab.Fake do
   bookkeeping that always succeeds by construction, not a call standing in for one the
   venue could refuse.
 
-  **The widened surface is not wired yet** — `get_option_chain/2`,
-  `get_option_expirations/2`, `get_screener/2` and `get_transactions/2` have real success
-  paths but no injection point. They gate credentials correctly; they just cannot yet be
-  made to fail on demand. (`get_rate_limit_status/2` is not among them: it is `:unsupported`
-  and answers `{:error, :not_supported}`, with no success path to inject into.) Stated
-  here rather than left to be discovered, because a caller reaching for `queue_failures/2`
-  against one of them will otherwise get the fake's normal answer and read it as the
-  injection not working.
+  The widened surface is wired too: `get_positions/1`, `get_option_chain/2`,
+  `get_option_expirations/2` (targetable by the underlying), `get_screener/2`,
+  `get_transactions/2` and `get_all_orders/2` all consult `FakeInjection` first.
+  (`get_rate_limit_status/2` has no success path to inject into: it is `:unsupported` and
+  answers `{:error, :not_supported}`.)
+
+  ## Credentials are judged by the module that signs
+
+  A credential is refused as the real package refuses it: not a map (market data), or no
+  non-blank `:access_token` (`Auth.headers/2`, the one judgement both share). Market-data
+  calls ask for a credential map first, then judge their own arguments, then sign; account
+  calls judge their arguments and sign last. `%{refresh_token: "x"}` and
+  `%{access_token: ""}` are refused here as they are there.
+
+  ## What is deliberately not provided
+
+  The facade's raw, undecoded reads — `get_transaction/4`, `get_account_summaries/2`,
+  `get_symbol_quote/3`, `get_market/3`, `get_instrument/3` and `get_user_preference/2` —
+  and `refresh_credentials/2` have no fake. Each returns the venue's own JSON, so a fake
+  would have to invent a venue document this repository has no credential to check
+  against; a consumer needing one drives `DpExchange.Schwab.Rest` with its own `:plug`.
+  The static lists and pure predicates (`movers_universes/0`, `markets/0`,
+  `transaction_types/0`, `equity_instructions/0`, `option_instructions/0`,
+  `needs_refresh?/2`, `credential_failure?/1`) are delegated, and `wanted/1`, `status/1`
+  and `update_credentials/2` answer for the fake's own bookkeeping.
   """
 
   @behaviour DpExchange.Core.Venue
@@ -60,7 +77,7 @@ defmodule DpExchange.Schwab.Fake do
 
   alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
   alias DpExchange.Schwab
-  alias DpExchange.Schwab.{Orders, Rest, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, Orders, Rest, SymbolFormat}
 
   @listed ~w(AAPL MSFT GOOGL AMZN NVDA F BRK.B)
 
@@ -88,6 +105,14 @@ defmodule DpExchange.Schwab.Fake do
   # fake issued `FAKEHASH`. A replacement is a NEW order, so it has a different id.
   @order_id "1005439821"
   @hash "9ABCDEF0123456789ABCDEF01234567"
+
+  # The one account the fake holds. `Rest.get_positions/2` names which account a read is
+  # about by `opts[:account_number]` and refuses a number the credential has no account for,
+  # after the read; the fake does the same against this number.
+  @account_number "123456789"
+
+  # What was asked for, kept apart from what the fake can deliver (`subscribed/0`).
+  @wanted_key {__MODULE__, :wanted}
 
   @doc "Symbols this fake lists."
   @spec listed() :: [String.t()]
@@ -134,8 +159,11 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_price(symbol, opts) do
-    with :ok <- require_credentials(opts),
+    # The real order: the facade wants a credential map, `Rest` judges the symbol, and only
+    # then does signing find a missing or blank token.
+    with :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
+         :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
       {:ok,
        %Quote{
@@ -157,8 +185,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_top_of_book(symbol, opts) do
-    with :ok <- require_credentials(opts),
+    with :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
+         :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
       {:ok,
        %TopOfBook{
@@ -187,10 +216,11 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_historical_prices(symbol, timeframe, range, opts) do
-    with :ok <- require_credentials(opts),
+    with :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          # The real module's own question, in its order: width, range shape, then reach.
          :ok <- Rest.check_history(timeframe, range, @as_of),
+         :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
       {:ok,
        for offset <- 4..0//-1 do
@@ -219,14 +249,21 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_symbols(opts) do
-    with :ok <- require_credentials(opts) do
-      case Keyword.get(opts, :query) do
-        query when is_binary(query) and query != "" ->
-          {:ok, Enum.filter(@listed, &String.starts_with?(&1, String.upcase(query)))}
+    with :ok <- require_credential_map(opts),
+         {:ok, query} <- fetch_query(opts),
+         :ok <- require_credentials(opts) do
+      # Sorted, as `Rest.get_symbols/2` returns them.
+      {:ok,
+       @listed
+       |> Enum.filter(&String.starts_with?(&1, String.upcase(query)))
+       |> Enum.sort()}
+    end
+  end
 
-        _absent ->
-          {:error, {:query_required, :schwab}}
-      end
+  defp fetch_query(opts) do
+    case Keyword.get(opts, :query) do
+      query when is_binary(query) and query != "" -> {:ok, query}
+      _absent -> {:error, {:query_required, :schwab}}
     end
   end
 
@@ -268,9 +305,10 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_market_status(opts) do
-    with :ok <- require_credentials(opts),
+    with :ok <- require_credential_map(opts),
          # The real path's question: a market the venue has no hours for is refused.
-         :ok <- Rest.check_market(Config.opt(opts, :market, "equity")) do
+         :ok <- Rest.check_market(Config.opt(opts, :market, "equity")),
+         :ok <- require_credentials(opts) do
       {:ok, Config.opt(opts, :market_status, :open)}
     end
   end
@@ -287,7 +325,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_get_accounts(credentials, opts) do
     with :ok <- require_credentials(credentials: credentials) do
-      {:ok, [%{account_number: "123456789", hash: Config.opt(opts, :account_hash, @hash)}]}
+      {:ok, [%{account_number: @account_number, hash: Config.opt(opts, :account_hash, @hash)}]}
     end
   end
 
@@ -537,10 +575,19 @@ defmodule DpExchange.Schwab.Fake do
         [fake_order_body(@order_id) | placed]
         |> Enum.filter(&status_wanted?(&1, Keyword.get(opts, :status)))
         |> Enum.filter(&entered_within?(&1, from, to))
+        |> take_max_results(Keyword.get(opts, :max_results))
 
       {:ok, bodies}
     end
   end
+
+  # `maxResults` bounds the page the venue returns. A positive integer narrows the list as
+  # the venue's does; anything else is the venue's to judge, which the fake cannot, so it
+  # leaves the list whole rather than inventing a refusal.
+  defp take_max_results(bodies, max) when is_integer(max) and max > 0,
+    do: Enum.take(bodies, max)
+
+  defp take_max_results(bodies, _unbounded), do: bodies
 
   # The window as `DateTime`s. `Rest.check_order_window/1` has already run, so each end is a
   # `DateTime` or the venue's own string form (`yyyy-MM-dd'T'HH:mm:ss.SSSZ`), in range.
@@ -611,7 +658,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_test_connection(credentials, opts) do
-    with {:ok, accounts} <- get_accounts(credentials, opts) do
+    # `do_get_accounts/2`, not `get_accounts/2`: this call has already consulted
+    # `FakeInjection`, and the nested public read would consult it a second time.
+    with {:ok, accounts} <- do_get_accounts(credentials, opts) do
       {:ok, %{accounts: length(accounts)}}
     end
   end
@@ -631,6 +680,7 @@ defmodule DpExchange.Schwab.Fake do
       to = Config.opt(opts, :to, self())
       covered = Enum.filter(symbols, &(&1 in @listed))
 
+      Process.put(@wanted_key, Enum.uniq(wanted_symbols() ++ symbols))
       Process.put(__MODULE__, Enum.uniq(subscribed() ++ covered))
 
       # `do_get_price/2`, not `get_price/2`: the latter consults `FakeInjection`, so a failure a
@@ -653,6 +703,7 @@ defmodule DpExchange.Schwab.Fake do
 
   def unsubscribe(symbols, _opts) do
     symbols = canonical_case(symbols)
+    Process.put(@wanted_key, Enum.reject(wanted_symbols(), &(&1 in symbols)))
     Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
     :ok
   end
@@ -661,6 +712,7 @@ defmodule DpExchange.Schwab.Fake do
   def update_symbols(symbols, opts \\ []) do
     # Checked before the set is cleared: the real feed refuses first and changes nothing.
     with {:ok, symbols} <- checked_symbols(symbols) do
+      Process.put(@wanted_key, [])
       Process.put(__MODULE__, [])
       subscribe(symbols, opts)
     end
@@ -668,6 +720,69 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :internal_poll})
+
+  @doc """
+  What has been asked for, as `DpExchange.Schwab.wanted/1` answers it — every symbol the feed
+  would hold, listed here or not. `coverage/1` is the other half: only the symbols this fake
+  can deliver appear there.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  def wanted(_opts \\ []), do: wanted_symbols()
+
+  @doc """
+  The feed-wide summary, as `DpExchange.Schwab.status/1` answers it on the poll route
+  (`route: :internal_poll`, which is the route `coverage/1` reports here), with nothing
+  failing: the fake delivers synchronously and has no error to report.
+  """
+  @spec status(keyword()) :: map()
+  def status(_opts \\ []) do
+    %{
+      delivering: subscribed() != [],
+      symbols: length(wanted_symbols()),
+      covered: length(subscribed()),
+      failures_since_ok: 0,
+      last_error: nil,
+      route: :internal_poll
+    }
+  end
+
+  @doc """
+  Accepts refreshed credentials as `DpExchange.Schwab.update_credentials/2` does. The fake
+  holds no credential of its own, so a map is accepted and kept nowhere; anything else is
+  `{:error, {:invalid_credentials, :schwab}}`, checked before anything else as on the facade.
+  """
+  @spec update_credentials(term(), keyword()) :: :ok | {:error, {:invalid_credentials, :schwab}}
+  def update_credentials(credentials, _opts \\ [])
+  def update_credentials(credentials, _opts) when is_map(credentials), do: :ok
+  def update_credentials(_not_a_map, _opts), do: {:error, {:invalid_credentials, :schwab}}
+
+  @doc "The mover universes the venue publishes. See `DpExchange.Schwab.movers_universes/0`."
+  @spec movers_universes() :: [String.t()]
+  defdelegate movers_universes, to: Schwab
+
+  @doc "The markets the venue publishes hours for. See `DpExchange.Schwab.markets/0`."
+  @spec markets() :: [String.t()]
+  defdelegate markets, to: Schwab
+
+  @doc "The venue's transaction types. See `DpExchange.Schwab.transaction_types/0`."
+  @spec transaction_types() :: [String.t()]
+  defdelegate transaction_types, to: Schwab
+
+  @doc "Equity order instructions. See `DpExchange.Schwab.equity_instructions/0`."
+  @spec equity_instructions() :: [String.t()]
+  defdelegate equity_instructions, to: Schwab
+
+  @doc "Option order instructions. See `DpExchange.Schwab.option_instructions/0`."
+  @spec option_instructions() :: [String.t()]
+  defdelegate option_instructions, to: Schwab
+
+  @doc "Whether a credential needs refreshing. See `DpExchange.Schwab.needs_refresh?/2`."
+  @spec needs_refresh?(map(), DateTime.t()) :: boolean()
+  defdelegate needs_refresh?(credentials, now \\ DateTime.utc_now()), to: Schwab
+
+  @doc "Whether a status means the credential is finished. See `credential_failure?/1`."
+  @spec credential_failure?(pos_integer()) :: boolean()
+  defdelegate credential_failure?(status), to: Schwab
 
   @doc """
   What `coverage/1` reports, split by kind — `:quotes` only, because that is all this fake
@@ -714,6 +829,7 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp subscribed, do: Process.get(__MODULE__, [])
+  defp wanted_symbols, do: Process.get(@wanted_key, [])
 
   # --- plumbing -----------------------------------------------------------
 
@@ -726,13 +842,32 @@ defmodule DpExchange.Schwab.Fake do
   # This matches `DpExchange.Schwab`'s own `credentials/1` plumbing exactly — a fake
   # disagreeing with its own real facade on the shape of this refusal is the same
   # divergence assertion 17 exists to catch, one door down from a missing check entirely.
-  defp require_credentials(opts) do
+  #
+  # **Two questions, asked where the real path asks them.** The facade's market-data calls
+  # first want a credential map at all (`require_credential_map/1`); signing then wants a
+  # non-blank `:access_token`, which is `Auth.headers/2`'s own judgement and is asked by
+  # `require_credentials/1` after the request's own arguments are judged. A fake that
+  # accepted any non-empty map (`%{refresh_token: "x"}`, `%{access_token: ""}`) answered
+  # `{:ok, _}` where the real package refuses, on the one venue where a blank `.env` line is
+  # the usual way a credential goes missing.
+  defp require_credential_map(opts) do
     if FakeInjection.credentials_bypassed?(:schwab) do
       :ok
     else
       case Keyword.get(opts, :credentials) do
-        %{} = credentials when map_size(credentials) > 0 -> :ok
+        %{} -> :ok
         _absent -> {:error, {:missing_credentials, :schwab}}
+      end
+    end
+  end
+
+  defp require_credentials(opts) do
+    if FakeInjection.credentials_bypassed?(:schwab) do
+      :ok
+    else
+      case Auth.headers(Keyword.get(opts, :credentials, %{})) do
+        {:ok, _headers} -> :ok
+        {:error, _reason} = refusal -> refusal
       end
     end
   end
@@ -781,7 +916,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_positions(opts) do
-    with :ok <- require_credentials(opts) do
+    with :ok <- require_credentials(opts),
+         :ok <- check_account_number(Keyword.get(opts, :account_number)) do
       # A short, and no liquidation price — Schwab publishes none per position, and `nil`
       # there is not safety.
       {:ok,
@@ -807,6 +943,10 @@ defmodule DpExchange.Schwab.Fake do
        ]}
     end
   end
+
+  defp check_account_number(nil), do: :ok
+  defp check_account_number(@account_number), do: :ok
+  defp check_account_number(number), do: {:refused, {:account_not_found, number}}
 
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
@@ -868,7 +1008,14 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_option_chain(underlying, opts \\ []) do
+    with_injection(injection_key(underlying), fn -> do_get_option_chain(underlying, opts) end)
+  end
+
+  defp do_get_option_chain(underlying, opts) do
+    # The real order: the underlying, then the request's dates (`Rest.get_chains/2` judges
+    # them before it signs anything), then the credential.
     with :ok <- Rest.check_underlying(underlying),
+         :ok <- Rest.check_chain_dates(opts),
          :ok <- require_credentials(opts) do
       call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :call)
       put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("200"), :put)
@@ -892,10 +1039,17 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
-    with :ok <- Rest.check_underlying(underlying),
-         :ok <- require_credentials(opts),
-         do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+    with_injection(injection_key(underlying), fn ->
+      with :ok <- Rest.check_underlying(underlying),
+           :ok <- require_credentials(opts),
+           do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+    end)
   end
+
+  # Per-symbol targeting by the underlying, when it is a symbol at all; a non-string is
+  # refused by the real path before any request, so it targets only a venue-wide override.
+  defp injection_key(underlying) when is_binary(underlying), do: underlying
+  defp injection_key(_other), do: nil
 
   defp fake_contract(underlying, expiry, strike, right) do
     %Types.OptionContract{
@@ -947,6 +1101,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_screener(name, opts \\ []) do
+    with_injection(nil, fn -> do_get_screener(name, opts) end)
+  end
+
+  defp do_get_screener(name, opts) do
     # The universe before the credential, as the real path: `Rest.get_movers/3` refuses a
     # universe the venue has no list for before it signs anything.
     with :ok <- Rest.check_movers_universe(name),
@@ -969,6 +1127,10 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def get_transactions(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_transactions(credentials, opts) end)
+  end
+
+  defp do_get_transactions(credentials, opts) do
     # The account hash, then the window and the type from `Rest.check_transactions/1` (the
     # module that sends the request, so the two cannot drift), and the credential last, as the
     # real path only looks at it when it signs. `require_account/1` rather than a second

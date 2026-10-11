@@ -229,6 +229,169 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     end
   end
 
+  describe "a credential is judged by the module that signs" do
+    @unsignable [%{access_token: ""}, %{access_token: "   "}, %{refresh_token: "r"}, %{}]
+
+    test "a blank or tokenless credential is refused on every account read and write" do
+      missing = {:error, {:missing_credentials, :schwab}}
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+
+      for creds <- @unsignable do
+        assert Fake.get_accounts(creds) == missing
+        assert Fake.get_balances(creds, account_hash: "H") == missing
+        assert Fake.get_order(creds, "1", account_hash: "H") == missing
+        assert Fake.cancel_order(creds, "1", account_hash: "H") == missing
+        assert Fake.place_order(creds, request, account_hash: "H") == missing
+        assert Fake.get_positions(credentials: creds) == missing
+        assert Fake.get_option_expirations("AAPL", credentials: creds) == missing
+        assert Fake.get_screener("$DJI", credentials: creds) == missing
+      end
+    end
+
+    test "market data refuses the same credentials, after judging its own arguments" do
+      missing = {:error, {:missing_credentials, :schwab}}
+
+      for creds <- [%{access_token: ""}, %{refresh_token: "r"}] do
+        opts = [credentials: creds]
+        assert Fake.get_price("AAPL", opts) == missing
+        assert Fake.get_top_of_book("AAPL", opts) == missing
+        assert Fake.get_historical_prices("AAPL", "1d", [], opts) == missing
+        assert Fake.get_symbols(opts ++ [query: "A"]) == missing
+        assert Fake.market_status(opts) == missing
+
+        # What the real facade answers for the same call, locally and before any request.
+        assert Schwab.get_price("AAPL", opts) == missing
+        assert Schwab.get_symbols(opts ++ [query: "A"]) == missing
+        assert Schwab.market_status(opts) == missing
+      end
+    end
+
+    test "the request's own refusals come before a blank token, in the real order" do
+      opts = [credentials: %{access_token: ""}]
+
+      calls = [
+        {:get_price, ["BTC-USD", opts]},
+        {:get_top_of_book, ["BTC-USD", opts]},
+        {:get_historical_prices, ["AAPL", "2h", [], opts]},
+        {:get_symbols, [opts]},
+        {:market_status, [opts ++ [market: "crypto"]]}
+      ]
+
+      for {function, args} <- calls do
+        real = apply(Schwab, function, args)
+        refute real == {:error, {:missing_credentials, :schwab}}
+        assert apply(Fake, function, args) == real
+      end
+    end
+
+    test "a credential that is not a map is refused before the symbol is judged" do
+      missing = {:error, {:missing_credentials, :schwab}}
+
+      for opts <- [[], [credentials: nil], [credentials: "token"]] do
+        assert Schwab.get_price("BTC-USD", opts) == missing
+        assert Fake.get_price("BTC-USD", opts) == missing
+      end
+    end
+  end
+
+  describe "positions: the account is named by number, as Rest names it" do
+    test "a number the credential has no account for is the venue-shaped refusal" do
+      opts = [credentials: @creds, account_number: "999"]
+      assert Fake.get_positions(opts) == {:refused, {:account_not_found, "999"}}
+    end
+
+    test "the account the fake holds, or no number, is served" do
+      assert {:ok, [_position]} = Fake.get_positions(credentials: @creds)
+
+      assert {:ok, [_position]} =
+               Fake.get_positions(credentials: @creds, account_number: "123456789")
+
+      assert {:ok, [%{account_number: "123456789"}]} = Fake.get_accounts(@creds)
+    end
+
+    test "the credential is judged before the number, as the read comes first" do
+      assert Fake.get_positions(account_number: "999") ==
+               {:error, {:missing_credentials, :schwab}}
+    end
+  end
+
+  describe "options: the chain's dates are judged before the credential" do
+    test "an unreadable date is refused by the fake as by the facade" do
+      unreadable = [from_date: "soon", to_date: 20_260_101, from_date: ~U[2026-01-01 00:00:00Z]]
+
+      for {key, value} <- unreadable do
+        opts = [{key, value}]
+        real = Schwab.get_option_chain("AAPL", opts)
+
+        assert {:error, {:invalid_date, ^key, ^value}} = real
+        assert Fake.get_option_chain("AAPL", opts) == real
+      end
+    end
+
+    test "a readable date passes, and then the credential is the refusal" do
+      opts = [from_date: ~D[2026-03-01], to_date: "2026-04-01"]
+
+      assert Fake.get_option_chain("AAPL", opts) == {:error, {:missing_credentials, :schwab}}
+      assert {:ok, _chain} = Fake.get_option_chain("AAPL", opts ++ [credentials: @creds])
+    end
+  end
+
+  describe "orders: maxResults narrows the page as the venue's does" do
+    test "a positive integer takes that many, in id order" do
+      opts = [account_hash: "H"]
+      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      assert {:ok, first} = Fake.place_order(@creds, request, opts)
+      assert {:ok, second} = Fake.place_order(@creds, request, opts)
+
+      window = opts ++ now_window()
+      assert {:ok, [listed_first, listed_second]} = Fake.get_orders(@creds, window)
+      assert [listed_first.id, listed_second.id] == [first.id, second.id]
+
+      assert {:ok, [only]} = Fake.get_orders(@creds, window ++ [max_results: 1])
+      assert only.id == first.id
+      assert {:ok, [_one, _two]} = Fake.get_orders(@creds, window ++ [max_results: 10])
+    end
+  end
+
+  describe "the feed's own reads: wanted, status, update_credentials" do
+    test "wanted holds every valid symbol asked for, coverage only those the fake delivers" do
+      :ok = Fake.subscribe(["aapl", "TSLA"], to: self())
+
+      assert Enum.sort(Fake.wanted()) == ["AAPL", "TSLA"]
+      assert Map.keys(Fake.coverage()) == ["AAPL"]
+      assert %{route: :internal_poll, symbols: 2, covered: 1, delivering: true} = Fake.status()
+
+      :ok = Fake.unsubscribe(["AAPL"])
+      assert Fake.wanted() == ["TSLA"]
+      assert %{delivering: false, covered: 0} = Fake.status()
+
+      :ok = Fake.update_symbols(["MSFT"], to: self())
+      assert Fake.wanted() == ["MSFT"]
+    end
+
+    test "a refused symbol set changes nothing that wanted reports" do
+      :ok = Fake.subscribe(["AAPL"], to: self())
+      assert {:error, {:invalid_symbols, ["BTC-USD"]}} = Fake.subscribe(["BTC-USD"])
+      assert Fake.wanted() == ["AAPL"]
+    end
+
+    test "update_credentials answers as the facade does" do
+      assert Fake.update_credentials(@creds) == :ok
+      assert Fake.update_credentials(nil) == {:error, {:invalid_credentials, :schwab}}
+      assert Schwab.update_credentials(nil) == {:error, {:invalid_credentials, :schwab}}
+    end
+
+    test "the static lists and predicates are the facade's own" do
+      assert Fake.movers_universes() == Schwab.movers_universes()
+      assert Fake.markets() == Schwab.markets()
+      assert Fake.transaction_types() == Schwab.transaction_types()
+      assert Fake.equity_instructions() == Schwab.equity_instructions()
+      assert Fake.option_instructions() == Schwab.option_instructions()
+      assert Fake.credential_failure?(401) == Schwab.credential_failure?(401)
+      assert Fake.needs_refresh?(%{access_token: "t"}) == false
+    end
+  end
+
   describe "the fake's values are the shapes the real decode produces" do
     test "available balance is part of the total, never more than it" do
       assert {:ok, [balance]} = Fake.get_balances(@creds, account_hash: "H")

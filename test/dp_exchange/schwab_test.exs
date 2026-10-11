@@ -473,7 +473,7 @@ defmodule DpExchange.SchwabTest do
       # "A consumer that never subscribes must not find a socket open".
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 5_000
       assert notice.severity == :warning
       # The venue, not the feed inside it — see `fallback_poll_test.exs` and Core 0.3.17.
       assert notice.provider == :schwab
@@ -531,7 +531,7 @@ defmodule DpExchange.SchwabTest do
 
       assert_receive {:relayed_to_socket,
                       {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
-                     2_000
+                     5_000
     end
 
     test "something that is not a credential map is refused and the feed is left running" do
@@ -984,7 +984,7 @@ defmodule DpExchange.SchwabTest do
         end
       end)
 
-      assert_receive :registered, 2_000
+      assert_receive :registered, 5_000
 
       assert DpExchange.Schwab.subscribe(["AAPL"], feed: name) == {:error, {:feed_exited, :boom}}
     end
@@ -1010,7 +1010,7 @@ defmodule DpExchange.SchwabTest do
       opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
 
       assert :ok = DpExchange.Schwab.Fake.subscribe(["aapl"], opts)
-      assert_receive {:dp_exchange, _venue, %{symbol: "AAPL"}}, 2_000
+      assert_receive {:dp_exchange, _venue, %{symbol: "AAPL"}}, 5_000
       assert Map.has_key?(DpExchange.Schwab.Fake.coverage(opts), "AAPL")
     end
   end

@@ -659,12 +659,29 @@ only the calling process and `Task`s it spawns — not a separately-supervised `
 
 **What is not wired.** `subscribe/2`, `unsubscribe/2` and `update_symbols/2` take a list of
 symbols in one call, and whole-call injection cannot express "this one symbol in the batch
-fails, the rest succeed". `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` are
-local bookkeeping that always succeeds by construction. And not yet wired, stated here
-rather than left to be discovered: `get_option_chain/2`, `get_option_expirations/2`,
-`get_screener/2` and `get_transactions/2` — they gate credentials correctly but cannot yet
-be made to fail on demand. (`get_rate_limit_status/2` is `:unsupported`, so it has nothing
-to inject into.)
+fails, the rest succeed". `coverage/1`, `coverage_by_kind/1`, `wanted/1`, `status/1` and
+`subscribe_notices/1` are local bookkeeping that always succeeds by construction. Every
+call with a real success path is wired, including `get_positions/1`, `get_option_chain/2`,
+`get_option_expirations/2` (both targetable by the underlying symbol), `get_screener/2`,
+`get_transactions/2` and `get_all_orders/2`. (`get_rate_limit_status/2` is `:unsupported`, so
+it has nothing to inject into.)
+
+**The fake judges a credential as the real package does.** A call whose credential has no
+non-blank `:access_token` — `%{refresh_token: "x"}`, `%{access_token: ""}` — is
+`{:error, {:missing_credentials, :schwab}}` here as there, and in the same place in the
+order of refusals: market-data calls want a credential map, then judge their own arguments
+(symbol, width, range, market), then sign; account calls judge theirs and sign last. The
+fake also narrows `get_orders/2` by `:max_results`, refuses an unreadable `:from_date` or
+`:to_date` on `get_option_chain/2`, and answers `{:refused, {:account_not_found, number}}`
+to a `get_positions/1` `:account_number` other than the one account it holds.
+
+**What the fake does not provide.** The facade's raw reads — `get_transaction/4`,
+`get_account_summaries/2`, `get_symbol_quote/3`, `get_market/3`, `get_instrument/3`,
+`get_user_preference/2` — and `refresh_credentials/2` return the venue's own JSON, which a
+fake could only invent. Drive `DpExchange.Schwab.Rest` with your own `:plug` for those. The
+static lists (`movers_universes/0`, `markets/0`, `transaction_types/0`,
+`equity_instructions/0`, `option_instructions/0`), `needs_refresh?/2`,
+`credential_failure?/1`, `wanted/1`, `status/1` and `update_credentials/2` are on the fake.
 
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 

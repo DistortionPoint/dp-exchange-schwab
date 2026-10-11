@@ -61,6 +61,31 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
       assert Fake.get_positions(credentials: @credentials) == {:error, :injected}
     end
 
+    test "get_option_chain/2" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+      assert Fake.get_option_chain("AAPL", credentials: @credentials) == {:error, :injected}
+    end
+
+    test "get_option_expirations/2" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+      assert Fake.get_option_expirations("AAPL", credentials: @credentials) == {:error, :injected}
+    end
+
+    test "get_screener/2" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+      assert Fake.get_screener("$DJI", credentials: @credentials) == {:error, :injected}
+    end
+
+    test "get_transactions/2" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+      assert Fake.get_transactions(@credentials, account_hash: "h") == {:error, :injected}
+    end
+
+    test "get_all_orders/2" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+      assert Fake.get_all_orders(@credentials, []) == {:error, :injected}
+    end
+
     test "place_order/3" do
       FakeInjection.fail_always(:schwab, {:error, :injected})
       assert Fake.place_order(@credentials, %{}, account_hash: "h") == {:error, :injected}
@@ -115,6 +140,26 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
 
       assert Fake.get_price("MSFT", credentials: @credentials) == {:refused, :not_listed}
       assert {:ok, _quote} = Fake.get_price("AAPL", credentials: @credentials)
+    end
+  end
+
+  describe "an option underlying targets injection like a symbol" do
+    test "an override for one underlying leaves the others untouched" do
+      FakeInjection.fail_always(:schwab, "MSFT", {:error, :injected})
+
+      assert Fake.get_option_chain("MSFT", credentials: @credentials) == {:error, :injected}
+      assert Fake.get_option_expirations("MSFT", credentials: @credentials) == {:error, :injected}
+      assert {:ok, _chain} = Fake.get_option_chain("AAPL", credentials: @credentials)
+
+      assert {:ok, [_first | _rest]} =
+               Fake.get_option_expirations("AAPL", credentials: @credentials)
+    end
+
+    test "a queued failure is spent by one chain call and then the fake answers" do
+      FakeInjection.queue_failures(:schwab, [{:error, :timeout}])
+
+      assert Fake.get_option_chain("AAPL", credentials: @credentials) == {:error, :timeout}
+      assert {:ok, _chain} = Fake.get_option_chain("AAPL", credentials: @credentials)
     end
   end
 

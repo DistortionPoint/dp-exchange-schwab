@@ -41,13 +41,13 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       feed = start_feed(plug: plug, limiter: permissive_limiter())
 
       spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, task_pid}, 3_000
+      assert_receive {:bootstrapping, task_pid}, 5_000
 
       Process.exit(task_pid, :kill)
 
       # The caller gets an answer rather than hanging to its own call timeout, and the
       # answer is this venue's documented degraded mode.
-      assert_receive {:subscribed, :ok}, 3_000
+      assert_receive {:subscribed, :ok}, 5_000
       assert :sys.get_state(feed).route_bootstrap == nil
       assert :sys.get_state(feed).route == :poll
       assert Process.alive?(feed)
@@ -81,15 +81,15 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       feed = start_feed(plug: plug, limiter: permissive_limiter())
 
       spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, task_pid}, 3_000
+      assert_receive {:bootstrapping, task_pid}, 5_000
 
       %{ref: ref} = :sys.get_state(feed).route_bootstrap
       send(feed, {:route_bootstrap_timeout, ref})
 
-      assert_receive {:subscribed, :ok}, 3_000
+      assert_receive {:subscribed, :ok}, 5_000
       assert :sys.get_state(feed).route_bootstrap == nil
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 5_000
       assert notice.details.reason =~ "bootstrap_timeout"
       assert notice.details.fallback == :internal_poll
 
@@ -129,7 +129,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
         end
 
       for caller <- callers do
-        assert {:ok, {:error, {:route_pending, 200}}} = Task.yield(caller, 2_000)
+        assert {:ok, {:error, {:route_pending, 200}}} = Task.yield(caller, 5_000)
       end
 
       # Recorded, not refused: the symbols are wanted, and the bootstrap is still running.
@@ -151,8 +151,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       test_pid = self()
       spawn(fn -> send(test_pid, {:subscribed, Feed.subscribe(feed, ["AAPL"])}) end)
 
-      assert_receive {:subscribed, :ok}, 3_000
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 3_000
+      assert_receive {:subscribed, :ok}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 5_000
 
       # The budget is named, not merely applied — a consumer reading the notice has to be
       # able to tell a timeout at 50 ms from one at the 95-second default.
@@ -175,7 +175,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       feed = start_feed(plug: plug, limiter: permissive_limiter())
 
       spawn(fn -> send(test_pid, {:first, Feed.subscribe(feed, ["AAPL"])}) end)
-      assert_receive {:bootstrapping, _task_pid}, 3_000
+      assert_receive {:bootstrapping, _task_pid}, 5_000
 
       spawn(fn -> send(test_pid, {:second, Feed.subscribe(feed, ["MSFT"])}) end)
 
@@ -186,8 +186,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       %{ref: ref} = :sys.get_state(feed).route_bootstrap
       send(feed, {:route_bootstrap_timeout, ref})
 
-      assert_receive {:first, :ok}, 3_000
-      assert_receive {:second, :ok}, 3_000
+      assert_receive {:first, :ok}, 5_000
+      assert_receive {:second, :ok}, 5_000
       assert Process.alive?(feed)
     end
 
@@ -199,8 +199,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
         %{waiting: waiting} when length(waiting) >= count ->
           :ok
 
-        _other when waited >= 2_000 ->
-          flunk("only #{inspect(:sys.get_state(feed).route_bootstrap)} after 2000ms")
+        _other when waited >= 5_000 ->
+          flunk("only #{inspect(:sys.get_state(feed).route_bootstrap)} after 5000ms")
 
         _other ->
           Process.sleep(10)
@@ -224,7 +224,7 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
     defp refute_eventually_alive(pid, waited \\ 0) do
       cond do
         not Process.alive?(pid) -> :ok
-        waited >= 2_000 -> flunk("#{inspect(pid)} was still alive after 2000ms")
+        waited >= 5_000 -> flunk("#{inspect(pid)} was still alive after 5000ms")
         true -> Process.sleep(10) && refute_eventually_alive(pid, waited + 10)
       end
     end

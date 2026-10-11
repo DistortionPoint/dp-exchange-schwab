@@ -264,7 +264,9 @@ defmodule DpExchange.Schwab.Auth do
         refused_refresh(status, refusal_body(response))
 
       {:ok, %{status: status, body: response}} ->
-        {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+        {:error,
+         {:exchange_error, :schwab,
+          "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
 
       {:error, reason} ->
         {:error, reason}

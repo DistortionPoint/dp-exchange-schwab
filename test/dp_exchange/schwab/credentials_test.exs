@@ -128,7 +128,7 @@ defmodule DpExchange.Schwab.CredentialsTest do
             :exit, _reason -> :ok
           end
 
-          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
         end)
 
       assert log =~ "simulated crash for leak-proof test"

@@ -73,7 +73,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       :ok = Feed.subscribe_notices(feed, to: self())
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = notice}, 5_000
 
       assert notice.severity == :warning
       # `provider` is the VENUE and `details.label` is which feed inside it spoke. These were
@@ -110,7 +110,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
+                     5_000
 
       # Several more tick intervals pass with the poll still failing every attempt — no
       # second notice, because `PollingFeed` latches to `:dead` on the first crossing and
@@ -134,10 +134,10 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
+                     5_000
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change} = recovery},
-                     3_000
+                     5_000
 
       assert recovery.severity == :info
       assert recovery.provider == :schwab
@@ -149,7 +149,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert recovery.details.label == "schwab-fallback-poll"
 
       # The recovered quote itself still arrives normally on the same route.
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
     end
   end
@@ -212,7 +212,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       # tick is 60s away) — only acquire/3 (the default) delivers here at all. The
       # bootstrap's own `/userPreference` call shares this same limiter and opts, so it
       # waits out the bucket too before falling back — hence the generous timeout.
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
@@ -281,7 +281,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
         start_feed(plug: plug, retry_attempts: 0, interval_ms: 50, start_delay_ms: 0)
 
       :ok = Feed.subscribe(feed, ["AAPL"])
-      assert_receive {:signed, ["Bearer token-abc"]}, 3_000
+      assert_receive {:signed, ["Bearer token-abc"]}, 5_000
 
       :ok = Feed.update_credentials(feed, %{credentials() | access_token: "token-fresh"})
 
@@ -296,7 +296,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
         {:signed, ["Bearer token-fresh"]} -> :ok
         {:signed, _old} -> assert_fresh_signature(attempts - 1)
       after
-        3_000 -> flunk("the poller stopped fetching")
+        5_000 -> flunk("the poller stopped fetching")
       end
     end
   end
@@ -316,7 +316,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       :ok = Feed.subscribe(feed, ["AAPL", "MSFT"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
+                     5_000
 
       refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
     end
@@ -335,7 +335,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
+                     5_000
 
       refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
     end

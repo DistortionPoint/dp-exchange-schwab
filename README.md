@@ -9,7 +9,7 @@ facade how data reaches the package, and must not be able to.
 
 ```elixir
 def deps do
-  [{:dp_exchange_schwab, "~> 0.2.98"}]
+  [{:dp_exchange_schwab, "~> 0.2.107"}]
 end
 ```
 
@@ -141,8 +141,8 @@ thing from never having been asked.
 ## Testing against it
 
 `DpExchange.Schwab.Fake` is an in-process stand-in that **refuses what the real venue
-refuses** — a pair-shaped symbol, a missing credential, a year of one-minute candles, an
-instruction that does not match the asset type. It is also the only place in the family
+refuses** — a pair-shaped symbol, a missing or blank credential, a year of one-minute
+candles, an instruction that does not match the asset type. It is also the only place in the family
 where the closed-market path can be exercised:
 
 ```elixir

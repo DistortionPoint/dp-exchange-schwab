@@ -305,8 +305,10 @@ defmodule DpExchange.Schwab do
 
   `POST /accounts/{accountNumber}/orders` takes one order; the Accounts and Trading
   specification publishes no batch. Its multi-leg orders are one *order* with several legs,
-  which is a different thing — the venue accepts or rejects it as one, and it is placed
-  through `place_order/3` with `:legs`.
+  which is a different thing — the venue accepts or rejects it as one — and are **not
+  reachable here either**: `place_order/3` takes a flat request (one symbol, one side, one
+  quantity) and builds a single-leg `SINGLE` order, so `supports_multi_leg_orders` is
+  `false` in `capabilities/0`.
   """
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()

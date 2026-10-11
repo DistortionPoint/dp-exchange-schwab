@@ -107,7 +107,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     if String.contains?(acc, "\r\n\r\n") do
       {:ok, acc}
     else
-      with {:ok, data} <- :gen_tcp.recv(client, 0, 2_000), do: read_headers(client, acc <> data)
+      with {:ok, data} <- :gen_tcp.recv(client, 0, 5_000), do: read_headers(client, acc <> data)
     end
   end
 
@@ -127,7 +127,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
 
     assert_receive {:dp_exchange, :schwab,
                     %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
-                   2_000
+                   5_000
 
     poller = :sys.get_state(feed).poller
     ref = Process.monitor(poller)
@@ -137,10 +137,10 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
 
     assert_receive {:dp_exchange, :schwab,
                     %Notice{kind: :coverage_change, severity: :info, details: %{route: :stream}}},
-                   2_000
+                   5_000
 
     assert %{route: :stream} = Feed.status(feed)
-    assert_receive {:DOWN, ^ref, :process, ^poller, :shutdown}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^poller, :shutdown}, 5_000
     assert :sys.get_state(feed).poller == nil
   end
 
@@ -149,7 +149,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     feed = start_feed(plug: plug, retry_attempts: 0)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
-    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
     poller = :sys.get_state(feed).poller
     before = calls(agent)
 
@@ -171,14 +171,14 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     feed = start_feed(plug: plug, retry_attempts: 0)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
-    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
     poller = :sys.get_state(feed).poller
 
     # Captured out here: inside `Agent.update/2`'s function, `self()` is the agent.
     test_pid = self()
     Agent.update(agent, &%{&1 | answer: {:hang, test_pid}})
     send(feed, :resubscribe)
-    assert_receive {:hanging, request}, 2_000
+    assert_receive {:hanging, request}, 5_000
 
     Process.exit(poller, :kill)
     wait_until(fn -> :sys.get_state(feed).poller == nil end)
@@ -198,7 +198,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     feed = start_feed(plug: plug, retry_attempts: 0)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
-    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
     assert {:refused, _reason} = :sys.get_state(feed).last_error
     before = calls(agent)
 
@@ -210,7 +210,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     wait_until(fn -> calls(agent) > before end)
   end
 
-  defp wait_until(fun, timeout \\ 2_000) do
+  defp wait_until(fun, timeout \\ 5_000) do
     cond do
       fun.() ->
         :ok

@@ -31,6 +31,57 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Error text quotes a venue body bounded.** Four unexpected-status branches in `Rest` and
+  the token refresh in `Auth` put `inspect(body)` / `inspect(response)` into
+  `{:exchange_error, :schwab, _}`, so a CDN error page became the message. Quoted bounded
+  now (`limit: 50`, `printable_limit: 2_048`), as Core does.
+
+- **`Fake` accepted any non-empty credential map.** Its check was `map_size > 0`, so
+  `%{refresh_token: "x"}` and `%{access_token: ""}` answered `{:ok, _}` where the real package
+  answers `{:error, {:missing_credentials, :schwab}}` (`Auth.headers/2` refuses a blank or
+  absent token). The fake now asks `Auth.headers/2` itself, and asks it where the real path
+  does: market-data calls want a credential map first (the facade), then judge their own
+  arguments (symbol, width, range, market, query), then sign; account calls judge theirs and
+  sign last. A blank token with a bad symbol is the symbol's refusal, in both.
+- **`Fake.get_option_chain/2` skipped the chain's date checks.** An unreadable `:from_date` or
+  `:to_date` is `{:error, {:invalid_date, key, value}}` from the real path, after the
+  underlying and before the credential; the fake answered a chain. `Rest.check_chain_dates/1`
+  is that check, shared.
+- **`Fake.get_positions/1` ignored `:account_number`.** The real read refuses a number the
+  credential has no account for (`{:refused, {:account_not_found, number}}`); the fake served
+  its one account for any number. It holds `"123456789"` and refuses the rest.
+- **`Fake.get_orders/2` and `get_all_orders/2` ignored `:max_results`**, which the venue's
+  `maxResults` honours. A positive integer now narrows the list.
+- **`Fake.get_symbols/1` returned symbols unsorted**, where `Rest.get_symbols/2` sorts.
+- **Four fake calls could not be made to fail.** `get_option_chain/2`,
+  `get_option_expirations/2` (both targetable by the underlying), `get_screener/2` and
+  `get_transactions/2` now consult `Core.FakeInjection` like the rest.
+- **The facade's `place_orders/3` doc said a multi-leg order is placed through `place_order/3`
+  with `:legs`.** There is no such key: `place_order/3` builds a single-leg order, and
+  `supports_multi_leg_orders` is `false`.
+
+### Added
+
+- `Fake.wanted/1`, `Fake.status/1`, `Fake.update_credentials/2` and delegates for
+  `movers_universes/0`, `markets/0`, `transaction_types/0`, `equity_instructions/0`,
+  `option_instructions/0`, `needs_refresh?/2` and `credential_failure?/1`, so a consumer that
+  swaps the fake in for the facade finds the same names. `wanted/1` holds every valid symbol
+  asked for; `coverage/1` still holds only the ones the fake delivers. The facade's raw
+  undecoded reads and `refresh_credentials/2` are deliberately not faked (they would invent
+  venue documents); the moduledoc says so.
+
+### Changed (tests)
+
+- Every wait on a spawned process, a socket stand-in or a poll timer in `feed_test`,
+  `feed_upgrade_test`, `bootstrap_route_test`, `fallback_poll_test`, `defensive_branches_test`,
+  `schwab_test`, `order_limit_test`, `credentials_test` and `forwarded_nil_test` is at least
+  five seconds (it was 0.5 to 3 s, or the 100 ms default). The test that "the feed survives a
+  linked socket being killed" decided by a 500 ms `refute_receive`; it now waits for the
+  `:link_down` the feed raises for the crash it isolated.
+- README's dependency line names the current version.
+
 ## [0.2.107] - 2026-10-11
 
 ### Fixed

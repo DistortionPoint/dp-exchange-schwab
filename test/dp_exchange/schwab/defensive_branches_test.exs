@@ -469,7 +469,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       :ok = Schwab.Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 5_000
       assert Schwab.Feed.coverage(feed) == %{"AAPL" => :internal_poll}
     end
 
@@ -493,7 +493,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       :ok = Schwab.Feed.subscribe(feed, ["ZZZZ"])
 
-      assert_receive {:dp_exchange, :schwab, {:refused, "ZZZZ", :not_listed}}, 3_000
+      assert_receive {:dp_exchange, :schwab, {:refused, "ZZZZ", :not_listed}}, 5_000
     end
   end
 

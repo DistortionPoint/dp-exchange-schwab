@@ -69,7 +69,6 @@ defmodule DpExchange.Schwab.Capabilities do
   "Symbols in upper case … e.g.: AAPL,TSLA,IBM". And `streamable` here is a flat
   `[data_kind()]` with no asset-class dimension, so `:order_book` cannot be declared for
   options without also claiming it for equities, where it is false. See
-
   `docs/design/ideas/schwab-depth-and-account-activity-streaming.md` for what closing
   either gap for real would need.
 

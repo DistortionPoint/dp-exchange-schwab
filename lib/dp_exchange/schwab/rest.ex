@@ -935,6 +935,19 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  @doc """
+  The refusal `get_chains/2` (and so `get_option_chain/3`) makes for a `:from_date` or
+  `:to_date` that is not a `Date` or a `YYYY-MM-DD` string, before any request:
+  `{:error, {:invalid_date, key, value}}`.
+
+  Public so `DpExchange.Schwab.Fake` refuses the same request in the same place, after the
+  underlying and before the credential.
+  """
+  @spec check_chain_dates(keyword()) :: :ok | {:error, {:invalid_date, atom(), term()}}
+  def check_chain_dates(opts) do
+    with {:ok, _opts} <- chain_dates(opts), do: :ok
+  end
+
   # `fromDate` and `toDate` are `yyyy-MM-dd`; see `date_param/2`.
   defp chain_dates(opts) do
     with {:ok, from} <- date_param(:from_date, Keyword.get(opts, :from_date)),
@@ -2380,7 +2393,9 @@ defmodule DpExchange.Schwab.Rest do
           {:refused, refusal(status, response)}
 
         {:ok, %{status: status, body: response}} ->
-          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+          {:error,
+           {:exchange_error, :schwab,
+            "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
 
         {:error, reason} ->
           {:error, reason}
@@ -2481,7 +2496,9 @@ defmodule DpExchange.Schwab.Rest do
           {:refused, refusal(status, response)}
 
         {:ok, %{status: status, body: response}} ->
-          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+          {:error,
+           {:exchange_error, :schwab,
+            "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
 
         {:error, reason} ->
           {:error, reason}
@@ -2502,7 +2519,9 @@ defmodule DpExchange.Schwab.Rest do
           {:refused, refusal(status, response)}
 
         {:ok, %{status: status, body: response}} ->
-          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(response)}"}}
+          {:error,
+           {:exchange_error, :schwab,
+            "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
 
         {:error, reason} ->
           {:error, reason}
@@ -2526,7 +2545,9 @@ defmodule DpExchange.Schwab.Rest do
           {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(body)}"}}
+          {:error,
+           {:exchange_error, :schwab,
+            "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
 
         {:error, reason} ->
           {:error, reason}
@@ -2594,7 +2615,9 @@ defmodule DpExchange.Schwab.Rest do
           {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :schwab, "HTTP #{status}: #{inspect(body)}"}}
+          {:error,
+           {:exchange_error, :schwab,
+            "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
 
         {:error, reason} ->
           {:error, reason}

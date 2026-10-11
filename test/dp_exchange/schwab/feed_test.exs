@@ -76,7 +76,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage(feed) == %{}
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
 
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
       assert %{route: :stream} = Feed.status(feed)
@@ -93,7 +93,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_receive {:dp_exchange, :schwab,
                       %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
-                     2_000
+                     5_000
 
       assert %{route: :internal_poll} = Feed.status(feed)
     end
@@ -105,7 +105,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.reason =~ "no_streamer_info"
       assert %{route: :internal_poll} = Feed.status(feed)
     end
@@ -120,7 +120,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.reason =~ "missing_credentials"
     end
   end
@@ -165,7 +165,7 @@ defmodule DpExchange.Schwab.FeedTest do
       refute_received :venue_call
 
       :ok = Feed.subscribe(feed, ["AAPL"])
-      assert_receive :venue_call, 2_000
+      assert_receive :venue_call, 5_000
     end
   end
 
@@ -202,9 +202,15 @@ defmodule DpExchange.Schwab.FeedTest do
 
       # `:kill`, not `:normal` — a non-trapping process ignores a peer's normal exit,
       # which would prove nothing about the trap_exit flag this test exists to check.
+      #
+      # The feed announces the crash it isolated (`:link_down`), so the test waits for that
+      # event rather than for a quiet interval: a feed taken down by the exit would never
+      # send it, and a short `refute_receive` window would decide the test by a race.
+      :ok = Feed.subscribe_notices(feed, to: self())
       ref = Process.monitor(feed)
       Process.exit(socket, :kill)
-      refute_receive {:DOWN, ^ref, :process, ^feed, _reason}, 500
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
+      refute_received {:DOWN, ^ref, :process, ^feed, _reason}
       assert Process.alive?(feed)
     end
 
@@ -224,13 +230,13 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
 
       link_socket_into_feed(feed, socket)
       Process.exit(socket, :kill)
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
       assert Process.alive?(feed)
 
       # Cleared immediately — not "eventually, once something else overwrites it" — the
@@ -243,7 +249,7 @@ defmodule DpExchange.Schwab.FeedTest do
       # of leaving this feed on a dead `:stream` route forever.
       assert_receive {:dp_exchange, :schwab,
                       %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
-                     2_000
+                     5_000
 
       assert %{route: :internal_poll} = Feed.status(feed)
     end
@@ -270,7 +276,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_receive {:dp_exchange, :schwab,
                       %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
-                     2_000
+                     5_000
 
       poller = :sys.get_state(feed).poller
       assert is_pid(poller), "the poll route must actually be served by a process"
@@ -278,14 +284,14 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Process.exit(poller, :kill)
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
       assert Process.alive?(feed), "one dead poller must not take the feed with it"
 
       # Retried rather than left dead: the same refusing plug can only land it back on the
       # poll route, and arriving there again is what proves the clause ran.
       assert_receive {:dp_exchange, :schwab,
                       %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
-                     2_000
+                     5_000
 
       refute :sys.get_state(feed).poller == poller,
              "the replacement route must not be the process that just died"
@@ -303,7 +309,7 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
 
       send(feed, {:dp_exchange, :schwab, Notice.new(:link_down, :schwab)})
@@ -315,7 +321,7 @@ defmodule DpExchange.Schwab.FeedTest do
       # it here would make `ensure_route/1` dial a second one. Coverage refills as frames
       # arrive after the re-LOGIN and resubscribe.
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
       assert %{route: :stream} = Feed.status(feed)
     end
@@ -429,7 +435,7 @@ defmodule DpExchange.Schwab.FeedTest do
         start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
 
       :ok = Feed.subscribe(feed, ["AAPL"])
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
 
       send(feed, :resubscribe)
       Feed.coverage(feed)
@@ -457,7 +463,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Feed.subscribe(feed, ["AAPL", "MSFT"])
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
 
       assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
       assert Feed.wanted(feed) == ["MSFT"]
@@ -480,12 +486,12 @@ defmodule DpExchange.Schwab.FeedTest do
 
       Feed.subscribe(feed, ["AAPL"])
       # One cast carrying every service — the Streamer fails parallel commands (code 22).
-      assert_receive {:"$websockex_cast", {:subscribe_all, batch}}, 2_000
+      assert_receive {:"$websockex_cast", {:subscribe_all, batch}}, 5_000
       assert {"LEVELONE_EQUITIES", "SUBS", ["AAPL"], []} in batch
 
       assert Feed.unsubscribe(feed, ["AAPL"]) == :ok
 
-      assert_receive {:"$websockex_cast", {:subscribe_all, emptied}}, 2_000
+      assert_receive {:"$websockex_cast", {:subscribe_all, emptied}}, 5_000
       assert {"LEVELONE_EQUITIES", "SUBS", [], []} in emptied
       assert {"CHART_EQUITY", "SUBS", [], []} in emptied
     end
@@ -506,7 +512,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}})
 
-      assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}}, 2_000
+      assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :delisted}}, 5_000
       assert Feed.coverage(feed) == %{}
     end
 
@@ -518,7 +524,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.subscribe_notices(feed, to: watcher) == :ok
       send(feed, {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)})
 
-      assert_receive {:relayed, {:dp_exchange, :schwab, %Notice{kind: :link_up}}}, 2_000
+      assert_receive {:relayed, {:dp_exchange, :schwab, %Notice{kind: :link_up}}}, 5_000
     end
 
     test "a value with no symbol is delivered and does not enter coverage" do
@@ -529,7 +535,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, %{account: "123", event: "OrderFill"}})
 
-      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 5_000
       assert Feed.coverage(feed) == %{}
     end
 
@@ -556,7 +562,7 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["AAPL"], to: name)
       send(feed, {:dp_exchange, :schwab, %{account: "123", event: "OrderFill"}})
 
-      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %{event: "OrderFill"}}, 5_000
       assert Process.alive?(feed)
 
       Process.unregister(name)
@@ -609,7 +615,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_receive {:relayed_to_socket,
                       {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
-                     2_000
+                     5_000
     end
 
     test "a route with no live socket (the poll route) is not sent anything, and does not crash" do
@@ -658,7 +664,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :internal_poll}
       assert %{route: :internal_poll} = Feed.status(feed)
     end
@@ -690,12 +696,12 @@ defmodule DpExchange.Schwab.FeedTest do
         )
 
       :ok = Feed.subscribe(feed, ["AAPL"])
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
       :ok = Feed.subscribe_notices(feed, to: self())
 
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 500
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       :sys.replace_state(feed, fn state -> %{state | poller: dead} end)
 
@@ -712,7 +718,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       # An empty map alone is indistinguishable from a venue delivering nothing. The notice
       # is what says "we could not ask", which is a different fact about the world.
-      assert_receive {:dp_exchange, :schwab, %{kind: :link_down} = notice}, 500
+      assert_receive {:dp_exchange, :schwab, %{kind: :link_down} = notice}, 5_000
       assert notice.severity == :warning
       assert notice.message =~ "did not answer a read"
     end
@@ -737,7 +743,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 3_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -766,7 +772,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(subscriber)
       Process.exit(subscriber, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}, 5_000
 
       # A call is answered only after the feed's own `:DOWN` has been handled.
       _settled = Feed.coverage(feed)
@@ -785,7 +791,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(watcher)
       Process.exit(watcher, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}, 5_000
       _settled = Feed.coverage(feed)
 
       refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
@@ -806,7 +812,7 @@ defmodule DpExchange.Schwab.FeedTest do
 
       ref = Process.monitor(holder)
       Process.exit(holder, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}, 5_000
       _settled = Feed.coverage(feed)
 
       assert MapSet.member?(:sys.get_state(feed).subscribers, name)
@@ -838,7 +844,7 @@ defmodule DpExchange.Schwab.FeedTest do
       feed = start_feed(socket: fake_socket(), subscriber: self(), symbols: ["AAPL"])
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %{symbol: "AAPL"}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %{symbol: "AAPL"}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
 
       # `:no_route` here only means this test's feed has no live route; the set changed.
@@ -955,7 +961,7 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["AAPL"])
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -971,7 +977,7 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["MSFT"])
 
       send(feed, {:dp_exchange, :schwab, candle_for("MSFT")})
-      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 5_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -988,8 +994,8 @@ defmodule DpExchange.Schwab.FeedTest do
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
       send(feed, {:dp_exchange, :schwab, candle_for("MSFT")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 2_000
-      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Types.Candle{}}, 5_000
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -1010,7 +1016,7 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["MSFT"])
 
       send(feed, {:dp_exchange, :schwab, order_book_for("MSFT")})
-      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.OrderBook{}}, 5_000
 
       assert Feed.coverage_by_kind(feed) == %{}
       assert Feed.coverage(feed) == %{"MSFT" => :stream}
@@ -1174,7 +1180,7 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.wanted(feed) == ["AAPL"]
 
       send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
-      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 2_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
     end
 
