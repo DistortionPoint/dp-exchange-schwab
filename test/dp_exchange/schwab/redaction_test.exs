@@ -96,4 +96,32 @@ defmodule DpExchange.Schwab.RedactionTest do
       assert sent.refresh_token == "CANARY-REFRESH"
     end
   end
+
+  describe "Supervisor.start_link/1" do
+    test "a raw credential map never sits in the supervisor's stored child specs" do
+      id = System.unique_integer([:positive])
+
+      opts = [
+        name: :"redaction_sup_#{id}",
+        feed: :"redaction_feed_#{id}",
+        limiter: :"redaction_limiter_#{id}",
+        order_limit: :"redaction_order_limit_#{id}",
+        credentials: %{
+          access_token: "CANARY-ACCESS",
+          refresh_token: "CANARY-REFRESH",
+          client_id: "CANARY-ID",
+          client_secret: "CANARY-SECRET"
+        }
+      ]
+
+      supervisor =
+        start_supervised!(%{
+          id: :redaction_sup,
+          start: {DpExchange.Schwab.Supervisor, :start_link, [opts]},
+          type: :supervisor
+        })
+
+      refute inspect(:sys.get_state(supervisor), limit: :infinity) =~ "CANARY"
+    end
+  end
 end
