@@ -29,6 +29,8 @@ defmodule DpExchange.Schwab.OrderLimit do
   opted into — several of this package's own tests among them.
   """
 
+  alias DpExchange.Schwab.Supervisor, as: SchwabSupervisor
+
   @typedoc "Whether `:order_limit_per_minute` was passed, and the ceiling if it was."
   @type t :: %{declared?: boolean(), limit: non_neg_integer()}
 
@@ -49,6 +51,31 @@ defmodule DpExchange.Schwab.OrderLimit do
     Agent.get(name, & &1)
   catch
     :exit, _reason -> {:error, :not_started}
+  end
+
+  @doc """
+  Whether an order write may proceed under the tree named by `opts`.
+
+  See `DpExchange.Schwab.Supervisor`'s "A silent 0 is still the wrong fix" section.
+  `{:error, :not_started}` means this consumer never supervised `OrderLimit` at all —
+  bypassing `Supervisor` entirely with a `:limiter` of its own, which this package has
+  always allowed — and gets no opinion here, not a refusal: collapsing "I was never asked"
+  into "refused" would fail every consumer who does that. `declared?: false` means a tree
+  WAS started through `Supervisor` and specifically never told an order ceiling, which every
+  order write refuses (`{:error, :order_limit_not_declared}`) rather than let masquerade as
+  the venue's own throttling. A declared `0` is `{:error, :order_limit_zero}`: found
+  2026-10-10 by reading the path, it reached the limiter through `max(orders, 1)` and was
+  permitted one write a minute though the registration granted none.
+  """
+  @spec ensure_declared(keyword()) ::
+          :ok | {:error, :order_limit_not_declared | :order_limit_zero}
+  def ensure_declared(opts) do
+    case status(SchwabSupervisor.order_limit_name(opts)) do
+      {:error, :not_started} -> :ok
+      %{declared?: false} -> {:error, :order_limit_not_declared}
+      %{declared?: true, limit: 0} -> {:error, :order_limit_zero}
+      %{declared?: true} -> :ok
+    end
   end
 
   @doc "Child spec, so `Supervisor` supervises this the same way it supervises any child."

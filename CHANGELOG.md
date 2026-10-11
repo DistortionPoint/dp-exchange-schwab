@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Venue-supplied text is bounded before it enters an error tuple, a notice or telemetry.**
+  `Rest.refusal/2` put a venue's `detail`, `message` or `error_description` into
+  `{:venue_error, status, detail}` whole, `Auth` did the same with a token endpoint's
+  `error_description`, and the Streamer's LOGIN or command `msg`, its `service` and its
+  delayed-quote `symbol` went into notices unbounded, as did `inspect(reason)` in
+  disconnect, crash, fallback and re-assert notices, log lines and the `link_down`
+  telemetry. A proxy's HTML page or a hostile reply became megabytes in every caller's
+  tuple. A new internal `DpExchange.Schwab.Bound` cuts a binary to 2_048 bytes on a UTF-8
+  boundary with a `… (N bytes)` marker (a short message is unchanged) and renders any
+  other term with `inspect(limit: 50, printable_limit: 2_048)`; reason terms use
+  `printable_limit: 1_024`. A non-string `errors[0].detail` now arrives as bounded text
+  rather than as the raw term.
+- **`Fake` ignored the order ceiling the real facade enforces.** `Schwab.place_order/3`,
+  `replace_order/4` and `cancel_order/3` refuse `{:error, :order_limit_not_declared}` and
+  `{:error, :order_limit_zero}`; the fake accepted both. The check moved to
+  `OrderLimit.ensure_declared/1`, shared by the facade and the fake, in the same position
+  (after the account hash, before the order is built). With no tree supervised the fake, like
+  the facade, has no opinion.
+- **`Socket`'s set of already-reported delayed symbols could grow without bound.** It is
+  keyed by a venue-supplied key; it is capped at 5_000, past which a delayed quote is still
+  withheld but no longer announced.
+
 ## [0.2.109] - 2026-10-11
 
 ### Fixed

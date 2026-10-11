@@ -93,6 +93,7 @@ defmodule DpExchange.Schwab.Auth do
   """
 
   alias DpExchange.Core.{Config, HttpClient}
+  alias DpExchange.Schwab.Bound
 
   @token_url "https://api.schwabapi.com/v1/oauth/token"
 
@@ -384,8 +385,10 @@ defmodule DpExchange.Schwab.Auth do
     # A caller that wants to try again does so with the credential it still holds.
   end
 
-  defp detail(%{"error_description" => description}) when is_binary(description), do: description
-  defp detail(%{"error" => error}) when is_binary(error), do: error
+  defp detail(%{"error_description" => description}) when is_binary(description),
+    do: Bound.text(description)
+
+  defp detail(%{"error" => error}) when is_binary(error), do: Bound.text(error)
   defp detail(_other), do: nil
 
   # A 2xx token response this package cannot decode is NOT an empty object.

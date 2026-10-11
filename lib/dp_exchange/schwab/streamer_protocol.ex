@@ -52,7 +52,7 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   """
 
   alias DpExchange.Core.Config
-  alias DpExchange.Schwab.StreamerInfo
+  alias DpExchange.Schwab.{Bound, StreamerInfo}
 
   @services ~w(
     ADMIN
@@ -191,13 +191,17 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   def succeeded?(_response), do: false
 
   @doc """
-  The venue's message for a failed response, or `nil` when it gave none.
+  The venue's message for a failed response, or `nil` when it gave none. A message longer
+  than 2_048 bytes is cut on a UTF-8 boundary and marked with its full size
+  (`DpExchange.Schwab.Bound.text/1`); a short one is returned unchanged.
 
   `nil` is not "no error" — `succeeded?/1` answers that. It means the venue refused without
   saying why, which is worth surfacing as itself rather than as an empty string.
   """
   @spec failure_message(map()) :: String.t() | nil
-  def failure_message(%{"content" => %{"msg" => msg}}) when is_binary(msg), do: msg
+  def failure_message(%{"content" => %{"msg" => msg}}) when is_binary(msg),
+    do: Bound.text(msg)
+
   def failure_message(_response), do: nil
 
   @doc """

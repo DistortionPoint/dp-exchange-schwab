@@ -300,7 +300,7 @@ defmodule DpExchange.Schwab.Feed do
 
   alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
-  alias DpExchange.Schwab.{Auth, Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, Bound, Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
   require Logger
 
@@ -1050,7 +1050,7 @@ defmodule DpExchange.Schwab.Feed do
 
   defp report_reassert(other, state) do
     Logger.warning(
-      "[Schwab Feed] periodic re-assert could not reach a route: #{inspect(other)} — its " <>
+      "[Schwab Feed] periodic re-assert could not reach a route: #{Bound.reason(other)} — its " <>
         "#{MapSet.size(state.wanted)} wanted symbol(s) stay on whatever they last " <>
         "delivered until the next tick"
     )
@@ -1266,7 +1266,7 @@ defmodule DpExchange.Schwab.Feed do
   # latest reason.
   defp stay_on_poll(state, reason) do
     Logger.debug(
-      "[Schwab Feed] Streamer still unreachable (#{inspect(reason)}); staying on the " <>
+      "[Schwab Feed] Streamer still unreachable (#{Bound.reason(reason)}); staying on the " <>
         "fallback poll until the next attempt"
     )
 
@@ -1277,7 +1277,7 @@ defmodule DpExchange.Schwab.Feed do
     notify(
       state,
       Notice.new(:degraded, :schwab,
-        details: %{reason: inspect(reason), fallback: :internal_poll}
+        details: %{reason: Bound.reason(reason), fallback: :internal_poll}
       )
     )
 
@@ -1298,8 +1298,8 @@ defmodule DpExchange.Schwab.Feed do
       state,
       Notice.new(:link_down, :schwab,
         severity: :warning,
-        message: "route crashed (#{inspect(reason)}) — reconnecting now",
-        details: %{reason: inspect(reason)}
+        message: "route crashed (#{Bound.reason(reason)}) — reconnecting now",
+        details: %{reason: Bound.reason(reason)}
       )
     )
 
@@ -1738,9 +1738,9 @@ defmodule DpExchange.Schwab.Feed do
       Notice.new(:link_down, :schwab,
         severity: :warning,
         message:
-          "poll did not answer a read (#{inspect(reason)}) — reporting no coverage for " <>
+          "poll did not answer a read (#{Bound.reason(reason)}) — reporting no coverage for " <>
             "this read only; the feed is still running",
-        details: %{reason: inspect(reason)}
+        details: %{reason: Bound.reason(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})

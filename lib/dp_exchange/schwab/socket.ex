@@ -130,7 +130,7 @@ defmodule DpExchange.Schwab.Socket do
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
-  alias DpExchange.Schwab.{Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
+  alias DpExchange.Schwab.{Bound, Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
 
   # `use`, `start_link/4` and `cast/2` go to this package's vendored fork, never the real
   # `WebSockex`, whose `open_loop/3` has no handshake deadline and whose `websocket_loop/3`
@@ -174,6 +174,7 @@ defmodule DpExchange.Schwab.Socket do
   # The most commands held while a LOGIN is pending — see the moduledoc's "A command sent
   # before LOGIN is held, not dropped". `Feed` holds at most one per service.
   @max_held 64
+  @max_delayed_reported 5_000
 
   # See the moduledoc's "A dead connection is found by pinging it".
   @ping_every_ms 30_000
@@ -459,8 +460,9 @@ defmodule DpExchange.Schwab.Socket do
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
-    notify(state, Notice.new(:link_down, :schwab, details: %{reason: inspect(reason)}))
-    Telemetry.link_down(:schwab, inspect(reason))
+    bounded = Bound.reason(reason)
+    notify(state, Notice.new(:link_down, :schwab, details: %{reason: bounded}))
+    Telemetry.link_down(:schwab, bounded)
 
     # See the moduledoc's "A rejected LOGIN is not a network blip" section. `websockex`
     # reconnects immediately with no delay of its own, and a socket presenting an access
@@ -524,7 +526,7 @@ defmodule DpExchange.Schwab.Socket do
         {:ok, hold(state, {service, command, keys, opts})}
 
       {:error, reason} ->
-        notify(state, Notice.new(:degraded, :schwab, details: %{reason: inspect(reason)}))
+        notify(state, Notice.new(:degraded, :schwab, details: %{reason: Bound.reason(reason)}))
         {:ok, state}
     end
   end
@@ -592,7 +594,7 @@ defmodule DpExchange.Schwab.Socket do
          }}
 
       {:error, reason} ->
-        notify(state, Notice.new(:degraded, :schwab, details: %{reason: inspect(reason)}))
+        notify(state, Notice.new(:degraded, :schwab, details: %{reason: Bound.reason(reason)}))
         {:none, state}
     end
   end
@@ -809,7 +811,7 @@ defmodule DpExchange.Schwab.Socket do
         state,
         Notice.new(:degraded, :schwab,
           details: %{
-            service: response["service"],
+            service: Bound.text(response["service"]),
             reason: StreamerProtocol.failure_message(response) || "command rejected"
           }
         )
@@ -870,15 +872,18 @@ defmodule DpExchange.Schwab.Socket do
   defp withhold_delayed(state, service, symbol) do
     reported = Map.get(state, :delayed_reported, MapSet.new())
 
-    if MapSet.member?(reported, symbol) do
+    # Bounded: the set is keyed by a venue-supplied key, so a venue streaming endless distinct
+    # keys must not grow this process without limit. Past the cap the quote is still
+    # withheld, just not announced again.
+    if MapSet.member?(reported, symbol) or MapSet.size(reported) >= @max_delayed_reported do
       state
     else
       notify(
         state,
         Notice.new(:degraded, :schwab,
           details: %{
-            symbol: symbol,
-            service: service,
+            symbol: Bound.text(symbol),
+            service: Bound.text(service),
             reason: "delayed quotes withheld: the account has no real-time entitlement"
           }
         )

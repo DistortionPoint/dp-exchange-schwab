@@ -77,7 +77,7 @@ defmodule DpExchange.Schwab.Fake do
 
   alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
   alias DpExchange.Schwab
-  alias DpExchange.Schwab.{Auth, Orders, Rest, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, OrderLimit, Orders, Rest, SymbolFormat}
 
   @listed ~w(AAPL MSFT GOOGL AMZN NVDA F BRK.B)
 
@@ -368,6 +368,7 @@ defmodule DpExchange.Schwab.Fake do
     # The real order (`Schwab.place_order/3`): account hash, then the order's own shape, then
     # the credential, which the real path only looks at when it signs the request.
     with {:ok, _hash} <- require_account(opts),
+         :ok <- OrderLimit.ensure_declared(opts),
          # The real refusals, from the real module — a fake that accepted an order the
          # venue publishes as invalid would green-light code that cannot work.
          {:ok, payload} <- Orders.build(request, opts),
@@ -460,6 +461,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_replace_order(credentials, order_id, request, opts) do
     with {:ok, _hash} <- require_account(opts),
+         :ok <- OrderLimit.ensure_declared(opts),
          :ok <- Rest.check_path_segment(order_id),
          {:ok, payload} <- Orders.build(request, opts),
          :ok <- require_credentials(credentials: credentials),
@@ -483,6 +485,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_cancel_order(credentials, order_id, opts) do
     with {:ok, _hash} <- require_account(opts),
+         :ok <- OrderLimit.ensure_declared(opts),
          :ok <- Rest.check_path_segment(order_id),
          :ok <- require_credentials(credentials: credentials),
          {:ok, body} <- find_body(order_id),

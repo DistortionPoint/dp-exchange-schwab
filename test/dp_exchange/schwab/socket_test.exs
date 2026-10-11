@@ -138,6 +138,22 @@ defmodule DpExchange.Schwab.SocketTest do
       refute_received {:dp_exchange, :schwab, _payload}
     end
 
+    test "the set of symbols already reported is bounded" do
+      full = MapSet.new(1..5_000, &"SYM#{&1}")
+      row = %{"key" => "AAPL", "delayed" => true, "1" => 99.5, "2" => 100.5, "3" => 100.0}
+
+      data = %{
+        "data" => [%{"service" => "LEVELONE_EQUITIES", "command" => "SUBS", "content" => [row]}]
+      }
+
+      full_state = state(%{logged_in?: true, delayed_reported: full})
+      assert {:ok, after_frame} = Socket.handle_frame(frame(data), full_state)
+
+      assert MapSet.size(after_frame.delayed_reported) == 5_000
+      refute MapSet.member?(after_frame.delayed_reported, "AAPL")
+      refute_received {:dp_exchange, :schwab, _payload}
+    end
+
     test "a real-time row is still delivered" do
       row = %{"key" => "AAPL", "delayed" => false, "1" => 99.5, "2" => 100.5, "3" => 100.0}
 
@@ -193,6 +209,34 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert answered.login_deadline == nil
       assert_received {:dp_exchange, :schwab, %Notice{kind: :credentials_rejected}}
+    end
+
+    test "an oversized LOGIN msg and an oversized disconnect reason reach notices bounded" do
+      sent = logging_in()
+
+      refused =
+        frame(%{
+          "response" => [
+            %{
+              "service" => "ADMIN",
+              "command" => "LOGIN",
+              "content" => %{"code" => 3, "msg" => String.duplicate("m", 50_000)}
+            }
+          ]
+        })
+
+      {_action, _answered} = Socket.handle_frame(refused, sent)
+
+      assert_received {:dp_exchange, :schwab, %Notice{details: %{reason: msg}}}
+
+      assert byte_size(msg) < 2_100
+
+      huge = {:remote, String.duplicate("r", 100_000)}
+      assert {:reconnect, _dropped} = Socket.handle_disconnect(%{reason: huge}, sent)
+
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down, details: %{reason: r}}}
+
+      assert byte_size(r) < 1_200
     end
 
     test "a deadline and a liveness check from a dropped connection do nothing after it" do

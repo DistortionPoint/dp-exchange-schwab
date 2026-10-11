@@ -199,7 +199,9 @@ that never tracks expiry at all still gets refreshed correctly, just reactively:
 `DpExchange.Schwab.credential_failure?(status)` against the `status` inside a `{:refused,
 {:venue_error, status, detail}}` result, and refresh-then-retry once when it is `true`.
 Any other `4xx` is about the request, not the credential, and retrying with a fresh token
-will not fix it.
+will not fix it. The `detail` is the venue's own text, bounded: longer than 2_048 bytes it is
+cut on a UTF-8 boundary and ends `… (N bytes)`; a shorter one is unchanged, and a `detail`
+that was not text arrives as its bounded `inspect/2` rendering.
 
 **On the streaming side the same reactive signal arrives as a notice, and you must handle
 it.** `credential_failure?/1` covers a REST response you are holding; a live Streamer login
@@ -634,7 +636,10 @@ instruction, size and price, `WORKING` (so `:open`), nothing filled. `get_order/
 `CANCELED`, and `replace_order/4` marks it `REPLACED` and issues a new working order. A
 cancel or replace of an order that is no longer working is `{:refused, {:venue_error, 400}}`,
 and an id the fake never issued is `{:refused, {:venue_error, 404}}` on every one of the
-three. `get_orders/2` leads with one canned filled AAPL order (entered 2026-01-02) so a
+three. `place_order/3`, `replace_order/4` and `cancel_order/3` also refuse an undeclared or
+zero order ceiling (`{:error, :order_limit_not_declared}` / `{:error, :order_limit_zero}`)
+exactly as the facade does, when a real tree is supervised under the same `:order_limit` name;
+with no tree the fake, like the facade, has no opinion. `get_orders/2` leads with one canned filled AAPL order (entered 2026-01-02) so a
 check over its elements is not vacuous; `1005439821` is that order's id. The fake honours
 the `from`/`to` window like the venue: only orders entered inside it are listed, so a
 window that excludes 2026-01-02 omits the canned order. A placed order is entered at the

@@ -70,7 +70,7 @@ defmodule DpExchange.Schwab.Rest do
     TopOfBook
   }
 
-  alias DpExchange.Schwab.{Auth, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, Bound, SymbolFormat}
 
   @market_data_url "https://api.schwabapi.com/marketdata/v1"
   @trader_url "https://api.schwabapi.com/trader/v1"
@@ -2720,10 +2720,17 @@ defmodule DpExchange.Schwab.Rest do
 
   defp refusal(status, body) do
     case refusal_body(body) do
-      %{"errors" => [%{"detail" => detail} | _rest]} -> {:venue_error, status, detail}
-      %{"error_description" => detail} when is_binary(detail) -> {:venue_error, status, detail}
-      %{"message" => detail} when is_binary(detail) -> {:venue_error, status, detail}
-      _other -> {:venue_error, status}
+      %{"errors" => [%{"detail" => detail} | _rest]} ->
+        {:venue_error, status, Bound.text(detail)}
+
+      %{"error_description" => detail} when is_binary(detail) ->
+        {:venue_error, status, Bound.text(detail)}
+
+      %{"message" => detail} when is_binary(detail) ->
+        {:venue_error, status, Bound.text(detail)}
+
+      _other ->
+        {:venue_error, status}
     end
   end
 

@@ -732,25 +732,9 @@ defmodule DpExchange.Schwab do
     Keyword.put(opts, :limiter, Supervisor.limiter_name(opts))
   end
 
-  # See `OrderLimit`'s moduledoc and `Supervisor`'s "A silent 0 is still the wrong fix"
-  # section. `{:error, :not_started}` means this consumer never supervised `OrderLimit` at
-  # all — bypassing `Supervisor` entirely with a `:limiter` of its own, which this package
-  # has always allowed — and gets no opinion here, not a refusal: collapsing "I was never
-  # asked" into "refused" would fail every consumer who does that, several of this
-  # package's own tests among them. `declared?: false` means a tree WAS started through
-  # `Supervisor` and specifically never told an order ceiling, which every order write
-  # refuses rather than let masquerade as the venue's own throttling.
-  defp ensure_order_limit_declared(opts) do
-    case OrderLimit.status(Supervisor.order_limit_name(opts)) do
-      {:error, :not_started} -> :ok
-      %{declared?: false} -> {:error, :order_limit_not_declared}
-      # Found 2026-10-10 by reading the path: a declared `0` reached the limiter through
-      # `max(orders, 1)` and was permitted one write a minute, though the registration
-      # granted none. Refused here, before any limiter call, rather than quietly metered.
-      %{declared?: true, limit: 0} -> {:error, :order_limit_zero}
-      %{declared?: true} -> :ok
-    end
-  end
+  # The check lives in `OrderLimit.ensure_declared/1`, shared with `Fake`, so the two refuse
+  # an undeclared or zero order ceiling identically.
+  defp ensure_order_limit_declared(opts), do: OrderLimit.ensure_declared(opts)
 
   defp feed(opts), do: Config.opt(opts, :feed, Supervisor.feed_name(opts))
 
