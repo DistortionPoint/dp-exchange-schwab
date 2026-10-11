@@ -144,4 +144,53 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
       assert Task.await(task) == {:error, {:missing_credentials, :schwab}}
     end
   end
+
+  describe "subscribe/2 is not wired, and an injected get_price does not leak into it" do
+    # `subscribe/2` built its pushed quote by calling the public `get_price/2`, which consults
+    # `FakeInjection`; a failure a consumer queued for `get_price` made `subscribe/2` raise
+    # `MatchError`. The real `subscribe/2` makes no price call at all.
+    test "a venue-wide failure leaves subscribe/2 delivering" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+
+      assert Fake.subscribe(["AAPL"], to: self()) == :ok
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}
+    end
+
+    test "update_symbols/2 likewise" do
+      FakeInjection.fail_always(:schwab, {:error, :injected})
+
+      assert Fake.update_symbols(["MSFT"], to: self()) == :ok
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "MSFT"}}
+    end
+  end
+
+  describe "the fake refuses a symbol set the real feed refuses" do
+    test "a pair-shaped symbol is refused by name and nothing is subscribed" do
+      assert Fake.subscribe(["AAPL", "BTC-USD"], to: self()) ==
+               {:error, {:invalid_symbols, ["BTC-USD"]}}
+
+      assert Fake.coverage() == %{}
+      refute_received {:dp_exchange, :schwab, _payload}
+    end
+
+    test "update_symbols/2 refuses before it clears what was subscribed" do
+      :ok = Fake.subscribe(["AAPL"], to: self())
+
+      assert Fake.update_symbols(["BTC-USD"], to: self()) ==
+               {:error, {:invalid_symbols, ["BTC-USD"]}}
+
+      assert Map.keys(Fake.coverage()) == ["AAPL"]
+    end
+
+    test "a symbol set that is not a list is refused" do
+      assert Fake.subscribe(:AAPL) == {:error, {:invalid_symbols, :AAPL}}
+      assert Fake.unsubscribe("AAPL") == {:error, {:invalid_symbols, "AAPL"}}
+      assert Fake.update_symbols(5) == {:error, {:invalid_symbols, 5}}
+    end
+
+    test "a padded symbol is held as the real feed holds it" do
+      assert Fake.subscribe([" aapl "], to: self()) == :ok
+      assert Map.keys(Fake.coverage()) == ["AAPL"]
+    end
+  end
 end

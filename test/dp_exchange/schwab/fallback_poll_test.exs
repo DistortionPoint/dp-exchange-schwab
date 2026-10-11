@@ -300,4 +300,44 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       end
     end
   end
+
+  describe "a credential failure on the fallback poll" do
+    # `/quotes` answering 401 reached `Feed` as a refusal for every symbol in the chunk, and
+    # each was reported as `{:refused, symbol, _}`: the venue stating it does not carry the
+    # symbol, which a consumer answers by dropping it. One expired 30-minute token emptied
+    # the consumer's collection. It is an outage of the credential, and says so as one.
+    test "is an outage notice, never a refusal of each symbol" do
+      plug = fn conn -> Plug.Conn.resp(conn, 401, "no") end
+
+      feed =
+        start_feed(plug: plug, retry_attempts: 0, interval_ms: 50, start_delay_ms: 0)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL", "MSFT"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
+                     3_000
+
+      refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
+    end
+
+    test "403 is treated the same way" do
+      plug = fn conn ->
+        if String.contains?(conn.request_path, "userPreference"),
+          do: Plug.Conn.resp(conn, 401, "no"),
+          else: Plug.Conn.resp(conn, 403, "no")
+      end
+
+      feed =
+        start_feed(plug: plug, retry_attempts: 0, interval_ms: 50, start_delay_ms: 0)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
+                     3_000
+
+      refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
+    end
+  end
 end

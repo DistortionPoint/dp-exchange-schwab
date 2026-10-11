@@ -31,6 +31,45 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An expired access token on the fallback poll reported every wanted symbol as refused.**
+  `/quotes` answering `401` or `403` reached `Feed` as `{:refused, {:venue_error, status, _}}`
+  for each symbol in the failed chunk, and each was delivered as `{:refused, symbol, _}`:
+  the venue stating it does not carry the symbol, which a consumer answers by dropping it
+  from its scope. A token lives 30 minutes, so this was the commonest poll failure there is.
+  A credential failure (`Auth.credential_failure?/1`) is now an ordinary failed cycle,
+  retried, and surfaced by the poll's "delivered nothing" `:coverage_change` notice. `400`
+  and `404` on a whole chunk are still reported per symbol; the vendor does not say whether
+  one bad symbol in a batch refuses all of it.
+- **A symbol argument that was not a list crashed the feed.** `subscribe/2`, `unsubscribe/2`
+  and `update_symbols/2` passed it through to `Feed`, where `for symbol <- 5` or
+  `MapSet.new(5)` raised; the feed restarted from its boot-time options and every
+  subscription and pushed credential was lost. All three now answer
+  `{:error, {:invalid_symbols, value}}` and change nothing.
+- **The `:symbols` start option skipped the equity-only refusal.** `symbols: ["BTC-USD"]`
+  entered `wanted` unchecked and was sent to the Streamer as an equities key, while the same
+  symbol was refused by name on every later call. It is validated at start now and stops the
+  feed with an `ArgumentError` naming the symbol.
+- **A forwarded `limiter: nil` failed every REST call.** The facade used `Keyword.put_new/3`,
+  which keeps a present `nil`; `Core.HttpClient` resolved it to Core's global limiter, which
+  this package never starts. It is `Keyword.put/3` now, as `Supervisor.limiter_name/1`
+  already was.
+- **`Fake.subscribe/2` raised under an injected `get_price` failure, and accepted what the
+  real feed refuses.** It built its pushed quote through the public `get_price/2`, which
+  consults `FakeInjection`, so a failure queued for `get_price` made it raise `MatchError`.
+  It also dropped a pair-shaped symbol silently and answered `:ok`, cleared the subscribed
+  set before refusing an `update_symbols/2`, and did not trim a padded symbol. It now
+  refuses the sets the real feed refuses, with the same `{:invalid_symbols, _}`, and changes
+  nothing when it does.
+
+### Documentation
+
+- **"Reads are unthrottled" overclaimed.** The vendor's sentence is "Get order requests are
+  unthrottled", and it states no limit for market data or `previewOrder`. That is an absence
+  in the document, not a measurement (`spec-facts.md` §4). `README.md`, `usage-rules.md` and
+  `Supervisor` now say so.
+
 ## [0.2.101] - 2026-10-11
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

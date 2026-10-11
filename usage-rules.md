@@ -342,8 +342,10 @@ rather than on venue name.
 ```
 
 **Preview is close to free and placing is not.** Schwab throttles order writes to somewhere
-between 0 and 120 a minute per account and does not throttle reads. A rejection found by
-previewing costs a read. One found by placing costs a scarce write.
+between 0 and 120 a minute per account. Its documentation says "Get order requests are
+unthrottled" and states no limit for market data or for `previewOrder`, which is an absence
+in the document and not a measurement (`docs/reference/schwab/spec-facts.md` §4). A
+rejection found by previewing costs a read. One found by placing costs a scarce write.
 
 This package meters both. Reads, `preview_order` included, share one bucket at
 `read_limit_per_minute` (120 by default), a courtesy ceiling rather than the venue's. Order
@@ -883,3 +885,17 @@ feed is too busy to answer within its call budget, and `{:error, {:feed_exited, 
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
+
+**A symbol set must be a list.** Anything else answers `{:error, {:invalid_symbols, value}}`
+from all three, as a list holding a symbol this venue refuses already did, and the feed is
+left as it was. It used to raise inside the feed, which restarted from its boot-time
+options and lost every subscription. The `:symbols` start option is held to the same rule:
+a pair-shaped or non-list value stops the feed at start with an `ArgumentError` naming it,
+where it used to be sent to the Streamer unchanged. `DpExchange.Schwab.Fake` refuses the
+same sets.
+
+**A `401` or `403` on the fallback poll is an outage, not a refusal.** It used to be
+reported as `{:refused, symbol, _}` for every wanted symbol, which a consumer reads as "the
+venue does not carry this" and answers by dropping the symbol. It is now an ordinary failed
+cycle: retried, and surfaced by the poll's "delivered nothing" `:coverage_change` notice.
+Refresh the credential and call `update_credentials/2`.

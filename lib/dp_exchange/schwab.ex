@@ -704,8 +704,13 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  # `Keyword.put/3`, not `put_new/3`: `limiter_name/1` already returns the caller's own
+  # `:limiter` when it is set, and `put_new/3` keeps a PRESENT `limiter: nil` — which this
+  # family forwards by convention. That `nil` reached `Core.HttpClient`, was resolved there
+  # to Core's global default limiter, which this package never starts, and every call failed
+  # closed against a venue limiter that was running the whole time.
   defp with_limiter(opts) do
-    Keyword.put_new(opts, :limiter, Supervisor.limiter_name(opts))
+    Keyword.put(opts, :limiter, Supervisor.limiter_name(opts))
   end
 
   # See `OrderLimit`'s moduledoc and `Supervisor`'s "A silent 0 is still the wrong fix"

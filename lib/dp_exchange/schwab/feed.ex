@@ -300,7 +300,7 @@ defmodule DpExchange.Schwab.Feed do
 
   alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
-  alias DpExchange.Schwab.{Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
+  alias DpExchange.Schwab.{Auth, Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
   require Logger
 
@@ -559,6 +559,9 @@ defmodule DpExchange.Schwab.Feed do
 
     validate_interval_ms!(Config.opt(opts, :interval_ms, @interval_ms))
 
+    boot_symbols = opts |> Config.opt(:symbols, []) |> canonical_symbols()
+    validate_symbols!(boot_symbols)
+
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     # No default. `self()` here is this Feed, and a Feed that subscribed itself delivered each
@@ -622,7 +625,7 @@ defmodule DpExchange.Schwab.Feed do
       # which would arrive at the rate of the stream it already cannot keep up with.
       dropping: MapSet.new(),
       max_queue_len: Fanout.max_queue_len!(opts, :schwab),
-      wanted: opts |> Config.opt(:symbols, []) |> canonical_symbols() |> MapSet.new(),
+      wanted: MapSet.new(boot_symbols),
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),
@@ -649,6 +652,20 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   @impl true
+  # **A symbol set that is not a list is refused, not raised on.** `for symbol <- 5` and
+  # `MapSet.new(5)` raise inside this callback, which crashed the feed: it restarted from the
+  # supervisor's boot-time opts, so every consumer's subscription, every notice registration
+  # and the credentials pushed in by `update_credentials/2` were gone. The facade passes the
+  # argument through unchanged, so one malformed call from any consumer reached here.
+  def handle_call({:subscribe, symbols, _subscriber}, _from, state) when not is_list(symbols),
+    do: {:reply, {:error, {:invalid_symbols, symbols}}, state}
+
+  def handle_call({:unsubscribe, symbols}, _from, state) when not is_list(symbols),
+    do: {:reply, {:error, {:invalid_symbols, symbols}}, state}
+
+  def handle_call({:update_symbols, symbols}, _from, state) when not is_list(symbols),
+    do: {:reply, {:error, {:invalid_symbols, symbols}}, state}
+
   # **A symbol the REST route refuses is refused here too, before anything changes.** It was
   # accepted and sent to the Streamer unchanged (`native/1`), so `subscribe(["BTC-USD"])`
   # answered `:ok` on the stream route while the poll route refused the same symbol, and the
@@ -1378,10 +1395,27 @@ defmodule DpExchange.Schwab.Feed do
   # One cycle's per-symbol results, as `PollingFeed`'s bulk outcome. Quotes are published.
   # A refused symbol is reported each cycle, as the per-symbol `fetch` reported it. With no
   # quote at all, the cycle is a failure: an error if any chunk failed, else the refusals.
+  #
+  # **A 401 or 403 is the credential, not the symbol, and is an error here.** `Rest` answers
+  # a `4xx` as `{:refused, {:venue_error, status, _}}` for every symbol in the failed chunk,
+  # so an expired access token (they live 30 minutes) reported every wanted symbol as
+  # refused. A refusal is the venue stating it does not carry the symbol, which a consumer
+  # acts on by dropping it from its scope: one lapsed token emptied the collection. As an
+  # error the cycle is retried, `PollingFeed`'s "delivered nothing" notice says so, and
+  # `update_credentials/2` repairs it.
   defp bulk_outcome(results, refuse) do
     quotes = for {_symbol, {:ok, quote_struct}} <- results, do: quote_struct
-    refusals = for {symbol, {:refused, reason}} <- results, do: {symbol, reason}
-    errors = for {_symbol, {:error, reason}} <- results, do: reason
+
+    {credential, refusals} =
+      results
+      |> Enum.flat_map(fn
+        {symbol, {:refused, reason}} -> [{symbol, reason}]
+        _other -> []
+      end)
+      |> Enum.split_with(fn {_symbol, reason} -> credential_refusal?(reason) end)
+
+    failures = for {_symbol, {:error, reason}} <- results, do: reason
+    errors = failures ++ Enum.map(credential, fn {_symbol, reason} -> reason end)
 
     case {quotes, errors} do
       {[], []} ->
@@ -1396,6 +1430,10 @@ defmodule DpExchange.Schwab.Feed do
         {:ok, quotes}
     end
   end
+
+  defp credential_refusal?({:venue_error, status}), do: Auth.credential_failure?(status)
+  defp credential_refusal?({:venue_error, status, _detail}), do: Auth.credential_failure?(status)
+  defp credential_refusal?(_other), do: false
 
   defp new_credentials_cell(credentials) do
     cell = :ets.new(:schwab_feed_credentials, [:set, :protected, read_concurrency: true])
@@ -1591,6 +1629,28 @@ defmodule DpExchange.Schwab.Feed do
   # `0` is refused here, unlike Coinbase's shard spacing where zero is a real if extreme
   # choice: a poll interval of zero is not a fast poll, it is a process that reschedules
   # itself with no delay and spends the venue's entire rate budget in one continuous burst.
+  # **The boot-time `:symbols` get the check `subscribe/2` and `update_symbols/2` already
+  # make.** They went into `wanted` unvalidated, so `symbols: ["BTC-USD"]` was sent to the
+  # Streamer as `LEVELONE_EQUITIES` key `BTC-USD` (`native/1` passes a refused symbol through
+  # unchanged) while the same symbol was refused by name on every later call: the equity-only
+  # refusal this venue is built around, bypassed by the one door that never ran it. Refused at
+  # start, by name, like the interval above.
+  defp validate_symbols!(symbols) when is_list(symbols) do
+    case invalid_symbols(symbols) do
+      [] ->
+        :ok
+
+      invalid ->
+        raise ArgumentError,
+              "symbols must be equity or option tickers this venue accepts, got invalid: " <>
+                inspect(invalid)
+    end
+  end
+
+  defp validate_symbols!(other) do
+    raise ArgumentError, "symbols must be a list of ticker strings, got: #{inspect(other)}"
+  end
+
   defp validate_interval_ms!(value) when is_integer(value) and value > 0, do: :ok
 
   defp validate_interval_ms!(value) do

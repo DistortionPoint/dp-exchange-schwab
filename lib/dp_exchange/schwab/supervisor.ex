@@ -16,7 +16,8 @@ defmodule DpExchange.Schwab.Supervisor do
   baked in here would be a claim about somebody else's registration.
 
   So the limits come from options, and the default is deliberately generous for reads —
-  which the venue documents as unthrottled — while a host that places orders should pass
+  the venue documents order reads as unthrottled and states no limit for market data —
+  while a host that places orders should pass
   `:order_limit_per_minute` matching what its own app was registered with. Zero is a legal
   registration value, and a host with it should pass `0` rather than discover the ceiling
   by being refused.
@@ -88,9 +89,10 @@ defmodule DpExchange.Schwab.Supervisor do
   alias DpExchange.Core.{Config, DefaultRateLimiter}
   alias DpExchange.Schwab.{Feed, OrderLimit}
 
-  # Reads are documented as unthrottled. This is a courtesy ceiling rather than a measured
-  # one, and it is not a claim about the venue — it exists so a runaway poll cannot become
-  # a self-inflicted incident.
+  # The vendor says "Get order requests are unthrottled" and states no limit for market data
+  # at all (`spec-facts.md` §4) — an absence in the document, not a measurement. This is a
+  # courtesy ceiling rather than a measured one, and it is not a claim about the venue — it
+  # exists so a runaway poll cannot become a self-inflicted incident.
   @default_read_limit 120
 
   # **Not a venue fact and not a guess at one.** Schwab's own ceiling for order writes is

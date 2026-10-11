@@ -70,4 +70,41 @@ defmodule DpExchange.Schwab.ForwardedNilTest do
 
     refute is_nil(DpExchange.Schwab.Supervisor.limiter_name(limiter: nil))
   end
+
+  defmodule RecordingLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    # The facade calls run in the caller's process, so `self()` here is the test.
+    @impl true
+    def acquire(_provider, _weight, opts), do: record(opts)
+    @impl true
+    def check(_provider, _weight, opts), do: record(opts)
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+
+    defp record(opts) do
+      send(self(), {:limiter_opt, Keyword.get(opts, :limiter)})
+      :ok
+    end
+  end
+
+  test "a REST call with a forwarded `limiter: nil` meters against this venue's limiter" do
+    # The facade used `Keyword.put_new/3`, which keeps a present `limiter: nil`. `Core`
+    # then resolved it to its own global limiter, which this package never starts, so every
+    # call failed closed against a venue limiter that was running the whole time.
+    DpExchange.Core.Config.put_override(:rate_limit_module, RecordingLimiter)
+
+    _result =
+      DpExchange.Schwab.get_price("AAPL",
+        credentials: %{access_token: "t"},
+        limiter: nil,
+        retry_attempts: 0,
+        plug: fn conn -> Plug.Conn.resp(conn, 500, "no") end
+      )
+
+    assert_received {:limiter_opt, limiter}
+    assert limiter == DpExchange.Schwab.Supervisor.limiter_name([])
+    refute is_nil(limiter)
+  end
 end

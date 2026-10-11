@@ -1192,4 +1192,47 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.wanted(feed) == ["AAPL"]
     end
   end
+
+  describe "a symbol argument that is not a list" do
+    # `for symbol <- 5` and `MapSet.new(5)` raised inside `handle_call/3`, killing the feed.
+    # It restarted from the supervisor's boot-time options, so every consumer's subscription
+    # and every credential pushed by `update_credentials/2` was gone.
+    test "is refused by name and leaves the feed, and what it holds, alone" do
+      feed = start_feed(socket: fake_socket())
+      assert Feed.subscribe(feed, ["AAPL"]) == :ok
+
+      for bad <- [:AAPL, "AAPL", 5, nil, %{}] do
+        assert Feed.subscribe(feed, bad) == {:error, {:invalid_symbols, bad}}
+        assert Feed.unsubscribe(feed, bad) == {:error, {:invalid_symbols, bad}}
+        assert Feed.update_symbols(feed, bad) == {:error, {:invalid_symbols, bad}}
+      end
+
+      assert Process.alive?(feed)
+      assert Feed.wanted(feed) == ["AAPL"]
+    end
+  end
+
+  describe "symbols given at start are validated like every later call" do
+    # `symbols: ["BTC-USD"]` skipped the equity-only refusal `subscribe/2` makes: it entered
+    # `wanted` and was sent to the Streamer unchanged as an equities key.
+    test "a pair the venue's REST route refuses stops the feed at start, by name" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: nil,
+                 credentials: credentials(),
+                 symbols: ["AAPL", "BTC-USD"]
+               )
+
+      assert message =~ "BTC-USD"
+    end
+
+    test "a non-list stops it too" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{}, _stack}} =
+               Feed.start_link(name: nil, credentials: credentials(), symbols: :AAPL)
+    end
+  end
 end

@@ -452,23 +452,36 @@ defmodule DpExchange.Schwab.Fake do
   # --- streaming ----------------------------------------------------------
 
   @impl true
+  # A symbol the real feed refuses (`{:invalid_symbols, _}`, the same equity-only judgement
+  # `SymbolFormat.validate/1` makes for REST) is refused here too, before anything changes.
+  # The fake used to drop it silently and answer `:ok`, so a consumer's test passed a pair
+  # shaped symbol here that the real package refuses by name.
   def subscribe(symbols, opts \\ []) do
-    symbols = canonical_case(symbols)
-    to = Config.opt(opts, :to, self())
-    covered = Enum.filter(symbols, &(&1 in @listed))
+    with {:ok, symbols} <- checked_symbols(symbols) do
+      to = Config.opt(opts, :to, self())
+      covered = Enum.filter(symbols, &(&1 in @listed))
 
-    Process.put(__MODULE__, Enum.uniq(subscribed() ++ covered))
+      Process.put(__MODULE__, Enum.uniq(subscribed() ++ covered))
 
-    for symbol <- covered do
-      {:ok, quote_struct} = get_price(symbol, credentials: %{access_token: "fake"})
-      send(to, {:dp_exchange, :schwab, quote_struct})
+      # `do_get_price/2`, not `get_price/2`: the latter consults `FakeInjection`, so a failure a
+      # consumer queued for `get_price` made this call raise a `MatchError`. The real
+      # `subscribe/2` makes no price call, and the moduledoc says it is not wired.
+      for symbol <- covered do
+        {:ok, quote_struct} = do_get_price(symbol, credentials: %{access_token: "fake"})
+        send(to, {:dp_exchange, :schwab, quote_struct})
+      end
+
+      :ok
     end
-
-    :ok
   end
 
   @impl true
-  def unsubscribe(symbols, _opts \\ []) do
+  def unsubscribe(symbols, _opts \\ [])
+
+  def unsubscribe(symbols, _opts) when not is_list(symbols),
+    do: {:error, {:invalid_symbols, symbols}}
+
+  def unsubscribe(symbols, _opts) do
     symbols = canonical_case(symbols)
     Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
     :ok
@@ -476,9 +489,11 @@ defmodule DpExchange.Schwab.Fake do
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
-    symbols = canonical_case(symbols)
-    Process.put(__MODULE__, [])
-    subscribe(symbols, opts)
+    # Checked before the set is cleared: the real feed refuses first and changes nothing.
+    with {:ok, symbols} <- checked_symbols(symbols) do
+      Process.put(__MODULE__, [])
+      subscribe(symbols, opts)
+    end
   end
 
   @impl true
@@ -843,8 +858,28 @@ defmodule DpExchange.Schwab.Fake do
   # Upper-cased on the way in, as the real facade does, so a lower-case subscription gets
   # the same answer here as against the venue. Without it the fake delivered nothing for
   # `btc-usd` while the real package delivered `BTC-USD` (checked 2026-09-28).
-  defp canonical_case(symbols) when is_list(symbols),
-    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+  #
+  # `SymbolFormat.to_canonical_symbol/1`, which also trims, as `Feed` does: `" aapl "` is a
+  # valid symbol the real feed holds as `AAPL`, and upper-casing alone left it unlisted here.
+  defp canonical_case(symbols) when is_list(symbols) do
+    Enum.map(symbols, fn
+      s when is_binary(s) -> SymbolFormat.to_canonical_symbol(s)
+      other -> other
+    end)
+  end
 
   defp canonical_case(other), do: other
+
+  # The real `Feed`'s question, in its order: canonical spelling, then the judgement REST
+  # makes. A non-list is refused as the real feed now refuses it.
+  defp checked_symbols(symbols) when is_list(symbols) do
+    canonical = canonical_case(symbols)
+
+    case Enum.reject(canonical, &match?({:ok, _native}, SymbolFormat.validate(&1))) do
+      [] -> {:ok, canonical}
+      invalid -> {:error, {:invalid_symbols, invalid}}
+    end
+  end
+
+  defp checked_symbols(other), do: {:error, {:invalid_symbols, other}}
 end
