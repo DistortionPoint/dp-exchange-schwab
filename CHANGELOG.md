@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.109] - 2026-10-11
+
 ### Fixed
 
 - **A REST epoch below 1e11 was read as SECONDS.** `Rest.parse_time/1` guessed the unit from
