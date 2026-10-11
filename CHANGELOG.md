@@ -31,6 +31,52 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `unsubscribe/2` judges every symbol.** `unsubscribe(["AAPL", :x, 42])`,
+  `unsubscribe(nil)` and `unsubscribe([""])` answered `:ok` (the feed's `handle_call` had no
+  per-symbol check, unlike `subscribe` and `update_symbols`; `DpExchange.Schwab.Fake` the
+  same). They now answer `{:error, {:invalid_symbols, value}}`, `value` being the refused
+  elements (or the argument when it is not a proper list). One judgement,
+  `Feed.check_symbols/1`, is shared by the facade, the feed and the Fake, and an improper
+  list is refused instead of raising.
+- **BREAKING: streaming arguments are judged before the feed is looked at.**
+  `subscribe/2`, `unsubscribe/2`, `update_symbols/2` check symbols, then (`subscribe/2`,
+  `subscribe_notices/1`) the subscriber, then answer `{:error, :feed_not_started}`. A bad
+  argument with no feed used to answer `:feed_not_started` (or `:ok` for `unsubscribe`).
+- **BREAKING: single-symbol reads.** `get_price/2`, `get_top_of_book/2` and
+  `get_historical_prices/4` (facade, `Rest` and Fake) answer `{:error, {:invalid_symbol, v}}`
+  for `nil`, a non-string or a blank string, before credentials. Was
+  `{:not_an_equity_symbol, v}` (after credentials) and `{:empty_symbol, v}`. A well-formed
+  non-equity string keeps `{:not_an_equity_symbol, v}`.
+- **BREAKING: `get_historical_prices` range.** A `range` that is not a keyword list is
+  `{:error, {:invalid_range, range}}` (it raised in `Keyword.get/2`); a `:start`/`:end` that
+  is not a `DateTime` is the same instead of `{:invalid_range_bound, key, value}`.
+- **BREAKING: a credential with surrounding whitespace is refused.** `Auth.headers/2` and
+  `refresh/2` answer `{:error, {:invalid_credentials, :schwab}}` (value never echoed)
+  instead of trimming and sending it; `Feed` shares the check (`Auth.check_token/1`) for the
+  Streamer `LOGIN` token. Blank stays `{:missing_credentials, :schwab}`.
+- **BREAKING (Fake): `coverage/1` reports `:stream` and `status/1` `route: :stream`** (the
+  real feed's normal route) where it said `:internal_poll`; `subscribe_notices/1` no longer
+  sends a `:link_up` on registration (the real feed sends none); `update_symbols/2` ignores
+  `:to`, as the real one does.
+
+### Fixed
+
+- **`Fake.subscribe/2` no longer raises for a `to:` atom that names no process.** It used
+  `send/2` directly (`ArgumentError`); every delivery now goes through a private `deliver/2`
+  using `Core.Fanout.resolve/1`, which skips it as the real feed does, and a symbol is
+  recorded as covered only when the target resolves.
+- **`subscribe([])` no longer bootstraps.** It ran `GET /userPreference` and dialled the
+  Streamer for an empty wanted set. The subscriber is registered and nothing is opened until
+  a symbol is named (`settle_route/2`).
+- **The facade no longer raises for a feed given as a pid on another node.** `alive?/1` called
+  `Process.alive?/1` on it; `coverage/1`, `status/1`, `subscribe/2` and `update_credentials/2`
+  now answer as for a feed that is not started.
+- **An explicit `ssl_options: nil` (or `[]`, or a list without `verify: :verify_peer`) no
+  longer disables certificate verification** on the Streamer socket; it gets the verified
+  defaults. A caller's own list that keeps `verify: :verify_peer` is honoured.
+
 ## [0.2.112] - 2026-10-11
 
 ### Fixed

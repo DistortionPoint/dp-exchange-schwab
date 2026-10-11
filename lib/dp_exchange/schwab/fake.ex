@@ -75,7 +75,7 @@ defmodule DpExchange.Schwab.Fake do
 
   alias DpExchange.Core.Types.{Balance, Candle, Quote, TopOfBook}
 
-  alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Fanout, Types, Venue}
   alias DpExchange.Schwab
   alias DpExchange.Schwab.{Auth, Feed, OrderLimit, Orders, Rest, SymbolFormat}
 
@@ -159,9 +159,11 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_price(symbol, opts) do
-    # The real order: the facade wants a credential map, `Rest` judges the symbol, and only
-    # then does signing find a missing or blank token.
-    with :ok <- require_credential_map(opts),
+    # The real order: the facade refuses a nil, non-binary or blank symbol, then wants a
+    # credential map, `Rest` judges the symbol, and only then does signing find a missing or
+    # blank token.
+    with :ok <- SymbolFormat.check_present(symbol),
+         :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
@@ -185,7 +187,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_top_of_book(symbol, opts) do
-    with :ok <- require_credential_map(opts),
+    with :ok <- SymbolFormat.check_present(symbol),
+         :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
@@ -216,7 +219,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_historical_prices(symbol, timeframe, range, opts) do
-    with :ok <- require_credential_map(opts),
+    with :ok <- SymbolFormat.check_present(symbol),
+         :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          # The real module's own question, in its order: width, range shape, then reach.
          :ok <- Rest.check_history(timeframe, range, @as_of),
@@ -681,7 +685,10 @@ defmodule DpExchange.Schwab.Fake do
   def subscribe(symbols, opts \\ []) do
     with {:ok, symbols} <- checked_symbols(symbols),
          {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
-      covered = Enum.filter(symbols, &(&1 in @listed))
+      # Coverage is only for what was delivered: a `to:` name nothing holds receives nothing
+      # (the real `Core.Fanout` skips it), so no symbol is recorded as covered for it.
+      covered =
+        if Fanout.resolve(to), do: Enum.filter(symbols, &(&1 in @listed)), else: []
 
       Process.put(@wanted_key, Enum.uniq(wanted_symbols() ++ symbols))
       Process.put(__MODULE__, Enum.uniq(subscribed() ++ covered))
@@ -691,39 +698,50 @@ defmodule DpExchange.Schwab.Fake do
       # `subscribe/2` makes no price call, and the moduledoc says it is not wired.
       for symbol <- covered do
         {:ok, quote_struct} = do_get_price(symbol, credentials: %{access_token: "fake"})
-        send(to, {:dp_exchange, :schwab, quote_struct})
+        deliver(to, quote_struct)
       end
 
       :ok
     end
   end
 
+  # The one place this fake sends. A registered name resolves to its pid; an atom naming no
+  # process is skipped, as `Core.Fanout` skips it, instead of raising `ArgumentError`.
+  defp deliver(target, value) do
+    case Fanout.resolve(target) do
+      nil -> :ok
+      pid -> send(pid, {:dp_exchange, :schwab, value})
+    end
+  end
+
   @impl true
   def unsubscribe(symbols, _opts \\ [])
 
-  def unsubscribe(symbols, _opts) when not is_list(symbols),
-    do: {:error, {:invalid_symbols, symbols}}
-
   def unsubscribe(symbols, _opts) do
-    symbols = canonical_case(symbols)
-    Process.put(@wanted_key, Enum.reject(wanted_symbols(), &(&1 in symbols)))
-    Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
-    :ok
+    # Every element is judged, as the real feed judges it.
+    with {:ok, symbols} <- checked_symbols(symbols) do
+      Process.put(@wanted_key, Enum.reject(wanted_symbols(), &(&1 in symbols)))
+      Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
+      :ok
+    end
   end
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
     # Checked before the set is cleared: the real feed refuses first and changes nothing.
-    with {:ok, symbols} <- checked_symbols(symbols),
-         {:ok, _to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+    # `:to` is NOT read: the real `update_symbols/2` takes no subscriber (it replaces the
+    # set; delivery goes to whoever subscribed), so a bad `:to` is not refused here either.
+    with {:ok, symbols} <- checked_symbols(symbols) do
       Process.put(@wanted_key, [])
       Process.put(__MODULE__, [])
-      subscribe(symbols, opts)
+      subscribe(symbols, Keyword.delete(opts, :to))
     end
   end
 
+  # `:stream`, the route a real feed settles on when the Streamer bootstraps - the normal
+  # one. `:internal_poll` is the fallback, which this fake does not model.
   @impl true
-  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :internal_poll})
+  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
 
   @doc """
   What has been asked for, as `DpExchange.Schwab.wanted/1` answers it — every symbol the feed
@@ -735,7 +753,7 @@ defmodule DpExchange.Schwab.Fake do
 
   @doc """
   The feed-wide summary, as `DpExchange.Schwab.status/1` answers it on the poll route
-  (`route: :internal_poll`, which is the route `coverage/1` reports here), with nothing
+  (`route: :stream`, which is the route `coverage/1` reports here), with nothing
   failing: the fake delivers synchronously and has no error to report.
   """
   @spec status(keyword()) :: map()
@@ -746,7 +764,7 @@ defmodule DpExchange.Schwab.Fake do
       covered: length(subscribed()),
       failures_since_ok: 0,
       last_error: nil,
-      route: :internal_poll
+      route: :stream
     }
   end
 
@@ -799,7 +817,7 @@ defmodule DpExchange.Schwab.Fake do
   `Types.Quote` built from `get_price/2` — so reporting anything beyond `:quotes` here
   would assert a delivery this fake cannot produce. Keeping this honest to what the fake
   actually does, rather than to everything the real venue can do, is the same choice
-  `coverage/1` itself already made by answering `:internal_poll` unconditionally.
+  `coverage/1` itself already made by answering `:stream` unconditionally.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{
@@ -808,26 +826,14 @@ defmodule DpExchange.Schwab.Fake do
   def coverage_by_kind(opts \\ []), do: %{quotes: coverage(opts)}
 
   @doc """
-  Registers for this fake's notice channel and delivers one, the way the real facade does.
-
-  This used to be `def subscribe_notices(_opts \\\\ []), do: :ok` — it discarded
-  `opts[:to]` and answered `:ok` unconditionally, so a consumer exercising its own notice
-  handling against this fake received nothing and had no way to distinguish that from a
-  venue with nothing to say.
-
-  It is the same defect `DpExchange.Schwab`'s own `subscribe_notices/1` had — a facade
-  backed by a real notice registry that discarded `opts[:to]` and answered `:ok` — which
-  `Core.AdapterContract`'s assertion 16 names as "mechanism built, documented, and never
-  wired". Fixing the real one and leaving the fake inert reproduces the gap in the one
-  tier every consumer actually runs. Coinbase's, Gemini's and Webull's fakes all send a
-  `:link_up` here; this one was the outlier.
+  Registers for this fake's notice channel, judging `opts[:to]` as the real facade does
+  (`{:error, {:invalid_subscriber, term}}`), and sends **nothing**: the real feed sends no
+  notice on registration, and a `:link_up` here was one a consumer would never see from the
+  real package. The fake emits no notices at all, because it has no link to lose.
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    with {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
-      send(to, {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)})
-      :ok
-    end
+    with {:ok, _to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
   end
 
   defp subscribed, do: Process.get(__MODULE__, [])
@@ -1206,14 +1212,8 @@ defmodule DpExchange.Schwab.Fake do
 
   # The real `Feed`'s question, in its order: canonical spelling, then the judgement REST
   # makes. A non-list is refused as the real feed now refuses it.
-  defp checked_symbols(symbols) when is_list(symbols) do
-    canonical = canonical_case(symbols)
-
-    case Enum.reject(canonical, &match?({:ok, _native}, SymbolFormat.validate(&1))) do
-      [] -> {:ok, canonical}
-      invalid -> {:error, {:invalid_symbols, invalid}}
-    end
+  # The judgement itself is `Feed.check_symbols/1`, shared with the facade and the feed.
+  defp checked_symbols(symbols) do
+    with :ok <- Feed.check_symbols(symbols), do: {:ok, canonical_case(symbols)}
   end
-
-  defp checked_symbols(other), do: {:error, {:invalid_symbols, other}}
 end

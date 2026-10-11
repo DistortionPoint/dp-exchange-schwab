@@ -116,10 +116,14 @@ defmodule DpExchange.Schwab.InvalidSubscriberTest do
                {:error, {:invalid_symbols, ["BTC-USD"]}}
     end
 
-    test "update_symbols/2 changes nothing on a refused subscriber" do
+    test "update_symbols/2 takes no subscriber, as the real one takes none" do
       assert Fake.subscribe(["AAPL"]) == :ok
-      assert Fake.update_symbols(["MSFT"], to: "x") == {:error, {:invalid_subscriber, "x"}}
-      assert Fake.wanted() == ["AAPL"]
+      assert Fake.update_symbols(["MSFT"], to: "x") == :ok
+      assert Fake.wanted() == ["MSFT"]
+
+      # Symbols are still judged first and change nothing when refused.
+      assert Fake.update_symbols(["BTC-USD"]) == {:error, {:invalid_symbols, ["BTC-USD"]}}
+      assert Fake.wanted() == ["MSFT"]
     end
 
     test "subscribe_notices/1" do
@@ -129,7 +133,8 @@ defmodule DpExchange.Schwab.InvalidSubscriberTest do
 
       refute_received {:dp_exchange, :schwab, _any}
       assert Fake.subscribe_notices(to: self()) == :ok
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Notice{kind: :link_up}}, 5_000
+      # The real feed sends nothing on registration, so neither does the fake.
+      refute_receive {:dp_exchange, :schwab, %DpExchange.Core.Notice{}}, 100
     end
   end
 end

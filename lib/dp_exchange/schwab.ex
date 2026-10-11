@@ -81,7 +81,17 @@ defmodule DpExchange.Schwab do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Config, Types, Venue}
-  alias DpExchange.Schwab.{Auth, Capabilities, Feed, OrderLimit, Orders, Rest, Supervisor}
+
+  alias DpExchange.Schwab.{
+    Auth,
+    Capabilities,
+    Feed,
+    OrderLimit,
+    Orders,
+    Rest,
+    Supervisor,
+    SymbolFormat
+  }
 
   # --- identity -----------------------------------------------------------
 
@@ -132,21 +142,25 @@ defmodule DpExchange.Schwab do
 
   @impl true
   def get_price(symbol, opts \\ []) do
-    with {:ok, credentials} <- credentials(opts) do
+    # A nil, non-binary or blank symbol is `{:invalid_symbol, v}`, decided before credentials.
+    with :ok <- SymbolFormat.check_present(symbol),
+         {:ok, credentials} <- credentials(opts) do
       Rest.get_price(symbol, credentials, with_limiter(opts))
     end
   end
 
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
-    with {:ok, credentials} <- credentials(opts) do
+    with :ok <- SymbolFormat.check_present(symbol),
+         {:ok, credentials} <- credentials(opts) do
       Rest.get_top_of_book(symbol, credentials, with_limiter(opts))
     end
   end
 
   @impl true
   def get_historical_prices(symbol, timeframe, range, opts \\ []) do
-    with {:ok, credentials} <- credentials(opts) do
+    with :ok <- SymbolFormat.check_present(symbol),
+         {:ok, credentials} <- credentials(opts) do
       Rest.get_historical_prices(symbol, timeframe, range, credentials, with_limiter(opts))
     end
   end
@@ -519,30 +533,40 @@ defmodule DpExchange.Schwab do
   def subscribe(symbols, opts \\ []) do
     feed = feed(opts)
 
-    if alive?(feed) do
-      feed_call(
-        fn -> Feed.subscribe(feed, canonical_case(symbols), opts) end,
+    # Arguments first (symbols, then subscriber), THEN whether a feed runs: a bad argument
+    # answers the same whether or not the feed is started.
+    with :ok <- Feed.check_symbols(symbols),
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      if alive?(feed) do
+        feed_call(
+          fn -> Feed.subscribe(feed, canonical_case(symbols), opts) end,
+          {:error, :feed_not_started}
+        )
+      else
         {:error, :feed_not_started}
-      )
-    else
-      {:error, :feed_not_started}
+      end
     end
   end
 
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     feed = feed(opts)
-    feed_call(fn -> Feed.unsubscribe(feed, canonical_case(symbols)) end, :ok)
+
+    with :ok <- Feed.check_symbols(symbols) do
+      feed_call(fn -> Feed.unsubscribe(feed, canonical_case(symbols)) end, :ok)
+    end
   end
 
   @impl true
   def update_symbols(symbols, opts \\ []) do
     feed = feed(opts)
 
-    feed_call(
-      fn -> Feed.update_symbols(feed, canonical_case(symbols)) end,
-      {:error, :feed_not_started}
-    )
+    with :ok <- Feed.check_symbols(symbols) do
+      feed_call(
+        fn -> Feed.update_symbols(feed, canonical_case(symbols)) end,
+        {:error, :feed_not_started}
+      )
+    end
   end
 
   @impl true
@@ -669,7 +693,10 @@ defmodule DpExchange.Schwab do
   @impl true
   def subscribe_notices(opts \\ []) do
     feed = feed(opts)
-    feed_call(fn -> Feed.subscribe_notices(feed, opts) end, {:error, :feed_not_started})
+
+    with {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      feed_call(fn -> Feed.subscribe_notices(feed, opts) end, {:error, :feed_not_started})
+    end
   end
 
   @doc """
@@ -748,6 +775,12 @@ defmodule DpExchange.Schwab do
   # `{:global, _}` and `{:via, _, _}` feeds are running feeds too: `Process.whereis/1` only
   # knows local atoms, so a registered-elsewhere feed read as absent and coverage answered
   # empty for a live one. `GenServer.whereis/1` resolves every `GenServer.server()` shape.
+  #
+  # **A pid on another node is not running, as far as this facade can say.** `Process.alive?/1`
+  # raises `ArgumentError` for a remote pid, which took down the caller of `coverage/1`,
+  # `status/1`, `subscribe/2` and `update_credentials/2`. A feed is local to the node that
+  # supervises it; a remote one answers `%{}` / `{:error, :feed_not_started}` rather than raising.
+  defp alive?(pid) when is_pid(pid) and node(pid) != node(), do: false
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
   defp alive?(server), do: is_pid(GenServer.whereis(server))
 

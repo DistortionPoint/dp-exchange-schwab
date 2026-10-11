@@ -259,11 +259,26 @@ defmodule DpExchange.Schwab.Socket do
   @spec connection_opts(keyword()) :: keyword()
   def connection_opts(opts) do
     opts
-    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout, :ssl_options])
+    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
-    |> Keyword.put_new_lazy(:ssl_options, &verified_tls/0)
+    |> Keyword.put(:ssl_options, tls_options(Keyword.get(opts, :ssl_options)))
   end
+
+  # **An explicit `ssl_options: nil` (or `[]`, or anything that drops `verify: :verify_peer`)
+  # must not turn verification off.** `websockex` reads "no TLS options" as its own
+  # `insecure: true` default, `verify: :verify_none`, so a forwarded `nil` silently accepted
+  # any certificate (found on the Coinbase package). `nil` is therefore treated as absent and
+  # gets the verified defaults; a caller's own list is honoured only while it still says
+  # `verify: :verify_peer`. A caller who really wants no verification has to build that
+  # socket themselves; this one will not be talked into it by an absent value.
+  defp tls_options(options) when is_list(options) do
+    if Keyword.keyword?(options) and Keyword.get(options, :verify) == :verify_peer,
+      do: options,
+      else: verified_tls()
+  end
+
+  defp tls_options(_absent_or_malformed), do: verified_tls()
 
   # **Certificate verification, which `websockex` does not do unless told to.** Its
   # `WebSockex.Conn` starts with `insecure: true`, which is `verify: :verify_none`

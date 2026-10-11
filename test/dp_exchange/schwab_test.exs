@@ -819,17 +819,79 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, %{accounts: 1}} = Fake.test_connection(@creds)
     end
 
-    test "subscribing pushes quotes and reports :internal_poll, never :stream" do
+    test "subscribing pushes quotes and reports :stream, the real feed's normal route" do
       :ok = Fake.subscribe(["AAPL", "MSFT"], to: self())
 
-      assert Fake.coverage() == %{"AAPL" => :internal_poll, "MSFT" => :internal_poll}
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}
+      assert Fake.coverage() == %{"AAPL" => :stream, "MSFT" => :stream}
+
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}},
+                     5_000
 
       :ok = Fake.unsubscribe(["MSFT"])
-      assert Fake.coverage() == %{"AAPL" => :internal_poll}
+      assert Fake.coverage() == %{"AAPL" => :stream}
 
       :ok = Fake.update_symbols(["MSFT"])
-      assert Fake.coverage() == %{"MSFT" => :internal_poll}
+      assert Fake.coverage() == %{"MSFT" => :stream}
+    end
+
+    test "unsubscribe judges every element, as the real feed does" do
+      :ok = Fake.subscribe(["AAPL"], to: self())
+
+      for bad <- [nil, :x, 42, [nil], ["AAPL", :x, 42], [""], ["  "], ["BTC-USD"]] do
+        assert {:error, {:invalid_symbols, _value}} = Fake.unsubscribe(bad)
+      end
+
+      assert {:error, {:invalid_symbols, [:x, 42]}} = Fake.unsubscribe(["AAPL", :x, 42])
+      assert Fake.coverage() == %{"AAPL" => :stream}
+    end
+
+    test "an improper symbol list is refused, not raised on" do
+      improper = ["AAPL" | "MSFT"]
+      assert {:error, {:invalid_symbols, ^improper}} = Fake.subscribe(improper)
+      assert {:error, {:invalid_symbols, ^improper}} = Fake.unsubscribe(improper)
+      assert {:error, {:invalid_symbols, ^improper}} = Fake.update_symbols(improper)
+    end
+
+    test "an unregistered atom :to is skipped, not raised on, and covers nothing" do
+      nobody = :"schwab_fake_nobody_#{System.unique_integer([:positive])}"
+
+      assert Fake.subscribe(["AAPL"], to: nobody) == :ok
+      assert Fake.coverage() == %{}
+      assert Fake.wanted() == ["AAPL"]
+    end
+
+    test "a registered name receives the data and the symbol is covered" do
+      name = :"schwab_fake_named_#{System.unique_integer([:positive])}"
+      Process.register(self(), name)
+
+      assert Fake.subscribe(["AAPL"], to: name) == :ok
+
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}},
+                     5_000
+
+      assert Fake.coverage() == %{"AAPL" => :stream}
+    end
+
+    test "update_symbols ignores :to, as the real one does" do
+      assert :ok = Fake.update_symbols(["AAPL"], to: "not a subscriber")
+      assert Fake.coverage() == %{"AAPL" => :stream}
+    end
+
+    test "subscribe_notices registers and sends nothing on registration" do
+      assert Fake.subscribe_notices(to: self()) == :ok
+      refute_receive {:dp_exchange, :schwab, %Notice{}}, 100
+      assert Fake.subscribe_notices(to: "nope") == {:error, {:invalid_subscriber, "nope"}}
+    end
+
+    test "a nil, non-binary or blank symbol is {:invalid_symbol, v} before credentials" do
+      for bad <- [nil, 42, :aapl, "", "   "] do
+        assert Fake.get_price(bad, []) == {:error, {:invalid_symbol, bad}}
+        assert Fake.get_top_of_book(bad, []) == {:error, {:invalid_symbol, bad}}
+        assert Fake.get_historical_prices(bad, "1d", [], []) == {:error, {:invalid_symbol, bad}}
+      end
+
+      assert Fake.get_price("BTC-USD", credentials: @creds) ==
+               {:error, {:not_an_equity_symbol, "BTC-USD"}}
     end
 
     test "coverage_by_kind reports :quotes only, and its union matches coverage/1" do
@@ -837,7 +899,7 @@ defmodule DpExchange.SchwabTest do
 
       by_kind = Fake.coverage_by_kind()
 
-      assert by_kind == %{quotes: %{"AAPL" => :internal_poll, "MSFT" => :internal_poll}}
+      assert by_kind == %{quotes: %{"AAPL" => :stream, "MSFT" => :stream}}
       refute Map.has_key?(by_kind, :order_book)
 
       union = by_kind |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.sort()

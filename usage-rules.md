@@ -156,6 +156,22 @@ never signed with. This matters because the usual way a credential goes missing 
 hands that back as `""`. Signing with it produced a well-formed request the venue refused
 for a reason naming signatures, which points at the signing code rather than at the
 credential.
+**A credential with surrounding whitespace is refused, never trimmed and sent.** An
+`:access_token` (or a `refresh/2` `:refresh_token`, `:client_id`, `:client_secret`) such as
+`" token"` or `"token\n"` answers `{:error, {:invalid_credentials, :schwab}}`; the value is
+never echoed. It used to be trimmed for the one signed request while the Streamer `LOGIN`
+and the refresh read it untrimmed. Blank is still `{:missing_credentials, :schwab}`, and wins.
+
+**A single-symbol read judges its symbol before credentials.** `get_price/2`,
+`get_top_of_book/2` and `get_historical_prices/4` answer `{:error, {:invalid_symbol, value}}`
+for `nil`, a non-string or a blank string, with or without credentials and before any
+request. (Formerly `{:not_an_equity_symbol, value}` for the first two, after the
+credential check, and `{:empty_symbol, ""}` for blank.) A well-formed string that is not an
+equity keeps `{:not_an_equity_symbol, value}`. `get_historical_prices/4` answers
+`{:error, {:invalid_range, range}}` for a `range` that is not a keyword list or whose
+`:start`/`:end` is not a `DateTime` (formerly a raise, and `{:invalid_range_bound, key,
+value}`), before any request.
+
 A blank `:client_secret` used to reach the venue and come back 401, which this package maps
 to `{:refused, {:reauthorization_required, ...}}` — the **terminal** answer meaning a person
 must authorize again at a browser. An unset config value is not a spent grant.
@@ -689,11 +705,20 @@ call with a real success path is wired, including `get_positions/1`, `get_option
 `get_transactions/2` and `get_all_orders/2`. (`get_rate_limit_status/2` is `:unsupported`, so
 it has nothing to inject into.)
 
+**The fake models the normal route.** `Fake.coverage/1` reports `:stream` and
+`Fake.status/1` `route: :stream`, as a real feed does once the Streamer bootstraps (the
+`:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` registers and sends
+nothing, as the real feed sends no notice on registration. `Fake.update_symbols/2` ignores
+`:to`, as the real one does.
+
 **The fake judges a credential as the real package does.** A call whose credential has no
 non-blank `:access_token` — `%{refresh_token: "x"}`, `%{access_token: ""}` — is
 `{:error, {:missing_credentials, :schwab}}` here as there, and in the same place in the
-order of refusals: market-data calls want a credential map, then judge their own arguments
-(symbol, width, range, market), then sign; account calls judge theirs and sign last. The
+order of refusals: market-data calls first refuse a nil, non-string or blank symbol
+(`{:invalid_symbol, v}`), then want a credential map, then judge their own arguments
+(equity-ness of the symbol, width, range, market), then sign; account calls judge theirs and
+sign last. A `to:` atom naming no registered process is skipped on delivery (and covers
+nothing), as the real feed's fan-out skips it. The
 fake also narrows `get_orders/2` by `:max_results`, refuses an unreadable `:from_date` or
 `:to_date` on `get_option_chain/2`, and answers `{:refused, {:account_not_found, number}}`
 to a `get_positions/1` `:account_number` other than the one account it holds.
@@ -978,6 +1003,16 @@ options and lost every subscription. The `:symbols` start option is held to the 
 a pair-shaped or non-list value stops the feed at start with an `ArgumentError` naming it,
 where it used to be sent to the Streamer unchanged. `DpExchange.Schwab.Fake` refuses the
 same sets.
+
+**Arguments are judged before the feed is looked at, and `unsubscribe/2` judges every
+element.** `subscribe/2`, `unsubscribe/2` and `update_symbols/2` check the symbols (a proper
+list of non-blank equity or option strings), then `subscribe/2` and `subscribe_notices/1`
+check `:to`, and only then answer `{:error, :feed_not_started}`; so a malformed argument
+answers the same whether or not the feed runs. `unsubscribe(nil)` and
+`unsubscribe(["AAPL", :x, 42])` are `{:error, {:invalid_symbols, value}}` (they used to be
+`:ok`). `subscribe([])` registers the subscriber and opens nothing: no `GET /userPreference`,
+no socket, until a call names a symbol. A feed given as a pid on another node answers as a
+feed that is not started, and no longer raises.
 
 **A `401` or `403` on the fallback poll is an outage, not a refusal.** It used to be
 reported as `{:refused, symbol, _}` for every wanted symbol, which a consumer reads as "the

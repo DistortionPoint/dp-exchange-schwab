@@ -146,6 +146,31 @@ defmodule DpExchange.Schwab.SymbolFormat do
 
   def validate(other), do: {:error, {:not_an_equity_symbol, other}}
 
+  @doc """
+  Whether `symbol` is a string with something in it, decided locally and before credentials.
+
+  `{:error, {:invalid_symbol, value}}` for `nil`, a non-binary or a blank string (the
+  family convention for a single-symbol read). It judges nothing else: whether a well-formed
+  string is an equity is `validate/1`'s question, and stays `{:not_an_equity_symbol, v}`.
+  """
+  @spec check_present(term()) :: :ok | {:error, {:invalid_symbol, term()}}
+  def check_present(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, {:invalid_symbol, symbol}}, else: :ok
+  end
+
+  def check_present(other), do: {:error, {:invalid_symbol, other}}
+
+  @doc """
+  `check_present/1` then `validate/1` — what every single-symbol read asks.
+
+  A nil, non-binary or blank symbol is `{:error, {:invalid_symbol, value}}`; a well-formed
+  string that is not an equity keeps `{:error, {:not_an_equity_symbol, value}}`.
+  """
+  @spec validate_read(term()) :: {:ok, native()} | {:error, term()}
+  def validate_read(symbol) do
+    with :ok <- check_present(symbol), do: validate(symbol)
+  end
+
   @doc "Whether `symbol` is a Schwab option symbol by its fixed 21-character shape."
   @spec option?(String.t()) :: boolean()
   def option?(symbol) when is_binary(symbol) do

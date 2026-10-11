@@ -950,6 +950,23 @@ defmodule DpExchange.Schwab.SocketTest do
 
       # Verified TLS by default; websockex's own default is `verify: :verify_none`.
       assert opts[:ssl_options][:verify] == :verify_peer
+      assert is_list(opts[:ssl_options][:cacerts])
+      assert opts[:ssl_options][:customize_hostname_check] != nil
+    end
+
+    test "an explicit nil, empty or verification-dropping ssl_options keeps verification on" do
+      for absent <- [nil, [], [verify: :verify_none], [cacerts: []], :none, "x"] do
+        opts = Socket.connection_opts(ssl_options: absent)
+
+        assert opts[:ssl_options][:verify] == :verify_peer, "ssl_options: #{inspect(absent)}"
+        assert is_list(opts[:ssl_options][:cacerts])
+      end
+    end
+
+    test "a caller's own ssl_options that still verify the peer are honoured" do
+      own = [verify: :verify_peer, cacertfile: "/nowhere/ca.pem"]
+
+      assert Socket.connection_opts(ssl_options: own)[:ssl_options] == own
     end
   end
 

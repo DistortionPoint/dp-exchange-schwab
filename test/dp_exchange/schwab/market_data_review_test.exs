@@ -177,21 +177,50 @@ defmodule DpExchange.Schwab.MarketDataReviewTest do
 
   describe "price history ranges" do
     test "a start that is not a DateTime is refused, not dropped for the latest window" do
-      assert {:error, {:invalid_range_bound, :start, 1_780_000_000_000}} =
-               Rest.get_historical_prices("AAPL", "1d", [start: 1_780_000_000_000], @creds,
+      bad_start = [start: 1_780_000_000_000]
+
+      assert {:error, {:invalid_range, ^bad_start}} =
+               Rest.get_historical_prices("AAPL", "1d", bad_start, @creds,
                  plug: exploding("integer start"),
                  retry_attempts: 0
                )
 
-      assert {:error, {:invalid_range_bound, :end, ~D[2026-06-05]}} =
-               Rest.get_historical_prices(
-                 "AAPL",
-                 "1d",
-                 [start: ~U[2026-06-01 00:00:00Z], end: ~D[2026-06-05]],
-                 @creds,
+      bad_end = [start: ~U[2026-06-01 00:00:00Z], end: ~D[2026-06-05]]
+
+      assert {:error, {:invalid_range, ^bad_end}} =
+               Rest.get_historical_prices("AAPL", "1d", bad_end, @creds,
                  plug: exploding("Date end"),
                  retry_attempts: 0
                )
+    end
+
+    test "a range that is not a keyword list is refused before any request, never raised" do
+      for bad <- [nil, 5, "range", %{start: 1}, [1, 2], [start: nil] ++ :improper] do
+        assert {:error, {:invalid_range, ^bad}} =
+                 Rest.get_historical_prices("AAPL", "1d", bad, @creds,
+                   plug: exploding("non-keyword range"),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a blank or nil symbol is {:invalid_symbol, v}, before any request" do
+      for bad <- [nil, 5, "", "  "] do
+        assert {:error, {:invalid_symbol, ^bad}} =
+                 Rest.get_historical_prices(bad, "1d", [], @creds,
+                   plug: exploding("bad symbol"),
+                   retry_attempts: 0
+                 )
+
+        assert {:error, {:invalid_symbol, ^bad}} =
+                 Rest.get_price(bad, @creds, plug: exploding("bad symbol"), retry_attempts: 0)
+
+        assert {:error, {:invalid_symbol, ^bad}} =
+                 Rest.get_top_of_book(bad, @creds,
+                   plug: exploding("bad symbol"),
+                   retry_attempts: 0
+                 )
+      end
     end
 
     test "a minute lookback a fraction past ten days is eleven days, and refused" do

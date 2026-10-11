@@ -359,7 +359,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
       assert Enum.sort(Fake.wanted()) == ["AAPL", "TSLA"]
       assert Map.keys(Fake.coverage()) == ["AAPL"]
-      assert %{route: :internal_poll, symbols: 2, covered: 1, delivering: true} = Fake.status()
+      assert %{route: :stream, symbols: 2, covered: 1, delivering: true} = Fake.status()
 
       :ok = Fake.unsubscribe(["AAPL"])
       assert Fake.wanted() == ["TSLA"]

@@ -164,7 +164,7 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_price(String.t(), map(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, credentials, opts) do
-    with {:ok, native} <- SymbolFormat.validate(symbol),
+    with {:ok, native} <- SymbolFormat.validate_read(symbol),
          path = "/quotes?symbols=" <> URI.encode(native) <> "&indicative=false",
          {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
          {:ok, row} <- quote_row(body, native) do
@@ -193,7 +193,7 @@ defmodule DpExchange.Schwab.Rest do
     {valid, invalid} =
       symbols
       |> Enum.uniq()
-      |> Enum.map(&{&1, SymbolFormat.validate(&1)})
+      |> Enum.map(&{&1, SymbolFormat.validate_read(&1)})
       |> Enum.split_with(&match?({_symbol, {:ok, _native}}, &1))
 
     quoted =
@@ -247,7 +247,7 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, credentials, opts) do
-    with {:ok, native} <- SymbolFormat.validate(symbol),
+    with {:ok, native} <- SymbolFormat.validate_read(symbol),
          path = "/quotes?symbols=" <> URI.encode(native) <> "&indicative=false",
          {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
          {:ok, row} <- quote_row(body, native) do
@@ -456,15 +456,17 @@ defmodule DpExchange.Schwab.Rest do
     width exists but cannot reach that far back. Minute candles cap at ten days. This is
     the refusal that matters: answering with ten days, or with daily candles, would be a
     plausible wrong answer.
-  - `{:error, {:invalid_range_bound, :start | :end, value}}` — a `:start` or `:end` that is
-    not a `DateTime`. It used to be ignored, and the most recent window answered instead.
+  - `{:error, {:invalid_range, range}}` — a `range` that is not a keyword list, or a `:start`
+    or `:end` that is not a `DateTime`. A non-list used to raise, and a bad bound answered
+    `{:invalid_range_bound, key, value}` (and before that was ignored, answering the most
+    recent window).
 
   The lookback is measured in whole days rounded up, so ten days and an hour is eleven.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
-    with {:ok, native} <- SymbolFormat.validate(symbol),
+    with {:ok, native} <- SymbolFormat.validate_read(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
          :ok <- check_range(range),
          {:ok, period} <- fetch_period(timeframe, period_type, range, DateTime.utc_now()) do
@@ -538,11 +540,15 @@ defmodule DpExchange.Schwab.Rest do
   # the caller's range had been dropped. A `Date` is not converted either: which instant of
   # that day is meant (and in which zone) is not this package's to choose.
   defp check_range(range) do
+    if Keyword.keyword?(range), do: check_range_bounds(range), else: invalid_range(range)
+  end
+
+  defp check_range_bounds(range) do
     start = Keyword.get(range, :start)
     finish = Keyword.get(range, :end)
 
-    with :ok <- check_bound(:start, start),
-         :ok <- check_bound(:end, finish) do
+    with :ok <- check_bound(start, range),
+         :ok <- check_bound(finish, range) do
       case {start, finish} do
         {nil, nil} ->
           :ok
@@ -561,9 +567,11 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp check_bound(_key, nil), do: :ok
-  defp check_bound(_key, %DateTime{}), do: :ok
-  defp check_bound(key, value), do: {:error, {:invalid_range_bound, key, value}}
+  defp check_bound(nil, _range), do: :ok
+  defp check_bound(%DateTime{}, _range), do: :ok
+  defp check_bound(_value, range), do: invalid_range(range)
+
+  defp invalid_range(range), do: {:error, {:invalid_range, range}}
 
   defp put_range_or_period(params, period, range) do
     case Keyword.get(range, :start) do

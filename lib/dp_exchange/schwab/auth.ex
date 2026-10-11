@@ -129,26 +129,48 @@ defmodule DpExchange.Schwab.Auth do
 
   A blank token counts as missing: `Bearer ` is not a credential, and sending it turns a
   local, nameable refusal into a remote one.
+
+  **A token with surrounding whitespace is refused, not trimmed and sent**:
+  `{:error, {:invalid_credentials, :schwab}}`. Trimming made a mangled credential work
+  silently on one call and fail on every other path that read the same value untrimmed
+  (the Streamer `LOGIN`, the refresh). The value is never echoed in the error.
   """
   @spec headers(credentials() | nil, keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def headers(credentials, opts \\ [])
 
   def headers(%{access_token: token}, opts) when is_binary(token) do
-    case String.trim(token) do
-      "" ->
-        {:error, {:missing_credentials, :schwab}}
-
-      trimmed ->
-        {:ok,
-         [
-           {"Authorization", "Bearer " <> trimmed},
-           {"Accept", "application/json"}
-         ] ++ Config.opt(opts, :extra_headers, [])}
+    with {:ok, token} <- check_token(token) do
+      {:ok,
+       [
+         {"Authorization", "Bearer " <> token},
+         {"Accept", "application/json"}
+       ] ++ Config.opt(opts, :extra_headers, [])}
     end
   end
 
   def headers(_no_token, _opts), do: {:error, {:missing_credentials, :schwab}}
+
+  @doc """
+  Judges one credential string: `{:ok, value}`, `{:error, {:missing_credentials, :schwab}}`
+  when it is blank, or `{:error, {:invalid_credentials, :schwab}}` when it has surrounding
+  whitespace. Never echoes the value.
+
+  Shared by `headers/2`, `refresh/2` and the `Feed`, so every path that reads a credential
+  asks the same question.
+  """
+  @spec check_token(String.t()) ::
+          {:ok, String.t()}
+          | {:error, {:missing_credentials, :schwab} | {:invalid_credentials, :schwab}}
+  def check_token(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" -> {:error, {:missing_credentials, :schwab}}
+      trimmed != value -> {:error, {:invalid_credentials, :schwab}}
+      true -> {:ok, value}
+    end
+  end
 
   @doc """
   Whether `credentials` should be refreshed before the next call.
@@ -231,16 +253,25 @@ defmodule DpExchange.Schwab.Auth do
     # meaning wrong. A credential that is blank is a credential that is missing, and
     # `{:missing_credentials, :schwab}` is the branch whose contract says nothing was sent
     # and nothing is spent.
-    if Enum.any?([refresh_token, client_id, client_secret], &blank?/1) do
-      {:error, {:missing_credentials, :schwab}}
-    else
-      do_refresh(credentials, refresh_token, client_id, client_secret, opts)
+    #
+    # A value with surrounding whitespace is refused as `{:invalid_credentials, :schwab}`
+    # (never echoed): the refresh token it would spend is irreplaceable, and sending a
+    # mangled copy of it is not a safe guess. Blank (missing) is judged first, across all three.
+    checks = Enum.map([refresh_token, client_id, client_secret], &check_token/1)
+
+    cond do
+      {:error, {:missing_credentials, :schwab}} in checks ->
+        {:error, {:missing_credentials, :schwab}}
+
+      {:error, {:invalid_credentials, :schwab}} in checks ->
+        {:error, {:invalid_credentials, :schwab}}
+
+      true ->
+        do_refresh(credentials, refresh_token, client_id, client_secret, opts)
     end
   end
 
   def refresh(_incomplete, _opts), do: {:error, {:missing_credentials, :schwab}}
-
-  defp blank?(value), do: String.trim(value) == ""
 
   defp do_refresh(credentials, refresh_token, client_id, client_secret, opts) do
     # Basic auth over the client pair, per the venue's documented example. This is the

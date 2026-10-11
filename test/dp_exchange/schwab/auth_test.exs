@@ -58,6 +58,33 @@ defmodule DpExchange.Schwab.AuthTest do
       assert Auth.headers(%{access_token: ""}) == {:error, {:missing_credentials, :schwab}}
     end
 
+    test "a token with surrounding whitespace is refused, never trimmed and sent" do
+      for padded <- [" at-1", "at-1 ", "\tat-1\n", " at-1 "] do
+        result = Auth.headers(%{access_token: padded})
+        assert result == {:error, {:invalid_credentials, :schwab}}
+        refute inspect(result) =~ "at-1"
+      end
+    end
+
+    test "a refresh credential with surrounding whitespace is refused before any request" do
+      exploding = fn _conn -> raise "a padded credential must not reach the venue" end
+      creds = %{refresh_token: "r-1", client_id: "id", client_secret: "secret"}
+
+      for padded <- [
+            %{creds | refresh_token: "r-1 "},
+            %{creds | client_id: " id"},
+            %{creds | client_secret: "secret\n"}
+          ] do
+        result = Auth.refresh(padded, plug: exploding)
+        assert result == {:error, {:invalid_credentials, :schwab}}
+        refute inspect(result) =~ "secret"
+      end
+
+      # Blank still reads as missing, and wins over a padded sibling.
+      assert Auth.refresh(%{creds | client_id: "  ", client_secret: "secret "}, plug: exploding) ==
+               {:error, {:missing_credentials, :schwab}}
+    end
+
     test "no credentials at all refuses before any request" do
       assert Auth.headers(nil) == {:error, {:missing_credentials, :schwab}}
       assert Auth.headers(%{}) == {:error, {:missing_credentials, :schwab}}

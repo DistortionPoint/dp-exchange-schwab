@@ -720,11 +720,11 @@ defmodule DpExchange.Schwab.Feed do
   # answered `:ok` on the stream route while the poll route refused the same symbol, and the
   # venue's rejection arrived only as a generic `:degraded` notice.
   def handle_call({:subscribe, symbols, subscriber}, from, state) do
-    symbols = canonical_symbols(symbols)
-
     # Symbols are judged first, then the subscriber, and nothing is recorded on either refusal.
-    with [] <- invalid_symbols(symbols),
+    with :ok <- check_symbols(symbols),
          {:ok, subscriber} <- valid_subscriber(subscriber) do
+      symbols = canonical_symbols(symbols)
+
       state = %{
         state
         | subscribers: MapSet.put(state.subscribers, subscriber),
@@ -735,35 +735,42 @@ defmodule DpExchange.Schwab.Feed do
       settle_route(state, from)
     else
       {:error, _reason} = error -> {:reply, error, state}
-      invalid when is_list(invalid) -> {:reply, {:error, {:invalid_symbols, invalid}}, state}
     end
   end
 
+  # **Every element is judged, as `subscribe` and `update_symbols` judge it.** A list holding
+  # `:x` or `42` used to answer `:ok` here (the per-symbol check was missing), so a malformed
+  # argument was accepted whenever the set it named happened to be absent anyway.
   def handle_call({:unsubscribe, symbols}, _from, state) do
-    symbols = canonical_symbols(symbols)
+    case check_symbols(symbols) do
+      :ok ->
+        symbols = canonical_symbols(symbols)
 
-    state = %{
-      state
-      | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
-        delivering: Map.drop(state.delivering, symbols),
-        kinds: Map.drop(state.kinds, symbols)
-    }
+        state = %{
+          state
+          | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
+            delivering: Map.drop(state.delivering, symbols),
+            kinds: Map.drop(state.kinds, symbols)
+        }
 
-    # No route yet: the set is recorded and `settle_route/2` applies it when one is dialled,
-    # so there is nothing to send and nothing that failed. `{:error, :no_route}` here told a
-    # consumer that unsubscribed before ever subscribing that its call had been refused.
-    reply = if state.route == nil, do: :ok, else: apply_symbols(state)
-    {:reply, reply, state}
+        # No route yet: the set is recorded and `settle_route/2` applies it when one is
+        # dialled, so there is nothing to send and nothing that failed. `{:error, :no_route}`
+        # here told a consumer that unsubscribed before ever subscribing that its call had
+        # been refused.
+        reply = if state.route == nil, do: :ok, else: apply_symbols(state)
+        {:reply, reply, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call(:wanted, _from, state), do: {:reply, MapSet.to_list(state.wanted), state}
 
   def handle_call({:update_symbols, symbols}, from, state) do
-    symbols = canonical_symbols(symbols)
-
-    case invalid_symbols(symbols) do
-      [] -> update_wanted(state, symbols, from)
-      invalid -> {:reply, {:error, {:invalid_symbols, invalid}}, state}
+    case check_symbols(symbols) do
+      :ok -> update_wanted(state, canonical_symbols(symbols), from)
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
@@ -1198,6 +1205,17 @@ defmodule DpExchange.Schwab.Feed do
     {:reply, apply_symbols(state), state}
   end
 
+  # **Nothing wanted, nothing opened.** `subscribe([])` (or an `update_symbols([])` on a feed
+  # with no route) used to run the bootstrap - `GET /userPreference` and a Streamer dial - for
+  # an empty set. A consumer that has asked for no symbol must not find a socket open, so the
+  # subscriber is registered and nothing else happens; the next call that names a symbol
+  # settles the route. A bootstrap already in flight is still joined.
+  defp settle_route(%{route_bootstrap: nil, wanted: wanted} = state, from) do
+    if MapSet.size(wanted) == 0,
+      do: {:reply, :ok, state},
+      else: {:noreply, start_route_bootstrap(state, [from])}
+  end
+
   defp settle_route(state, from), do: {:noreply, start_route_bootstrap(state, [from])}
 
   # A bootstrap is already in flight: join its reply list. Starting a second one would open
@@ -1449,7 +1467,7 @@ defmodule DpExchange.Schwab.Feed do
   # No third shape exists — dialyzer proves the two clauses above are total over what
   # `build_socket/2` can return, and a catch-all here would be a branch no input reaches.
 
-  defp access_token(%{access_token: token}) when is_binary(token), do: {:ok, token}
+  defp access_token(%{access_token: token}) when is_binary(token), do: Auth.check_token(token)
   defp access_token(_credentials), do: {:error, {:missing_credentials, :schwab}}
 
   defp start_poller(state) do
@@ -1624,7 +1642,12 @@ defmodule DpExchange.Schwab.Feed do
   # rather than sending something it would reject anyway.
   defp push_access_token(%{route: :stream, socket: socket}, token)
        when is_pid(socket) and is_binary(token) do
-    Socket.update_access_token(socket, token)
+    # A blank or whitespace-padded token is not pushed: `Auth.headers/2` refuses it, and a
+    # `LOGIN` carrying it would be a refused credential nobody could name.
+    case Auth.check_token(token) do
+      {:ok, token} -> Socket.update_access_token(socket, token)
+      {:error, _reason} -> :ok
+    end
   end
 
   defp push_access_token(_state, _token), do: :ok
@@ -1689,6 +1712,31 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   defp canonical_symbols(other), do: other
+
+  @doc """
+  The one judgement of a symbol list every streaming call makes, in the facade, here and in
+  `DpExchange.Schwab.Fake`.
+
+  `:ok`, or `{:error, {:invalid_symbols, value}}`: `value` is the argument itself when it is
+  not a proper list, and otherwise the elements refused. An element is refused when it is
+  not a string, is blank after trim, or is not an equity or option symbol (see
+  `SymbolFormat.validate/1`). Spelling is not judged: `" aapl"` is valid.
+  """
+  @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
+  def check_symbols(symbols) do
+    if proper_list?(symbols) do
+      case invalid_symbols(canonical_symbols(symbols)) do
+        [] -> :ok
+        invalid -> {:error, {:invalid_symbols, invalid}}
+      end
+    else
+      {:error, {:invalid_symbols, symbols}}
+    end
+  end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_other), do: false
 
   defp invalid_symbols(symbols) do
     for symbol <- symbols, not match?({:ok, _native}, SymbolFormat.validate(symbol)), do: symbol
