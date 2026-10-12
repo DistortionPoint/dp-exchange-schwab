@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.121] - 2026-10-12
+
 ### Fixed -- tick U (test-suite quality, regression review of tick T)
 
 - `StreamerDecode.to_top_of_book/3` judges the price before the size, as REST does: a price of
