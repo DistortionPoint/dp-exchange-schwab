@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.115] - 2026-10-12
+
 ### Changed
 
 Family trading conventions (T1-T12). Every answer below is the same on the facade, `Rest` and
