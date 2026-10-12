@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.116] - 2026-10-12
+
 ### Changed
 
 - **BREAKING: `get_balances` reports the same quantity for both account types: the cash in the
