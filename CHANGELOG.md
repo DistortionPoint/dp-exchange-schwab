@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.125] - 2026-10-12
+
 - **Docs (`usage-rules.md` checked line by line against the code):** the Core requirement is
   `~> 0.3.74`; documents the jittered and short-session reconnect backoff, the route-crash backoff
   and the closing of a route settled with nothing wanted, the full order-validation check order, the
