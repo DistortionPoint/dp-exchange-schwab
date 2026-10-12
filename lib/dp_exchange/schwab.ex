@@ -95,15 +95,35 @@ defmodule DpExchange.Schwab do
 
   # --- identity -----------------------------------------------------------
 
+  @doc """
+  The display name of this venue: `"Schwab"`.
+
+  See `c:DpExchange.Core.Venue.provider_name/0`.
+  """
   @impl true
   def provider_name, do: "Schwab"
 
+  @doc """
+  The atom that identifies this venue at runtime: `:schwab`.
+
+  See `c:DpExchange.Core.Venue.runtime_id/0`.
+  """
   @impl true
   def runtime_id, do: :schwab
 
+  @doc """
+  The asset classes this venue trades: `[:equity]`.
+
+  See `c:DpExchange.Core.Venue.asset_classes/0`.
+  """
   @impl true
   def asset_classes, do: [:equity]
 
+  @doc """
+  The per-endpoint capability declaration, built by `DpExchange.Schwab.Capabilities.declaration/0`.
+
+  See `c:DpExchange.Core.Venue.capabilities/0` for the contract.
+  """
   @impl true
   def capabilities, do: Capabilities.declaration()
 
@@ -117,6 +137,12 @@ defmodule DpExchange.Schwab do
 
   # --- lifecycle ----------------------------------------------------------
 
+  @doc """
+  A supervisor child spec for this venue's tree (limiter, order-ceiling record and feed).
+
+  Credentials in `opts` are wrapped here, before the supervisor captures the start arguments,
+  so a crash report cannot print them. See `c:DpExchange.Core.Venue.child_spec/1`.
+  """
   @impl true
   def child_spec(opts) do
     # Credentials are wrapped HERE, and not in `start_link/1` or `init/1` — that
@@ -135,11 +161,23 @@ defmodule DpExchange.Schwab do
     }
   end
 
+  @doc """
+  Starts this venue's supervision tree through `DpExchange.Schwab.Supervisor.start_link/1`.
+
+  Reads `:name`, `:order_limit_per_minute`, `:read_limit_per_minute` and the feed options. See
+  `c:DpExchange.Core.Venue.start_link/1`.
+  """
   @impl true
   def start_link(opts), do: Supervisor.start_link(opts)
 
   # --- market data --------------------------------------------------------
 
+  @doc """
+  The last price for `symbol`, read from the `/quotes` endpoint.
+
+  Requires `opts[:credentials]`; a blank or non-binary symbol is refused before that check. See
+  `c:DpExchange.Core.Venue.get_price/2`.
+  """
   @impl true
   def get_price(symbol, opts \\ []) do
     # A nil, non-binary or blank symbol is `{:invalid_symbol, v}`, decided before credentials.
@@ -149,6 +187,12 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Best bid and ask for `symbol`, read from the `/quotes` endpoint (REST publishes no deeper book).
+
+  Requires `opts[:credentials]`. An instrument whose quote carries no book, such as a mutual fund,
+  answers `{:error, :no_top_of_book}`. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with :ok <- SymbolFormat.check_present(symbol),
@@ -157,6 +201,12 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Candles for `symbol` from the `/pricehistory` endpoint.
+
+  Requires `opts[:credentials]`; `timeframe` must be one of the widths this venue serves. See
+  `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range, opts \\ []) do
     with :ok <- SymbolFormat.check_present(symbol),
@@ -181,33 +231,75 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.cancel_all_orders/2`.
+  """
   @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. The REST API publishes no depth;
+  see the moduledoc and `c:DpExchange.Core.Venue.get_order_book/2`.
+  """
   @impl true
   def get_order_book(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_trades/2`.
+  """
   @impl true
   def get_trades(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_auction_imbalance/2`.
+  """
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_volume_profile/3`.
+  """
   @impl true
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. The catalogue cannot be
+  enumerated; use `get_symbols/1` with a `:query`. See `c:DpExchange.Core.Venue.list_instruments/1`.
+  """
   @impl true
   def list_instruments(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Whether the market is open, read from the `/markets` endpoint.
+
+  Requires `opts[:credentials]`; `opts[:market]` defaults to `"equity"`. See
+  `c:DpExchange.Core.Venue.market_status/1`.
+  """
   @impl true
   def market_status(opts \\ []) do
     with {:ok, credentials} <- credentials(opts) do
@@ -215,11 +307,21 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.quantization/1`.
+  """
   @impl true
   def quantization(_symbol), do: Venue.not_supported()
 
   # --- accounts and trading -----------------------------------------------
 
+  @doc """
+  The account numbers and their encrypted hashes, from `/accounts/accountNumbers`.
+
+  The hash is what every other account endpoint here takes as `opts[:account_hash]`. See
+  `c:DpExchange.Core.Venue.get_accounts/2`.
+  """
   @impl true
   def get_accounts(credentials, opts \\ []),
     do: Rest.get_accounts(credentials, with_limiter(opts))
@@ -394,6 +496,12 @@ defmodule DpExchange.Schwab do
   # `Orders.from_venue/1` is what makes these two return what `Core.Venue` types them as —
   # `Types.Order.t()` — rather than the venue's raw JSON map, which they did until the
   # response-shape sweep read what the real facade actually handed back. See its @doc.
+  @doc """
+  One order, read from the account's `/orders/{id}` endpoint and returned as a `Types.Order`.
+
+  Requires `opts[:account_hash]`; an order the venue does not know is `{:refused, :not_found}`.
+  See `c:DpExchange.Core.Venue.get_order/3`.
+  """
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
     with :ok <- Orders.check_order_id(order_id),
@@ -403,6 +511,13 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Orders on one account, returned as `Types.Order` values.
+
+  Requires `opts[:account_hash]`, plus `opts[:from]` and `opts[:to]`, which the venue requires;
+  `opts[:status]` and `opts[:max_results]` are optional filters. See
+  `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []) do
     with {:ok, hash} <- account_hash(opts),
@@ -421,6 +536,11 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_trade_history(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Checks the credential by reading the account list; answers `{:ok, %{accounts: count}}`.
+
+  See `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(credentials, opts \\ []) do
     with {:ok, accounts} <- Rest.get_accounts(credentials, with_limiter(opts)) do
@@ -543,6 +663,11 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Removes `symbols` from the feed's set; `:ok` when no feed is started.
+
+  Symbols are upper-cased on the way in. See `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     feed = feed(opts)
@@ -552,6 +677,12 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  Replaces the feed's whole symbol set with `symbols`.
+
+  Symbols are upper-cased on the way in; `{:error, :feed_not_started}` when no feed runs. See
+  `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, opts \\ []) do
     feed = feed(opts)
@@ -564,6 +695,11 @@ defmodule DpExchange.Schwab do
     end
   end
 
+  @doc """
+  The route each symbol is actually arriving on, per symbol; `%{}` when no feed is started.
+
+  See `c:DpExchange.Core.Venue.coverage/1`.
+  """
   @impl true
   def coverage(opts \\ []) do
     feed = feed(opts)
@@ -999,129 +1135,297 @@ defmodule DpExchange.Schwab do
   # transfer, no allowlist and no network list — nothing in the twelve below appears in it.
   # `get_transactions/2` above *reports* money that moved and is the one that is served.
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_payment_methods/2`.
+  """
   @impl true
   def list_payment_methods(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_payment_method/3`.
+  """
   @impl true
   def get_payment_method(_credentials, _id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.add_payment_method/2`.
+  """
   @impl true
   def add_payment_method(_details, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.transfer_internal/4`.
+  """
   @impl true
   def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.request_approved_address/4`.
+  """
   @impl true
   def request_approved_address(_asset, _network, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.remove_approved_address/3`.
+  """
   @impl true
   def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_networks/2`.
+  """
   @impl true
   def list_networks(_asset, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_fee_promos/1`.
+  """
   @impl true
   def list_fee_promos(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_fx_rate/3`.
+  """
   @impl true
   def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_notional_balances/3`.
+  """
   @impl true
   def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_custody_fees/2`.
+  """
   @impl true
   def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_funding/2`.
+  """
   @impl true
   def get_funding(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_contract_stats/2`.
+  """
   @impl true
   def get_contract_stats(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_staking_rates/1`.
+  """
   @impl true
   def get_staking_rates(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_staking_balances/1`.
+  """
   @impl true
   def get_staking_balances(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_staking_rewards/1`.
+  """
   @impl true
   def get_staking_rewards(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_staking_history/1`.
+  """
   @impl true
   def get_staking_history(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.stake/3`.
+  """
   @impl true
   def stake(_asset, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.unstake/3`.
+  """
   @impl true
   def unstake(_asset, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.quote_conversion/4`.
+  """
   @impl true
   def quote_conversion(_from, _to, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.commit_conversion/2`.
+  """
   @impl true
   def commit_conversion(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.convert/4`.
+  """
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_trade_volume/2`.
+  """
   @impl true
   def get_trade_volume(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_deposit_address/3`.
+  """
   @impl true
   def get_deposit_address(_asset, _network, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_approved_addresses/1`.
+  """
   @impl true
   def list_approved_addresses(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
+  """
   @impl true
   def estimate_withdrawal_fee(_asset, _network, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.withdraw/5`.
+  """
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_watchlists/1`.
+  """
   @impl true
   def list_watchlists(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_watchlist/2`.
+  """
   @impl true
   def get_watchlist(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.create_watchlist/3`.
+  """
   @impl true
   def create_watchlist(_name, _symbols, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.update_watchlist/2`.
+  """
   @impl true
   def update_watchlist(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.delete_watchlist/2`.
+  """
   @impl true
   def delete_watchlist(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_financials/3`.
+  """
   @impl true
   def get_financials(_symbol, _kind, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_corporate_events/1`.
+  """
   @impl true
   def get_corporate_events(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_filings/2`.
+  """
   @impl true
   def get_filings(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_news/1`.
+  """
   @impl true
   def get_news(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.create_account/1`.
+  """
   @impl true
   def create_account(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.rename_account/3`.
+  """
   @impl true
   def rename_account(_id, _name, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_roles/1`.
+  """
   @impl true
   def get_roles(_opts), do: Venue.not_supported()
 end

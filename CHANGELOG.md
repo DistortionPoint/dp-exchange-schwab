@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- Docs: every public facade function is documented in HexDocs (156 added); docs build is warning-free.
+
 ## [0.2.122] - 2026-10-12
 
 - **Test suite (tick V, every test file read line by line):** the Streamer snapshot-time
@@ -325,7 +327,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   its state for the life of the connection, so any crash report carried
   `schwabClientCustomerId` and `schwabClientCorrelId`. Its `Inspect` now omits both; the LOGIN
   still reads the real values.
-- **`Feed.start_link/1` and `Supervisor.start_link/1` stored a raw `:credentials` map** when
+- **`Feed.start_link/1` and `DpExchange.Schwab.Supervisor.start_link/1` stored a raw `:credentials` map** when
   reached without `child_spec/1`; both now wrap it (`Credentials.wrap_opt/1`), so the
   supervisor's init arguments and the feed's start arguments print redacted.
 - **`Auth.refresh/2` held up to 16 MiB of whatever answered the token URL.** A token response
@@ -503,7 +505,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   list body is now `{:error, :unexpected_response_shape}`.
 - **A forwarded `extended_hours: nil` reached `/pricehistory` as a blank value.**
   `get_historical_prices/5` read the option with `Keyword.get/3`, which returns a present
-  `nil`; `needExtendedHoursData=` went out empty. It is read with `Config.opt/3` like the
+  `nil`; `needExtendedHoursData=` went out empty. It is read with `DpExchange.Core.Config.opt/3` like the
   rest of the family, so `nil` is absent and the parameter is `false`.
 - **Option chain decode was quadratic.** `chain_side/3` and `chain_strikes/4` appended each
   expiry's and strike's contracts with `acc ++ rows`, copying the accumulator every time; an
@@ -720,7 +722,7 @@ Long"; the code follows the table and reads a non-integer there as no venue time
   feed with an `ArgumentError` naming the symbol.
 - **A forwarded `limiter: nil` failed every REST call.** The facade used `Keyword.put_new/3`,
   which keeps a present `nil`; `Core.HttpClient` resolved it to Core's global limiter, which
-  this package never starts. It is `Keyword.put/3` now, as `Supervisor.limiter_name/1`
+  this package never starts. It is `Keyword.put/3` now, as `DpExchange.Schwab.Supervisor.limiter_name/1`
   already was.
 - **`Fake.subscribe/2` raised under an injected `get_price` failure, and accepted what the
   real feed refuses.** It built its pushed quote through the public `get_price/2`, which
@@ -1580,7 +1582,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   which raises. A consumer's tier-1 tests could not have shown them the real behaviour even
   by accident: the fake crashed where the venue went quiet.
 
-  **`:limiter`** returned `nil` from `Supervisor.limiter_name/1`: the limiter started
+  **`:limiter`** returned `nil` from `DpExchange.Schwab.Supervisor.limiter_name/1`: the limiter started
   unnamed while REST resolved `limiter: nil` to `Core.DefaultRateLimiter`'s global default —
   a different, usually absent limiter.
 
