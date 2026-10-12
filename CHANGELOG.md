@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.118] - 2026-10-12
+
 ### Fixed -- market-data and order conventions (family tick R, MD1-MD3, MD5, MD6, MD8, DV1, DV6)
 
 - **BREAKING: `get_historical_prices/4` always sends `endDate` (MD2).** With no range, or
