@@ -31,6 +31,20 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed -- tick S regression review
+
+- **A streamer book frame refused for an unreadable value is no longer dropped in silence.**
+  An unreadable or negative bid/ask on a `LEVELONE_*` frame (and an unreadable level on a
+  `*_BOOK` frame) dropped the frame and left the last published book standing with no word:
+  a frozen book that looked live. `Socket` now raises one `:degraded` notice per symbol per
+  session (`details: %{symbol:, service:, reason:}`, bounded and cleared on reconnect). The
+  last good book still stands for the next delta, and `Feed.coverage/1` is unchanged: it
+  reports a kind a symbol has delivered this session and a streaming route has no staleness
+  window, so the notice is how a consumer learns a symbol's book has stopped updating.
+- Unmeasured, left as is: a weekly bar stamped on a non-Monday day maps to its own ISO week,
+  and a daily bar counts as complete only from 00:00 UTC of the next date (a few hours after
+  the US close), so the day's finished bar is withheld until then unless `include_partial`.
+
 ## [0.2.118] - 2026-10-12
 
 ### Fixed -- market-data and order conventions (family tick R, MD1-MD3, MD5, MD6, MD8, DV1, DV6)

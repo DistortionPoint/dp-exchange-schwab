@@ -239,7 +239,10 @@ defmodule DpExchange.Schwab.Socket do
       last_top: %{},
       # Symbols whose delayed rows this session has already reported. See the moduledoc's
       # "A delayed quote is not delivered as a live one". Cleared with the session.
-      delayed_reported: MapSet.new()
+      delayed_reported: MapSet.new(),
+      # Symbols whose unreadable book frames this session has already reported (a dropped
+      # frame is announced once). Cleared with the session.
+      unreadable_reported: MapSet.new()
     }
 
     VendoredWebSockex.start_link(
@@ -530,7 +533,8 @@ defmodule DpExchange.Schwab.Socket do
        login_deadline: nil,
        liveness: nil
      })
-     |> Map.put(:delayed_reported, MapSet.new())}
+     |> Map.put(:delayed_reported, MapSet.new())
+     |> Map.put(:unreadable_reported, MapSet.new())}
   end
 
   @impl true
@@ -931,9 +935,11 @@ defmodule DpExchange.Schwab.Socket do
 
         # An unreadable (or negative) bid/ask refuses this frame's book: publishing `nil`
         # would say "no resting order", and carrying the old level would answer a question
-        # the venue did ask. The last published book stays as it was.
+        # the venue did ask. The last published book stays as it was, and the consumer is
+        # TOLD (a bounded `:degraded` notice, once per symbol per session): a dropped frame
+        # with no word left a book that looked live and was frozen.
         {:error, _unreadable_side} ->
-          {quoted, state}
+          {quoted, report_unreadable(state, "LEVELONE", symbol, "top of book")}
       end
     else
       # A frame that moved no book field (a trade, a volume tick) says nothing about the
@@ -955,13 +961,38 @@ defmodule DpExchange.Schwab.Socket do
        when book in ~w(NYSE_BOOK NASDAQ_BOOK OPTIONS_BOOK) do
     case StreamerDecode.to_order_book(fields, symbol) do
       {:ok, order_book} -> {[order_book], state}
-      {:error, _reason} -> {[], state}
+      {:error, _reason} -> {[], report_unreadable(state, book, symbol, "order book")}
     end
   end
 
   # ACCT_ACTIVITY and the screeners have field maps but no value type in this contract yet.
   # Emitting the renamed map would hand a consumer a shape the facade never promised.
   defp decode(_service, _fields, _symbol, _observed_at, state), do: {[], state}
+
+  # A frame refused for an unreadable value is dropped, and said so once per symbol per
+  # session (a venue sending the same bad frame every tick must not bury the one fact it
+  # carries). The set is keyed by venue-supplied text, so it is capped like `delayed_reported`.
+  defp report_unreadable(state, service, symbol, what) do
+    reported = Map.get(state, :unreadable_reported, MapSet.new())
+    key = {what, symbol}
+
+    if MapSet.member?(reported, key) or MapSet.size(reported) >= @max_delayed_reported do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:degraded, :schwab,
+          details: %{
+            symbol: Bound.text(symbol),
+            service: Bound.text(service),
+            reason: "#{what} frame dropped: a price or size in it could not be read"
+          }
+        )
+      )
+
+      Map.put(state, :unreadable_reported, MapSet.put(reported, key))
+    end
+  end
 
   defp book_moved?(fields),
     do: Enum.any?([:bid, :ask, :bid_size, :ask_size], &is_map_key(fields, &1))

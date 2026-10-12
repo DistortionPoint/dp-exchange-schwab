@@ -868,6 +868,35 @@ defmodule DpExchange.Schwab.SocketTest do
       assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
+    test "a BOOK frame with an unreadable level is dropped and announced once" do
+      data = %{
+        "data" => [
+          %{
+            "service" => "NASDAQ_BOOK",
+            "content" => [
+              %{
+                "key" => "AAPL",
+                "0" => "AAPL",
+                "1" => 1_787_936_147_000,
+                "2" => [["garbage", 300, 1, []]],
+                "3" => [[10.60, 200, 1, []]]
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      refute_received {:dp_exchange, :schwab, %Types.OrderBook{}}
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.symbol == "AAPL"
+      assert details.reason =~ "order book frame dropped"
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state)
+      refute_received {:dp_exchange, :schwab, %Notice{}}
+    end
+
     test "a service with no field map emits nothing rather than a wrong field" do
       # Silence is correct here; a value decoded with another service's numbering is not.
       data = %{"data" => [%{"service" => "ADMIN", "content" => [%{"1" => "x"}]}]}
@@ -1165,6 +1194,15 @@ defmodule DpExchange.Schwab.SocketTest do
       {:ok, state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "garbage"}), state)
 
       refute_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      # The dropped frame is TOLD, not silent: a degraded notice naming the symbol.
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.symbol == "AAPL"
+      assert details.reason =~ "top of book frame dropped"
+
+      # Announced once per symbol per session, however many bad frames follow.
+      {:ok, state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "garbage"}), state)
+      refute_received {:dp_exchange, :schwab, %Notice{}}
 
       # The next readable frame still merges onto the last GOOD book.
       {:ok, _state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "2" => "101.00"}), state)
