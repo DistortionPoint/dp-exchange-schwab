@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.119] - 2026-10-12
+
 ### Fixed -- tick S regression review
 
 - **A streamer book frame refused for an unreadable value is no longer dropped in silence.**
