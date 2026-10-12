@@ -80,6 +80,13 @@ which no order is live. This package meters reads (preview included) at a courte
 minute by default, and order writes in one bucket shared by every account a supervisor
 serves — stricter than the venue's per-account count. See `usage-rules.md`.
 
+**Orders say everything and are never retried for you.** A request must state `:order_type`
+and `:time_in_force` (nothing is defaulted) and may carry no key the builder does not read
+(`client_order_id` included: Schwab has no idempotency key). A preview the venue rejects is
+`{:refused, {:preview_rejected, rejects}}`. A write that may have reached the venue and is not
+proven (a timeout, a 5xx, a `2xx` with no `Location`) is
+`{:error, {:order_unconfirmed, nil, reason}}`: list the account's orders before trying again.
+
 ## Authentication
 
 The host authenticates. This package signs, and refreshes.

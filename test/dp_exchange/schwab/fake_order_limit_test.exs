@@ -13,7 +13,7 @@ defmodule DpExchange.Schwab.FakeOrderLimitTest do
   alias DpExchange.Schwab.Fake
 
   @creds %{access_token: "at-1"}
-  @request %{symbol: "AAPL", side: :buy, quantity: 1}
+  @request %{symbol: "AAPL", side: :buy, quantity: 1, order_type: :market, time_in_force: :day}
 
   defp start_tree(extra) do
     unique = System.unique_integer([:positive])

@@ -769,7 +769,7 @@ defmodule DpExchange.Schwab.RestTest do
       # A caller that cannot name the order it just placed cannot cancel it.
       plug = fn conn -> Plug.Conn.resp(conn, 201, "") end
 
-      assert {:error, :order_id_not_returned} =
+      assert {:error, {:order_unconfirmed, nil, :order_id_not_returned}} =
                Rest.place_order(@creds, "ABCDEF", %{}, plug: plug, retry_attempts: 0)
     end
 
@@ -798,8 +798,8 @@ defmodule DpExchange.Schwab.RestTest do
       assert :ok = Rest.cancel_order(@creds, "ABCDEF", "1005", plug: plug, retry_attempts: 0)
     end
 
-    test "cancelling an order that is gone is a refusal, not an error" do
-      assert {:refused, {:venue_error, 404}} =
+    test "cancelling an order that is gone is {:refused, :not_found}, not an error" do
+      assert {:refused, :not_found} =
                Rest.cancel_order(@creds, "ABCDEF", "1005",
                  plug: responding("", 404),
                  retry_attempts: 0
@@ -955,22 +955,23 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.replace_order(@creds, "ABCDEF", "1005", %{}, plug: plug, retry_attempts: 0)
     end
 
-    test "a replacement the venue refuses is a refusal, not an error" do
-      assert {:refused, {:venue_error, 404}} =
+    test "a replacement of an order that is gone is {:refused, :not_found}" do
+      assert {:refused, :not_found} =
                Rest.replace_order(@creds, "ABCDEF", "1005", %{},
                  plug: responding("", 404),
                  retry_attempts: 0
                )
     end
 
-    test "a 5xx on either is an error worth retrying" do
+    test "a 5xx on a preview is an error worth retrying; on a replace it is unconfirmed" do
       # `preview_order/4` meters against `:schwab` (unthrottled, like a read);
       # `replace_order/5` meters against `:schwab_orders` (an order write) — see
-      # `Rest.order_write_request_opts/1`.
+      # `Rest.order_write_request_opts/1`. A replace that drew a 5xx may have been applied,
+      # so it is `:order_unconfirmed`, never a bare error a caller would retry.
       assert {:error, {:exchange_error, :schwab, _m}} =
                Rest.preview_order(@creds, "H", %{}, plug: responding(%{}, 500), retry_attempts: 0)
 
-      assert {:error, {:exchange_error, :schwab_orders, _m}} =
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab_orders, _m}}} =
                Rest.replace_order(@creds, "H", "1", %{},
                  plug: responding(%{}, 500),
                  retry_attempts: 0

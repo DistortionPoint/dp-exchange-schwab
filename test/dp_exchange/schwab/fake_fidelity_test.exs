@@ -53,37 +53,62 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     end
   end
 
+  # Order type and time-in-force are required of every order: nothing is defaulted.
+  @buy %{symbol: "AAPL", side: :buy, quantity: 1, order_type: :market, time_in_force: :day}
+
   describe "the account hash comes before the credential, as in the facade" do
     test "every account endpoint names the missing hash when both are missing" do
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
 
       cases = [
         {:get_balances, [%{}, []]},
         {:get_order, [%{}, "1", []]},
         {:get_orders, [%{}, []]},
         {:get_transactions, [%{}, []]},
-        {:preview_order, [%{}, request, []]}
+        {:preview_order, [%{}, request, []]},
+        {:place_order, [%{}, request, []]},
+        {:replace_order, [%{}, "1", request, []]},
+        {:cancel_order, [%{}, "1", []]}
       ]
 
       for {function, args} <- cases do
         real = apply(Schwab, function, args)
-        assert real == {:error, {:missing_account_hash, :schwab}}
+        assert real == {:error, {:missing_option, :account_hash}}
         assert apply(Fake, function, args) == real
       end
     end
 
-    test "the order's own shape is refused before the credential is looked at" do
-      # `preview_order/3`, because it has no order-ceiling check ahead of the build.
-      args = [%{}, %{symbol: "AAPL", quantity: 1}, [account_hash: "H"]]
+    test "the order's own shape is refused before the account and the credential" do
+      no_side = Map.delete(@buy, :side)
 
-      assert {:error, {:missing_order_field, :side}} = apply(Schwab, :preview_order, args)
-      assert apply(Fake, :preview_order, args) == apply(Schwab, :preview_order, args)
+      for opts <- [[], [account_hash: "H"]] do
+        args = [%{}, no_side, opts]
 
-      assert {:error, {:missing_order_field, :side}} =
-               Fake.place_order(%{}, %{symbol: "AAPL", quantity: 1}, account_hash: "H")
+        assert {:error, {:missing_field, :side}} = apply(Schwab, :preview_order, args)
+        assert apply(Fake, :preview_order, args) == apply(Schwab, :preview_order, args)
+        assert apply(Fake, :place_order, args) == apply(Schwab, :place_order, args)
 
-      assert {:error, {:missing_order_field, :side}} =
-               Fake.replace_order(%{}, "1", %{symbol: "AAPL", quantity: 1}, account_hash: "H")
+        replace_args = [%{}, "1", no_side, opts]
+        assert {:error, {:missing_field, :side}} = apply(Fake, :replace_order, replace_args)
+
+        assert apply(Fake, :replace_order, replace_args) ==
+                 apply(Schwab, :replace_order, replace_args)
+      end
+    end
+
+    test "an unusable order id is refused before the request, the account and the credential" do
+      for bad <- [nil, "", "  ", 12, :id, " 12"] do
+        refused = {:error, {:invalid_order_id, bad}}
+
+        for opts <- [[], [account_hash: "H"]] do
+          assert Fake.get_order(%{}, bad, opts) == refused
+          assert Fake.cancel_order(%{}, bad, opts) == refused
+          assert Fake.replace_order(%{}, bad, %{}, opts) == refused
+          assert Schwab.get_order(%{}, bad, opts) == refused
+          assert Schwab.cancel_order(%{}, bad, opts) == refused
+          assert Schwab.replace_order(%{}, bad, %{}, opts) == refused
+        end
+      end
     end
 
     test "the window is refused before the credential, for orders and transactions" do
@@ -234,7 +259,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
     test "a blank or tokenless credential is refused on every account read and write" do
       missing = {:error, {:missing_credentials, :schwab}}
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
 
       for creds <- @unsignable do
         assert Fake.get_accounts(creds) == missing
@@ -339,7 +364,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
   describe "orders: maxResults narrows the page as the venue's does" do
     test "a positive integer takes that many, in id order" do
       opts = [account_hash: "H"]
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
       assert {:ok, first} = Fake.place_order(@creds, request, opts)
       assert {:ok, second} = Fake.place_order(@creds, request, opts)
 
@@ -417,7 +442,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     end
 
     test "place -> get -> replace -> cancel -> list run on numeric order ids" do
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
       opts = [account_hash: "H"]
 
       # `orderId` is an int64 on the wire; `Orders.from_venue/1` returns its decimal string.
@@ -443,7 +468,8 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
   describe "an order the fake placed is the order it reads back and cancels" do
     test "the symbol, instruction and working state come back, not a filled AAPL buy" do
-      request = %{symbol: "MSFT", side: :sell, quantity: 5}
+      # A text side is normalised: the fake answers `:sell`, not the caller's string.
+      request = Map.merge(@buy, %{symbol: "MSFT", side: "SELL", quantity: 5})
       opts = [account_hash: "H"]
 
       assert {:ok, placed} = Fake.place_order(@creds, request, opts)
@@ -469,26 +495,25 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     test "cancel marks the order cancelled, and a second cancel is refused" do
       opts = [account_hash: "H"]
 
-      assert {:ok, placed} =
-               Fake.place_order(@creds, %{symbol: "AAPL", side: :buy, quantity: 1}, opts)
+      assert {:ok, placed} = Fake.place_order(@creds, @buy, opts)
 
       assert {:ok, :cancelled} = Fake.cancel_order(@creds, placed.id, opts)
       assert {:ok, %{status: :cancelled}} = Fake.get_order(@creds, placed.id, opts)
       assert {:refused, {:venue_error, 400}} = Fake.cancel_order(@creds, placed.id, opts)
     end
 
-    test "an id the fake never issued is the venue's 404 on a read, a cancel and a replace" do
+    test "an id the fake never issued is {:refused, :not_found} on every call" do
       opts = [account_hash: "H"]
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
 
-      assert {:refused, {:venue_error, 404}} = Fake.get_order(@creds, "42", opts)
-      assert {:refused, {:venue_error, 404}} = Fake.cancel_order(@creds, "42", opts)
-      assert {:refused, {:venue_error, 404}} = Fake.replace_order(@creds, "42", request, opts)
+      assert {:refused, :not_found} = Fake.get_order(@creds, "42", opts)
+      assert {:refused, :not_found} = Fake.cancel_order(@creds, "42", opts)
+      assert {:refused, :not_found} = Fake.replace_order(@creds, "42", request, opts)
     end
 
     test "a replacement id reads back and cancels, as the round trip requires" do
       opts = [account_hash: "H"]
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy
 
       assert {:ok, placed} = Fake.place_order(@creds, request, opts)
       assert {:ok, replaced} = Fake.replace_order(@creds, placed.id, request, opts)
@@ -499,7 +524,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
   end
 
   describe "get_orders/2 honours the entered-time window" do
-    @request %{symbol: "AAPL", side: :buy, quantity: 1}
+    @request @buy
 
     test "the canned order is listed only when its entry date is inside the window" do
       opts = [account_hash: "H"]
@@ -561,22 +586,12 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       end
     end
 
-    test "the fake refuses an unusable order id before the credential, as Rest does" do
-      refused = {:error, {:invalid_path_segment, :schwab}}
+    test "an integer order id is refused, on the fake and the facade alike" do
       opts = [account_hash: "H"]
-      request = %{symbol: "AAPL", quantity: 1}
+      refused = {:error, {:invalid_order_id, 1_005_439_821}}
 
-      for bad <- ["", :nope, nil] do
-        assert Fake.get_order(@creds, bad, opts) == refused
-        assert Fake.cancel_order(@creds, bad, opts) == refused
-        assert Fake.replace_order(@creds, bad, request, opts) == refused
-        assert Rest.check_path_segment(bad) == refused
-      end
-    end
-
-    test "an integer order id reads the order the fake issued, as Rest sends its digits" do
-      opts = [account_hash: "H"]
-      assert {:ok, %{id: "1005439821"}} = Fake.get_order(@creds, 1_005_439_821, opts)
+      assert Fake.get_order(@creds, 1_005_439_821, opts) == refused
+      assert Schwab.get_order(@creds, 1_005_439_821, opts) == refused
     end
 
     test "the fake refuses what Rest refuses for a transactions window" do

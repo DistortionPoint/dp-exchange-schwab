@@ -253,20 +253,29 @@ defmodule DpExchange.Schwab do
   @doc """
   Place an order.
 
+  The order is validated first (`Orders.build/2`: every refusal there is decided before the
+  account option, the order ceiling and the credential), then `opts[:account_hash]`
+  (`{:error, {:missing_option, :account_hash}}`), then the order ceiling:
   `{:error, :order_limit_not_declared}` when this tree was supervised without
   `:order_limit_per_minute` — see `Supervisor`'s moduledoc and `OrderLimit`. That is
   distinct from a declared ceiling of `0`, which answers `{:error, :order_limit_zero}`
-  locally (a registration granting no throughput), and distinct from a consumer that never supervises this module at all, which gets
-  no opinion from this check. Checked before `Orders.build/2`, so an undeclared ceiling is
-  never masked by, or confused with, a separate refusal about the order's own shape.
+  locally (a registration granting no throughput), and distinct from a consumer that never
+  supervises this module at all, which gets no opinion from this check.
+
+  **A write that may have reached the venue and is not proven is
+  `{:error, {:order_unconfirmed, nil, reason}}`** (a timeout, a transport failure, a 5xx, or
+  a `201` with no `Location`): the request is sent once, and a caller that retried a bare
+  error could place the order twice. The `nil` is the client order id, which Schwab has no
+  field for, so the caller reconciles with `get_orders/2`. `client_order_id` in the request
+  is `{:error, {:unsupported_order_field, :client_order_id}}`. A venue 4xx is `{:refused, _}`.
   """
   @impl true
   def place_order(credentials, request, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts),
+    with {:ok, payload} <- Orders.build(request, opts),
+         {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
-         {:ok, payload} <- Orders.build(request, opts),
          {:ok, id} <- Rest.place_order(credentials, hash, payload, with_limiter(opts)) do
-      placed_order(credentials, id, request, opts)
+      placed_order(credentials, id, payload, opts)
     end
   end
 
@@ -274,45 +283,14 @@ defmodule DpExchange.Schwab do
   # with a `Location` header and nothing else, so `{:ok, "123"}` was all this returned, and a
   # consumer matching `%Order{}` across venues broke on this one. The order is read back with
   # `get_order/3`, a read on this venue rather than a throttled write. If that read fails the
-  # order is still placed, so the answer is `{:ok, _}`, built only from what is known: the id
-  # the venue named and the request as sent, `:pending`, nothing invented.
-  defp placed_order(credentials, id, request, opts) do
+  # order is still placed, so the answer is `{:ok, _}`, built only from what was sent
+  # (`Orders.accepted/2`): the id the venue named and the payload, `:pending`, nothing invented.
+  defp placed_order(credentials, id, payload, opts) do
     case get_order(credentials, id, opts) do
-      {:ok, %Types.Order{} = order} ->
-        {:ok, order}
-
-      _read_back_failed ->
-        {:ok,
-         %Types.Order{
-           id: id,
-           symbol: Map.get(request, :symbol),
-           side: Map.get(request, :side),
-           # `Orders.build/2` reads an absent or `nil` type as a market order.
-           order_type: Map.get(request, :order_type) || :market,
-           quantity: to_decimal(Map.get(request, :quantity)),
-           price: to_decimal(Map.get(request, :price)),
-           status: :pending,
-           provider: :schwab
-         }}
+      {:ok, %Types.Order{} = order} -> {:ok, order}
+      _read_back_failed -> Orders.accepted(id, payload)
     end
   end
-
-  defp to_decimal(nil), do: nil
-  defp to_decimal(%Decimal{} = value), do: value
-  defp to_decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp to_decimal(value) when is_float(value), do: Decimal.from_float(value)
-
-  # `Orders.build/2` has accepted a price written as text with surrounding blanks
-  # (`" 190.25 "`), which `Decimal.new/1` raises on in the caller's process, after the order
-  # was already placed. Read the way `build/2` reads it, and an unreadable value is `nil`.
-  defp to_decimal(value) when is_binary(value) do
-    case Decimal.parse(String.trim(value)) do
-      {%Decimal{} = parsed, ""} -> parsed
-      _unreadable -> nil
-    end
-  end
-
-  defp to_decimal(_other), do: nil
 
   @doc """
   **Not supported.** Schwab places one order per request.
@@ -339,11 +317,17 @@ defmodule DpExchange.Schwab do
   into `/previewOrder`'s own documented request — `PreviewOrder`/`OrderStrategy`, not
   `OrderRequest` — via `DpExchange.Schwab.Orders.to_preview/1`. A preview that passes
   describes the order that would actually be sent.
+
+  **A preview the venue rejects is `{:refused, {:preview_rejected, rejects}}`**, not `{:ok, _}`:
+  `/previewOrder` answers 200 with a non-empty `orderValidationResult.rejects` for an order it
+  would refuse to place, and a caller that checked only the tag would go on to place it.
+  `rejects` is the venue's own detail rows (`validationRuleName`, `message`, ...), capped and
+  bounded. A clean preview is `{:ok, body}` with `alerts`, `warns` and `reviews` in it.
   """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts),
-         {:ok, payload} <- Orders.build(request, opts) do
+    with {:ok, payload} <- Orders.build(request, opts),
+         {:ok, hash} <- account_hash(opts) do
       Rest.preview_order(credentials, hash, Orders.to_preview(payload), with_limiter(opts))
     end
   end
@@ -361,21 +345,30 @@ defmodule DpExchange.Schwab do
 
   `{:error, :order_limit_not_declared}` under the same conditions as `place_order/3` — a
   replacement is a `PUT` order write, the same throttled category as a placement.
+
+  The order id is checked first (`{:error, {:invalid_order_id, value}}` for `nil`, a
+  non-string, a blank or a padded string), then the request, the account option, the order
+  ceiling and the credential. An unconfirmed write is `{:error, {:order_unconfirmed, nil,
+  reason}}` as for `place_order/3`. **A replacement the venue applied whose read-back failed is
+  `{:error, {:replace_accepted_unread, new_id, reason}}`**: the old order is gone and `new_id`
+  is live, and no `Order` is invented from the request. Read it with `get_order/3`.
   """
   @impl true
   def replace_order(credentials, order_id, request, opts \\ []) do
-    # The order id is checked before the request is built, as `Fake.replace_order/4` does:
-    # `Rest` refuses an unusable id as `{:invalid_path_segment, :schwab}` too, but only after
-    # `Orders.build/2`, so a request wrong in both ways answered with a different refusal here
-    # than in the fake.
-    with {:ok, hash} <- account_hash(opts),
-         :ok <- ensure_order_limit_declared(opts),
-         :ok <- Rest.check_path_segment(order_id),
+    with :ok <- Orders.check_order_id(order_id),
          {:ok, payload} <- Orders.build(request, opts),
+         {:ok, hash} <- account_hash(opts),
+         :ok <- ensure_order_limit_declared(opts),
          {:ok, new_id} <-
            Rest.replace_order(credentials, hash, order_id, payload, with_limiter(opts)) do
-      # The NEW order, read back the way a placement is — see `placed_order/4`.
-      placed_order(credentials, new_id, request, opts)
+      # The NEW order, read back the way a placement is - but a failed read is not papered
+      # over with an order built from the request: the replacement was applied, so the answer
+      # says so and carries the id.
+      case get_order(credentials, new_id, opts) do
+        {:ok, %Types.Order{} = order} -> {:ok, order}
+        {:error, reason} -> {:error, {:replace_accepted_unread, new_id, reason}}
+        {:refused, reason} -> {:error, {:replace_accepted_unread, new_id, reason}}
+      end
     end
   end
 
@@ -387,7 +380,8 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts),
+    with :ok <- Orders.check_order_id(order_id),
+         {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
          :ok <- Rest.cancel_order(credentials, hash, order_id, with_limiter(opts)) do
       # `{:ok, :cancelled}`, as `dp_exchange_coinbase` and `dp_exchange_webull` answer a cancel
@@ -402,7 +396,8 @@ defmodule DpExchange.Schwab do
   # response-shape sweep read what the real facade actually handed back. See its @doc.
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
-    with {:ok, hash} <- account_hash(opts),
+    with :ok <- Orders.check_order_id(order_id),
+         {:ok, hash} <- account_hash(opts),
          {:ok, order} <- Rest.get_order(credentials, hash, order_id, with_limiter(opts)) do
       Orders.from_venue(order)
     end
@@ -753,7 +748,7 @@ defmodule DpExchange.Schwab do
   defp account_hash(opts) do
     case Keyword.get(opts, :account_hash) do
       hash when is_binary(hash) and hash != "" -> {:ok, hash}
-      _absent -> {:error, {:missing_account_hash, :schwab}}
+      _absent -> {:error, {:missing_option, :account_hash}}
     end
   end
 
@@ -891,11 +886,9 @@ defmodule DpExchange.Schwab do
   by the encrypted hash `get_accounts/2` returns. See
   `DpExchange.Schwab.Rest.get_transactions/3`, including why there is no "all types".
 
-  A missing `opts[:account_hash]` is `{:error, {:missing_account_hash, :schwab}}`, the same
-  atom every other account endpoint here uses. It answered `{:account_hash_required,
-  :schwab}` until a cross-package audit found this function carrying its own spelling of a
-  condition the shared `account_hash/1` helper already names — two atoms for one condition,
-  so a consumer handling "you forgot the account hash" uniformly could not.
+  A missing `opts[:account_hash]` is `{:error, {:missing_option, :account_hash}}`, the same
+  answer every other account endpoint here gives (it was `{:missing_account_hash, :schwab}`,
+  and before that `{:account_hash_required, :schwab}` on this function alone).
   """
   @impl true
   def get_transactions(credentials, opts) do

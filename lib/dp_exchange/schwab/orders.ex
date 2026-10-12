@@ -102,23 +102,38 @@ defmodule DpExchange.Schwab.Orders do
   @doc """
   Build a single-leg order payload from a contract request.
 
-  The request is `Core`'s vocabulary: `:symbol`, `:side`, `:quantity`, and optionally
-  `:order_type`, `:price`, `:stop_price`, `:time_in_force`, `:session`. The venue's own
-  `:instruction` (required for an option, which has no plain buy or sell), and a trailing
-  stop's `:stop_price_offset`, `:stop_price_link_basis` and `:stop_price_link_type`, ride
-  along under their venue names. `opts[:session]` is read when the request names none.
+  The request is `Core`'s vocabulary: `:symbol`, `:side`, `:quantity`, `:order_type` and
+  `:time_in_force` (all four required), and optionally `:price`, `:stop_price`, `:session`.
+  The venue's own `:instruction` (required for an option, which has no plain buy or sell),
+  and a trailing stop's `:stop_price_offset`, `:stop_price_link_basis` and
+  `:stop_price_link_type`, ride along under their venue names. `opts[:session]` is read when
+  the request names none. **Any other key is refused**, `client_order_id` included: Schwab
+  publishes no idempotency key, so there is nothing to send it as and silently ignoring it
+  would let a caller believe a retry was safe.
 
-  Refuses, by name and before any request, when:
+  Refuses, by name and before any request, in this order:
 
-  - the order type or time-in-force is outside what this venue serves
-  - a limit order carries no price, or a stop order no stop price — the venue would
-    reject it, and a locally-refused order has not spent a throttled write
-  - a field is present that the order type never reads: `{:price_not_allowed, type}` (a
-    `:price` on a market, stop or trailing-stop order),
-    `{:stop_price_not_allowed, type}` (a `:stop_price` on a market, limit or trailing
-    order), `{:trailing_field_not_allowed, key, type}` (an offset, link basis or link type
-    on a non-trailing order). A market order carrying a price is ambiguous - the caller may
-    believe they placed a limit - so it is refused rather than sent as a market order
+  - a request that is not a map: `{:invalid_order_request, request}`
+  - a key this builder does not read: `{:unsupported_order_field, key}`
+  - a nil, non-text or blank symbol: `{:invalid_symbol, value}`
+  - a side that is not `:buy`/`:sell` (or `"buy"`/`"sell"`, any case):
+    `{:invalid_side, value}`; no side and no instruction: `{:missing_field, :side}`
+  - no order type or time-in-force: `{:missing_field, :order_type}` /
+    `{:missing_field, :time_in_force}`. Neither is defaulted, and a missing order type is never
+    read as a market order: a forgotten field must not become an order at any price
+  - an order type or time-in-force outside what this venue serves
+  - a quantity that is missing (`{:missing_field, :quantity}`), or is not a positive, finite
+    Decimal, integer or numeric string (`{:invalid_quantity, value}`). **Floats are refused**:
+    a float has already lost digits
+  - a field the order type never reads, `{:unexpected_field, key}` (a `:price` on a market,
+    stop or trailing-stop order, a `:stop_price` on a market, limit or trailing order, an
+    offset, link basis or link type on a non-trailing order). A market order carrying a
+    price is ambiguous - the caller may believe they placed a limit - so it is refused
+  - a limit order carries no price, or a stop order no stop price —
+    `{:missing_field, key}`; the venue would reject it, and a locally-refused order has not
+    spent a throttled write
+  - a price or stop price that is not a positive, finite Decimal, integer or numeric
+    string (floats refused): `{:invalid_price, value}` / `{:invalid_stop_price, value}`
   - the instruction does not match the asset type, per the venue's published matrix
     (`{:instruction_not_valid_for_asset, instruction, asset}`), or is not a string
     (`{:invalid_instruction, value}`, naming the value given)
@@ -141,16 +156,15 @@ defmodule DpExchange.Schwab.Orders do
     do: {:error, {:invalid_order_request, request}}
 
   def build(request, opts) do
-    with {:ok, symbol} <- fetch(request, :symbol),
-         {:ok, native} <- SymbolFormat.validate(symbol),
-         {:ok, quantity} <- fetch_quantity(request),
+    with :ok <- check_keys(request),
+         {:ok, native} <- SymbolFormat.validate_read(Map.get(request, :symbol)),
+         {:ok, instruction} <- fetch_instruction(request, native),
          {:ok, order_type} <- fetch_order_type(request),
          {:ok, duration} <- fetch_duration(request),
-         {:ok, instruction} <- fetch_instruction(request, native),
+         {:ok, quantity} <- fetch_quantity(request),
+         :ok <- check_prices(order_type, request),
          {:ok, session} <- fetch_session(request, opts),
          {:ok, asset} <- fetch_asset_type(request, native),
-         :ok <- check_finite(request),
-         :ok <- check_prices(order_type, request),
          :ok <- check_links(request) do
       {:ok,
        %{
@@ -207,6 +221,40 @@ defmodule DpExchange.Schwab.Orders do
     %{"orderStrategy" => strategy}
   end
 
+  @doc """
+  Whether `order_id` can name an order: a non-blank string with no surrounding whitespace.
+
+  Anything else - `nil`, an integer, a blank or padded string - is
+  `{:error, {:invalid_order_id, value}}`, decided before the account option and the
+  credential. Schwab ids are numeric strings (`Location` ends in one, and `get_order/3`
+  returns `Order.id` as one); an integer is not accepted, and a padded id would be a
+  different path segment, so the venue would answer 404 for an order that exists.
+  """
+  @spec check_order_id(term()) :: :ok | {:error, {:invalid_order_id, term()}}
+  def check_order_id(order_id) when is_binary(order_id) do
+    if order_id != "" and String.trim(order_id) == order_id,
+      do: :ok,
+      else: {:error, {:invalid_order_id, order_id}}
+  end
+
+  def check_order_id(other), do: {:error, {:invalid_order_id, other}}
+
+  @doc """
+  The `Order` for a placement the venue accepted (it named `id`) when reading it back failed.
+
+  Built from the payload `build/2` produced - the exact order that was sent, with the
+  normalised symbol, side, type and time-in-force - and nothing else: `:pending`, no fills,
+  no timestamp. `place_order/3` answers with it so a placed order is never reported as a
+  failure; `replace_order/4` does not use it, because a replacement's read-back failure is
+  `{:replace_accepted_unread, id, reason}`.
+  """
+  @spec accepted(String.t(), map()) :: {:ok, Order.t()} | {:error, term()}
+  def accepted(id, %{"orderLegCollection" => [leg | _rest]} = payload) do
+    payload
+    |> Map.merge(%{"orderId" => id, "status" => "ACCEPTED", "quantity" => leg["quantity"]})
+    |> from_venue()
+  end
+
   defp preview_leg(%{"instrument" => instrument} = leg) do
     leg
     |> Map.delete("instrument")
@@ -216,22 +264,56 @@ defmodule DpExchange.Schwab.Orders do
 
   defp preview_leg(leg), do: leg
 
-  defp fetch(request, key) do
-    case Map.get(request, key) do
-      nil -> {:error, {:missing_order_field, key}}
-      value -> {:ok, value}
+  # The keys this builder reads. Anything else is refused by name (`client_order_id` among
+  # them: Schwab has no idempotency key to carry it). A key whose value is `nil` is a
+  # forwarded unset option and counts as absent, as it does for every field below. The
+  # first offender in key order is named, so the answer does not depend on map iteration.
+  @request_keys [
+    :symbol,
+    :side,
+    :quantity,
+    :order_type,
+    :time_in_force,
+    :price,
+    :stop_price,
+    :session,
+    :instruction,
+    :instrument_type,
+    :stop_price_offset,
+    :stop_price_link_basis,
+    :stop_price_link_type
+  ]
+
+  defp check_keys(request) do
+    request
+    |> Enum.reject(fn {key, value} -> is_nil(value) or key in @request_keys end)
+    |> Enum.map(fn {key, _value} -> key end)
+    |> Enum.sort()
+    |> case do
+      [] -> :ok
+      [key | _rest] -> {:error, {:unsupported_order_field, key}}
     end
   end
 
   # Fractional is real here — `quantityType` admits DOLLARS and `quantity` is a double —
   # so a non-integer quantity is passed through rather than rounded. Rounding a
-  # fractional order to whole shares would change the size silently.
+  # fractional order to whole shares would change the size silently. A float is not accepted
+  # as input: it has already lost digits, and which decimal the caller meant is not this
+  # package's to guess. A numeric string is read as the exact number it spells.
   defp fetch_quantity(request) do
     case Map.get(request, :quantity) do
-      nil -> {:error, {:missing_order_field, :quantity}}
-      %Decimal{} = quantity -> decimal_quantity(quantity)
-      quantity when is_number(quantity) -> positive(quantity)
+      nil -> {:error, {:missing_field, :quantity}}
+      %Decimal{} = quantity -> decimal_quantity(quantity, quantity)
+      quantity when is_integer(quantity) -> positive(quantity)
+      quantity when is_binary(quantity) -> string_quantity(quantity)
       other -> {:error, {:invalid_quantity, other}}
+    end
+  end
+
+  defp string_quantity(text) do
+    case text |> String.trim() |> Decimal.parse() do
+      {%Decimal{} = parsed, ""} -> decimal_quantity(parsed, text)
+      _unreadable -> {:error, {:invalid_quantity, text}}
     end
   end
 
@@ -242,32 +324,33 @@ defmodule DpExchange.Schwab.Orders do
   # **The exponent is bounded before `to_float/1` expands it.** It builds `10 ** exp` as an
   # integer, so `1E999999999` meant a billion-digit number computed in the caller's process.
   # The same +-1000 limit `finite_number?/1` applies to a price; chosen, not measured.
-  defp decimal_quantity(quantity) do
-    if Decimal.nan?(quantity) or Decimal.inf?(quantity) or abs(quantity.exp) > 1000,
-      do: {:error, {:invalid_quantity, quantity}},
-      else: positive(Decimal.to_float(quantity))
+  defp decimal_quantity(quantity, original) do
+    if Decimal.nan?(quantity) or Decimal.inf?(quantity) or abs(quantity.exp) > 1000 do
+      {:error, {:invalid_quantity, original}}
+    else
+      float = Decimal.to_float(quantity)
+      if float > 0, do: {:ok, float}, else: {:error, {:invalid_quantity, original}}
+    end
   rescue
     _out_of_range in [ArgumentError, ArithmeticError] ->
-      {:error, {:invalid_quantity, quantity}}
+      {:error, {:invalid_quantity, original}}
   end
 
-  # A NaN or Infinity price went out as the string `"NaN"` / `"Infinity"`. Every field the
-  # generic `maybe_put/3` stringifies is checked here, so a non-finite value is refused by
-  # name instead of being sent to the venue as a price.
+  # `price`, `stopPrice` and `stopPriceOffset` are checked here so a non-finite value is
+  # refused by name instead of being sent to the venue as a price (`"NaN"` / `"Infinity"`).
   #
   # **And a value that is not a number at all.** `maybe_put/3` ends in `to_string/1`, so
   # `price: :market` went out as `"market"`, `price: "abc"` as `"abc"`, and `price: %{}`
   # raised `Protocol.UndefinedError` in the caller's process. The schema types all three as
-  # `number` (`price`, `stopPrice`, `stopPriceOffset`), so anything that is not an integer,
-  # a float, a finite `Decimal` or a string that reads as a finite number is refused by name.
-  defp check_finite(request) do
-    Enum.reduce_while([:price, :stop_price, :stop_price_offset], :ok, fn key, :ok ->
-      value = Map.get(request, key)
+  # `number`, so anything that is not an integer, a finite `Decimal` or a string that reads
+  # as a finite number is refused by name. **A float is refused too**: it has already lost
+  # digits, and `to_string/1` of one is scientific below 1.0e-4.
+  defp check_offset(request) do
+    value = Map.get(request, :stop_price_offset)
 
-      if finite_number?(value),
-        do: {:cont, :ok},
-        else: {:halt, {:error, {:invalid_order_field, key, value}}}
-    end)
+    if finite_number?(value) and not is_float(value),
+      do: :ok,
+      else: {:error, {:invalid_order_field, :stop_price_offset, value}}
   end
 
   defp finite_number?(nil), do: true
@@ -348,17 +431,14 @@ defmodule DpExchange.Schwab.Orders do
   defp positive(quantity) when quantity > 0, do: {:ok, quantity}
   defp positive(quantity), do: {:error, {:invalid_quantity, quantity}}
 
-  # **No `:order_type` is a market order only when nothing says otherwise.** A request with
-  # no type and a `:price` went out as a MARKET order, the price ignored: a forgotten field
-  # became an order at any price. A price or a stop price says the caller meant something
-  # else, and which is not this package's to guess, so that is refused. A bare request still
-  # defaults to market, the venue's own documented example.
+  # **The order type is required, never inferred.** A request with no type and no price used
+  # to go out as a MARKET order (and one with a price was refused): a forgotten field became
+  # an order at any price. Which type the caller meant is not this package's to guess, so an
+  # absent type (or a forwarded `nil`) is `{:missing_field, :order_type}`.
   defp fetch_order_type(request) do
     case Map.get(request, :order_type) do
       nil ->
-        if Map.get(request, :price) || Map.get(request, :stop_price),
-          do: {:error, {:missing_order_field, :order_type}},
-          else: {:ok, Map.fetch!(@order_types, :market)}
+        {:error, {:missing_field, :order_type}}
 
       type ->
         case Map.fetch(@order_types, type) do
@@ -368,35 +448,53 @@ defmodule DpExchange.Schwab.Orders do
     end
   end
 
+  # **The duration is required, never defaulted to `DAY`.** A missing time-in-force silently
+  # became a day order; a caller who forgot it may have meant good-till-cancelled. `nil` is
+  # absent (a forwarded unset option); any other value is checked.
   defp fetch_duration(request) do
-    # Found 2026-10-10 by reading the path: `Map.get/3` substitutes its default only for an
-    # ABSENT key, so `time_in_force: nil` (a forwarded unset option) was refused as an
-    # unsupported duration. nil is absent here, as on Robinhood; any other value is still
-    # checked, never defaulted.
-    tif = Map.get(request, :time_in_force) || :day
+    case Map.get(request, :time_in_force) do
+      nil ->
+        {:error, {:missing_field, :time_in_force}}
 
-    case Map.fetch(@durations, tif) do
-      {:ok, native} -> {:ok, native}
-      :error -> {:error, {:unsupported_time_in_force, tif}}
+      tif ->
+        case Map.fetch(@durations, tif) do
+          {:ok, native} -> {:ok, native}
+          :error -> {:error, {:unsupported_time_in_force, tif}}
+        end
     end
   end
 
-  # `:side` is Core's word. It maps to the plain equity instructions; the open/close
-  # forms are option vocabulary a caller supplies explicitly as `:instruction`.
+  # `:side` is Core's word: `:buy`/`:sell`, or `"buy"`/`"sell"` in any case. It maps to the
+  # plain equity instructions; the open/close forms are option vocabulary a caller supplies
+  # explicitly as `:instruction`.
   defp fetch_instruction(request, native) do
-    instruction =
-      case {Map.get(request, :instruction), Map.get(request, :side)} do
-        {nil, :buy} -> "BUY"
-        {nil, :sell} -> "SELL"
-        {nil, nil} -> nil
-        {nil, other_side} -> {:not_a_string, other_side}
-        {explicit, _side} when is_binary(explicit) -> String.upcase(explicit)
-        {other, _side} -> {:not_a_string, other}
-      end
+    with {:ok, side} <- normalize_side(Map.get(request, :side)) do
+      instruction =
+        case {Map.get(request, :instruction), side} do
+          {nil, :buy} -> "BUY"
+          {nil, :sell} -> "SELL"
+          {nil, nil} -> nil
+          {explicit, _side} when is_binary(explicit) -> String.upcase(explicit)
+          {other, _side} -> {:not_a_string, other}
+        end
 
-    with :ok <- instruction_agrees(instruction, Map.get(request, :side)),
-         do: validate_instruction(instruction, native)
+      with :ok <- instruction_agrees(instruction, side),
+           do: validate_instruction(instruction, native)
+    end
   end
+
+  defp normalize_side(nil), do: {:ok, nil}
+  defp normalize_side(side) when side in [:buy, :sell], do: {:ok, side}
+
+  defp normalize_side(side) when is_binary(side) do
+    case String.downcase(side) do
+      "buy" -> {:ok, :buy}
+      "sell" -> {:ok, :sell}
+      _other -> {:error, {:invalid_side, side}}
+    end
+  end
+
+  defp normalize_side(other), do: {:error, {:invalid_side, other}}
 
   # An explicit instruction that contradicts `:side` is refused: `side: :sell,
   # instruction: "BUY"` sent BUY, and which of the two the caller meant is not this
@@ -412,7 +510,7 @@ defmodule DpExchange.Schwab.Orders do
 
   defp instruction_agrees(_instruction, _side), do: :ok
 
-  defp validate_instruction(nil, _native), do: {:error, {:missing_order_field, :side}}
+  defp validate_instruction(nil, _native), do: {:error, {:missing_field, :side}}
 
   defp validate_instruction(instruction, native) when is_binary(instruction) do
     allowed =
@@ -439,37 +537,37 @@ defmodule DpExchange.Schwab.Orders do
   defp check_prices(type, request) do
     with :ok <- require_fields(request, required_fields(type)),
          :ok <- refuse_meaningless(type, request),
-         do: positive_prices(type, request)
+         :ok <- positive_price(request, :price, :invalid_price),
+         :ok <- positive_price(request, :stop_price, :invalid_stop_price),
+         do: check_offset(request)
   end
 
-  # A limit or stop at or below zero cannot be a valid single-instrument order. Only these
-  # four types are checked. The net types (NET_DEBIT, NET_CREDIT, NET_ZERO) are deliberately
-  # left alone: this builder cannot send them, and a net price is a spread's balance, where
-  # zero and negative values are legitimate. `finite_number?/1` has already run, so every
-  # value here reads as a finite number. `LIMIT_ON_CLOSE` is a limit order like `LIMIT`: its
-  # price is a single-instrument price and was the one limit type left unchecked.
-  @positive_price_types ~w(LIMIT LIMIT_ON_CLOSE STOP STOP_LIMIT TRAILING_STOP_LIMIT)
+  # A price or stop at or below zero cannot be a valid single-instrument order, and one that
+  # is not a number, is NaN or Infinity, or is a float is refused by name (see
+  # `check_offset/1`). Fields the order type never reads were refused before this runs, so
+  # every price present here is one the type sends. The net types (NET_DEBIT, NET_CREDIT,
+  # NET_ZERO), where zero and negative values are legitimate, are not buildable.
+  defp positive_price(request, key, tag) do
+    value = Map.get(request, key)
 
-  defp positive_prices(type, request) when type in @positive_price_types do
-    Enum.reduce_while([:price, :stop_price], :ok, fn key, :ok ->
-      value = Map.get(request, key)
-
-      if is_nil(value) or positive_value?(value),
-        do: {:cont, :ok},
-        else: {:halt, {:error, {:invalid_price, value}}}
-    end)
+    if is_nil(value) or positive_value?(value),
+      do: :ok,
+      else: {:error, {tag, value}}
   end
 
-  defp positive_prices(_type, _request), do: :ok
-
-  defp positive_value?(value) when is_number(value), do: value > 0
+  defp positive_value?(value) when is_integer(value), do: value > 0
 
   defp positive_value?(value) when is_binary(value) do
-    {parsed, ""} = value |> String.trim() |> Decimal.parse()
-    Decimal.gt?(parsed, 0)
+    case value |> String.trim() |> Decimal.parse() do
+      {%Decimal{} = parsed, ""} -> positive_value?(parsed)
+      _unreadable -> false
+    end
   end
 
-  defp positive_value?(%Decimal{} = value), do: Decimal.gt?(value, 0)
+  defp positive_value?(%Decimal{} = value),
+    do: finite_number?(value) and Decimal.gt?(value, 0)
+
+  defp positive_value?(_other), do: false
 
   defp required_fields(type) when type in @trailing_types, do: [:stop_price_offset]
   defp required_fields("LIMIT_ON_CLOSE"), do: [:price]
@@ -500,30 +598,22 @@ defmodule DpExchange.Schwab.Orders do
     "TRAILING_STOP_LIMIT" => [:stop_price]
   }
 
-  @wire_to_core Map.new(@order_types, fn {atom, wire} -> {wire, atom} end)
-
   defp refuse_meaningless(type, request) do
-    core = Map.fetch!(@wire_to_core, type)
-
     @meaningless
     |> Map.fetch!(type)
     |> Enum.find(&(Map.get(request, &1) != nil))
     |> case do
       nil -> :ok
-      key -> {:error, not_allowed(key, core)}
+      key -> {:error, {:unexpected_field, key}}
     end
   end
-
-  defp not_allowed(:price, type), do: {:price_not_allowed, type}
-  defp not_allowed(:stop_price, type), do: {:stop_price_not_allowed, type}
-  defp not_allowed(key, type), do: {:trailing_field_not_allowed, key, type}
 
   # Checked in order, so a stop_limit missing both names the stop price first — the field
   # that makes it a stop at all.
   defp require_fields(request, keys) do
     Enum.reduce_while(keys, :ok, fn key, :ok ->
       case Map.get(request, key) do
-        nil -> {:halt, {:error, {:missing_order_field, key}}}
+        nil -> {:halt, {:error, {:missing_field, key}}}
         _present -> {:cont, :ok}
       end
     end)
@@ -572,11 +662,11 @@ defmodule DpExchange.Schwab.Orders do
     Map.put(payload, "stopPriceOffset", Jason.Fragment.new(Decimal.to_string(value, :normal)))
   end
 
-  defp maybe_put(payload, "stopPriceOffset", value) when is_number(value) do
-    Map.put(payload, "stopPriceOffset", Jason.Fragment.new(to_string(value)))
+  defp maybe_put(payload, "stopPriceOffset", value) when is_integer(value) do
+    Map.put(payload, "stopPriceOffset", Jason.Fragment.new(Integer.to_string(value)))
   end
 
-  # A string offset (`check_finite/1` accepts one that reads as a finite number) is a number
+  # A string offset (`check_offset/1` accepts one that reads as a finite number) is a number
   # on the wire too, not the quoted text the generic clause below would send; it is read, then
   # written out in full as a Decimal is.
   defp maybe_put(payload, "stopPriceOffset", value) when is_binary(value) do
@@ -599,14 +689,7 @@ defmodule DpExchange.Schwab.Orders do
   defp maybe_put(payload, key, %Decimal{} = value),
     do: Map.put(payload, key, Decimal.to_string(value, :normal))
 
-  # **`to_string/1` on a float is scientific below 1.0e-4.** `to_string(0.0001)` is
-  # `"1.0e-4"`, the same unreadable-price failure the Decimal clause above closes, reached
-  # through a float price instead. `Decimal.from_float/1` keeps the shortest round-trip digits
-  # and `:normal` writes them out in full.
-  defp maybe_put(payload, key, value) when is_float(value),
-    do: Map.put(payload, key, value |> Decimal.from_float() |> Decimal.to_string(:normal))
-
-  # Text that `check_finite/1` accepted: sent as the number it reads as, with no surrounding
+  # Text that `positive_price/3` accepted: sent as the number it reads as, with no surrounding
   # blanks and no exponent (`" 1.5 "` and `"1E+2"` went out verbatim).
   # Text that is not a number at all (an enum such as `stopPriceLinkBasis: "BID"`) goes out
   # as written; only numeric text is rewritten.

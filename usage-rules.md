@@ -349,8 +349,8 @@ DpExchange.Schwab.get_balances(credentials, account_hash: account.hash)
 
 **`get_positions/1` is the exception, and it takes `:account_number`.** It reads every
 account in one call, and `Position` has no account field. So with more than one account,
-leave out `:account_number` and you get `{:error, {:account_number_required, n}}` rather than
-one list mixing every account. A row holding both a long and a short leg comes back as two
+leave out `:account_number` and you get `{:error, {:missing_option, :account_number}}` rather
+than one list mixing every account (a credential with exactly one account needs no number). A row holding both a long and a short leg comes back as two
 positions. `notional_value` is unsigned, because `:side` carries the direction. A negative
 `longQuantity` or `shortQuantity` refuses the whole read as `{:error,
 {:unexpected_position_quantity, :negative}}`: the spec leaves the sign of a short unstated, and
@@ -394,6 +394,14 @@ rather than on venue name.
 {:ok, preview} = DpExchange.Schwab.preview_order(credentials, request, account_hash: hash)
 ```
 
+**A preview the venue rejects is `{:refused, {:preview_rejected, rejects}}`, not `{:ok, _}`.**
+`/previewOrder` answers 200 with `orderValidationResult.rejects` listing the rules the order
+breaks; a non-empty list is a refusal (`rejects` is the venue's own detail rows, capped at 50
+and bounded). `alerts`, `warns` and `reviews` are advisory and ride along in the `{:ok, body}`
+of a clean preview. `Fake.preview_order/3` models one rejection it can know without the
+venue: an option order for a fractional number of contracts. The rule name it carries is the
+fake's own, not the venue's; queue other rejections with `DpExchange.Core.FakeInjection`.
+
 **Preview is close to free and placing is not.** Schwab throttles order writes to somewhere
 between 0 and 120 a minute per account. Its documentation says "Get order requests are
 unthrottled" and states no limit for market data or for `previewOrder`, which is an absence
@@ -417,9 +425,40 @@ id you passed in is dead afterwards — keep the one you get back, or you will b
 order that no longer exists.
 
 `place_order/3` and `replace_order/4` return an `Order`, read back with `get_order/3` once the
-venue names the id. The venue answers a write with only a `Location` header. If the read back
-fails, the order is still placed: you get an `Order` holding the id and your request, with
-`status: :pending`. `cancel_order/3` returns `{:ok, :cancelled}`.
+venue names the id. The venue answers a write with only a `Location` header.
+
+- If the read back of a **placement** fails, the order is still placed: you get an `Order` built
+  from the payload that was sent (normalised symbol, side, type, time-in-force) and the id the
+  venue named, with `status: :pending`.
+- If the read back of a **replacement** fails, you get
+  `{:error, {:replace_accepted_unread, new_id, reason}}`. The old order is gone and `new_id` is
+  live; no `Order` is built from your request. Read it with `get_order(new_id)`.
+- **A write that may have reached the venue and is not proven is
+  `{:error, {:order_unconfirmed, nil, reason}}`**: a timeout or transport failure after the
+  request left, a 5xx, or a 2xx with no `Location`. Order writes are sent exactly once, so
+  never retry on it: list the account's orders (`get_orders/2`) to find out whether the order
+  exists. The `nil` is the client order id, which Schwab has no field for. Failures decided
+  before anything was sent (validation, a missing option or credential, our own rate limiter
+  refusing, the venue's 429) stay plain `{:error, _}`; a venue 4xx is `{:refused, _}`.
+  A missing order (404) on `get_order/3`, `cancel_order/3` or `replace_order/4` is
+  `{:refused, :not_found}`.
+
+`cancel_order/3` returns `{:ok, :cancelled}`.
+
+**What a request must say.** `place_order/3`, `preview_order/3` and `replace_order/4` require
+`:symbol`, `:side` (`:buy`/`:sell`, or `"buy"`/`"sell"` in any case; or the option `:instruction`),
+`:quantity` (a Decimal, an integer or a numeric string; **a float is refused**),
+`:order_type` and `:time_in_force`. Nothing is defaulted: a missing order type is
+`{:missing_field, :order_type}` (never a market order), a missing time-in-force
+`{:missing_field, :time_in_force}` (never `:day`). A price the order type does not read is
+`{:unexpected_field, :price}`; prices follow the quantity rule (`{:invalid_price, v}`,
+`{:invalid_stop_price, v}`). **Any key the builder does not read is
+`{:unsupported_order_field, key}`, `client_order_id` included**: Schwab has no idempotency
+key, so silently ignoring it would let you believe a retry was safe. Checks run in this order:
+request shape, unknown keys, symbol, side, order type, time-in-force, quantity, prices, then
+`opts[:account_hash]` (`{:missing_option, :account_hash}`), the order ceiling, and the
+credential. `get_order/3`, `cancel_order/3` and `replace_order/4` check the order id first:
+`{:error, {:invalid_order_id, v}}` for `nil`, a non-string, a blank or a padded string.
 
 Use it instead of cancel-then-place wherever you can. The two are **not equivalent**:
 cancel-then-place leaves a window with no order live, and spends two throttled writes
@@ -540,10 +579,9 @@ the venue to price against a number you chose.
 
 **`get_transactions/2` needs four things and defaults none of them**: `:account_hash`,
 `:from`, `:to` and `:types`. A missing `:account_hash` is
-`{:error, {:missing_account_hash, :schwab}}` — the same atom every other account endpoint
-here uses. It answered `{:account_hash_required, :schwab}` until 2026-09-07: one condition
-with two spellings, so a consumer handling "you forgot the account hash" uniformly could
-not.
+`{:error, {:missing_option, :account_hash}}` — the same answer every other account endpoint
+here gives. It was `{:missing_account_hash, :schwab}` until the trading-conventions pass, and
+`{:account_hash_required, :schwab}` before 2026-09-07.
 
 **`:types` takes ONE type, not a list, and there is no "all".** The venue's own parameter
 is a scalar enum (`TransactionType`), not an array — `DpExchange.Schwab.transaction_types/0`
@@ -662,7 +700,7 @@ instruction, size and price, `WORKING` (so `:open`), nothing filled. `get_order/
 `get_orders/2` (narrowed by `opts[:status]`) answer from that; `cancel_order/3` marks it
 `CANCELED`, and `replace_order/4` marks it `REPLACED` and issues a new working order. A
 cancel or replace of an order that is no longer working is `{:refused, {:venue_error, 400}}`,
-and an id the fake never issued is `{:refused, {:venue_error, 404}}` on every one of the
+and an id the fake never issued is `{:refused, :not_found}` on every one of the
 three. `place_order/3`, `replace_order/4` and `cancel_order/3` also refuse an undeclared or
 zero order ceiling (`{:error, :order_limit_not_declared}` / `{:error, :order_limit_zero}`)
 exactly as the facade does, when a real tree is supervised under the same `:order_limit` name;

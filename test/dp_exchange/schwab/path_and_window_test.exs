@@ -231,12 +231,12 @@ defmodule DpExchange.Schwab.PathAndWindowTest do
       assert {:error, {:invalid_decimal, :price, "1e999999999"}} =
                Rest.get_price("AAPL", @creds, plug: plug, retry_attempts: 0)
 
-      buy = %{symbol: "AAPL", side: :buy, quantity: 1, order_type: :limit}
+      buy = %{symbol: "AAPL", side: :buy, quantity: 1, order_type: :limit, time_in_force: :day}
 
       absurd = ["1e999999999", Decimal.new("1E5000"), Decimal.new("NaN"), Decimal.new("-Inf")]
 
       for price <- absurd do
-        assert {:error, {:invalid_order_field, :price, ^price}} =
+        assert {:error, {:invalid_price, ^price}} =
                  DpExchange.Schwab.Orders.build(Map.put(buy, :price, price))
       end
 

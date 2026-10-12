@@ -10,9 +10,12 @@ defmodule DpExchange.Schwab.OrdersTest do
 
   use ExUnit.Case, async: true
 
+  alias DpExchange.Core.Types.Order
   alias DpExchange.Schwab.Orders
 
-  @buy %{symbol: "AAPL", side: :buy, quantity: 15}
+  # Order type and time-in-force are required: nothing is defaulted, so every request states
+  # both.
+  @buy %{symbol: "AAPL", side: :buy, quantity: 15, order_type: :market, time_in_force: :day}
 
   describe "the documented market order, reproduced" do
     test "matches the venue's own worked example" do
@@ -51,7 +54,7 @@ defmodule DpExchange.Schwab.OrdersTest do
   describe "the leg's assetType follows the stated instrument, not the ticker's spelling" do
     test "a mutual fund order is sent as MUTUAL_FUND, not as a share order" do
       # `SWPPX` and `AAPL` are spelled alike; every non-option order went out as EQUITY.
-      fund = %{symbol: "SWPPX", side: :buy, quantity: 1, instrument_type: :mutual_fund}
+      fund = Map.merge(@buy, %{symbol: "SWPPX", quantity: 1, instrument_type: :mutual_fund})
 
       assert {:ok, payload} = Orders.build(fund)
       assert [%{"instrument" => %{"assetType" => "MUTUAL_FUND"}}] = payload["orderLegCollection"]
@@ -73,8 +76,7 @@ defmodule DpExchange.Schwab.OrdersTest do
 
   describe "prices" do
     test "a limit order carries its price as a string" do
-      request =
-        %{@buy | side: :buy} |> Map.merge(%{order_type: :limit, price: Decimal.new("34.97")})
+      request = Map.merge(@buy, %{order_type: :limit, price: Decimal.new("34.97")})
 
       assert {:ok, payload} = Orders.build(request)
       assert payload["orderType"] == "LIMIT"
@@ -103,18 +105,49 @@ defmodule DpExchange.Schwab.OrdersTest do
 
     test "a limit with no price is refused locally, not by the venue" do
       assert Orders.build(Map.put(@buy, :order_type, :limit)) ==
-               {:error, {:missing_order_field, :price}}
+               {:error, {:missing_field, :price}}
     end
 
     test "a stop with no stop price is refused, and stop_limit names the missing half" do
       assert Orders.build(Map.put(@buy, :order_type, :stop)) ==
-               {:error, {:missing_order_field, :stop_price}}
+               {:error, {:missing_field, :stop_price}}
 
       assert Orders.build(Map.put(@buy, :order_type, :stop_limit)) ==
-               {:error, {:missing_order_field, :stop_price}}
+               {:error, {:missing_field, :stop_price}}
 
       assert Orders.build(Map.merge(@buy, %{order_type: :stop_limit, stop_price: 1})) ==
-               {:error, {:missing_order_field, :price}}
+               {:error, {:missing_field, :price}}
+    end
+
+    test "a price or stop price the type never reads is {:unexpected_field, key}" do
+      assert Orders.build(Map.put(@buy, :price, 150)) == {:error, {:unexpected_field, :price}}
+
+      assert Orders.build(Map.merge(@buy, %{order_type: :limit, price: 1, stop_price: 2})) ==
+               {:error, {:unexpected_field, :stop_price}}
+
+      assert Orders.build(Map.merge(@buy, %{order_type: :stop, stop_price: 2, price: 1})) ==
+               {:error, {:unexpected_field, :price}}
+
+      assert Orders.build(Map.put(@buy, :stop_price_offset, 5)) ==
+               {:error, {:unexpected_field, :stop_price_offset}}
+    end
+
+    test "a price is a positive Decimal, integer or numeric string - never a float" do
+      limit = Map.put(@buy, :order_type, :limit)
+
+      assert {:ok, %{"price" => "150.25"}} = Orders.build(Map.put(limit, :price, "150.25"))
+      assert {:ok, %{"price" => "150"}} = Orders.build(Map.put(limit, :price, 150))
+
+      for bad <- [0, -1, "0", "abc", "NaN", 150.25, :market, %{}, Decimal.new("-1")] do
+        assert Orders.build(Map.put(limit, :price, bad)) == {:error, {:invalid_price, bad}}
+      end
+
+      stop = Map.put(@buy, :order_type, :stop)
+
+      for bad <- [0, "abc", 1.5] do
+        assert Orders.build(Map.put(stop, :stop_price, bad)) ==
+                 {:error, {:invalid_stop_price, bad}}
+      end
     end
   end
 
@@ -136,7 +169,12 @@ defmodule DpExchange.Schwab.OrdersTest do
     end
 
     test "an equity instruction on an option is refused too" do
-      option = %{symbol: "XYZ   240315C00500000", quantity: 10}
+      option = %{
+        symbol: "XYZ   240315C00500000",
+        quantity: 10,
+        order_type: :market,
+        time_in_force: :day
+      }
 
       for instruction <- Orders.equity_instructions() do
         assert {:error, {:instruction_not_valid_for_asset, ^instruction, "OPTION"}} =
@@ -151,6 +189,7 @@ defmodule DpExchange.Schwab.OrdersTest do
         instruction: "BUY_TO_OPEN",
         quantity: 10,
         order_type: :limit,
+        time_in_force: :day,
         price: Decimal.new("6.45")
       }
 
@@ -205,10 +244,16 @@ defmodule DpExchange.Schwab.OrdersTest do
       # The offset IS the order. Sending one without it spends a throttled write to be
       # told something knowable locally.
       assert Orders.build(Map.put(@buy, :order_type, :trailing_stop)) ==
-               {:error, {:missing_order_field, :stop_price_offset}}
+               {:error, {:missing_field, :stop_price_offset}}
 
       assert Orders.build(Map.put(@buy, :order_type, :trailing_stop_limit)) ==
-               {:error, {:missing_order_field, :stop_price_offset}}
+               {:error, {:missing_field, :stop_price_offset}}
+    end
+
+    test "a float stopPriceOffset is refused like a float price" do
+      request = Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: 1.5})
+
+      assert Orders.build(request) == {:error, {:invalid_order_field, :stop_price_offset, 1.5}}
     end
 
     test "the trailing reference and offset type ride along when given" do
@@ -232,9 +277,12 @@ defmodule DpExchange.Schwab.OrdersTest do
                {:error, {:unsupported_time_in_force, :gtd}}
     end
 
-    test "a nil :time_in_force is absent and defaults to :day, as on Robinhood" do
-      assert {:ok, payload} = Orders.build(Map.put(@buy, :time_in_force, nil))
-      assert payload["duration"] == "DAY"
+    test "a missing or nil :time_in_force is refused, never defaulted to :day" do
+      assert Orders.build(Map.delete(@buy, :time_in_force)) ==
+               {:error, {:missing_field, :time_in_force}}
+
+      assert Orders.build(Map.put(@buy, :time_in_force, nil)) ==
+               {:error, {:missing_field, :time_in_force}}
     end
 
     test "the four durations the venue does serve all map" do
@@ -258,28 +306,103 @@ defmodule DpExchange.Schwab.OrdersTest do
       assert [%{"quantity" => 0.5}] = payload["orderLegCollection"]
     end
 
-    test "zero, negative and non-numeric quantities are refused, each by name" do
-      for bad <- [0, -1, "15"] do
+    test "a numeric string is read as the number it spells" do
+      assert {:ok, payload} = Orders.build(%{@buy | quantity: "15"})
+      assert [%{"quantity" => 15.0}] = payload["orderLegCollection"]
+
+      assert {:ok, payload} = Orders.build(%{@buy | quantity: " 0.25 "})
+      assert [%{"quantity" => 0.25}] = payload["orderLegCollection"]
+    end
+
+    test "zero, negative, non-numeric and float quantities are refused, each by name" do
+      for bad <- [0, -1, "abc", "0", "-3", "", 1.5, 15.0, :many, %{}] do
         assert Orders.build(%{@buy | quantity: bad}) == {:error, {:invalid_quantity, bad}}
       end
 
       # Absent is a different fact from unreadable, and is named differently.
-      assert Orders.build(%{@buy | quantity: nil}) == {:error, {:missing_order_field, :quantity}}
+      assert Orders.build(%{@buy | quantity: nil}) == {:error, {:missing_field, :quantity}}
     end
   end
 
   describe "missing pieces are named" do
     test "no symbol, no side" do
-      assert Orders.build(%{side: :buy, quantity: 1}) ==
-               {:error, {:missing_order_field, :symbol}}
+      assert Orders.build(Map.delete(@buy, :symbol)) == {:error, {:invalid_symbol, nil}}
+      assert Orders.build(%{@buy | symbol: "  "}) == {:error, {:invalid_symbol, "  "}}
+      assert Orders.build(%{@buy | symbol: :aapl}) == {:error, {:invalid_symbol, :aapl}}
 
-      assert Orders.build(%{symbol: "AAPL", quantity: 1}) ==
-               {:error, {:missing_order_field, :side}}
+      assert Orders.build(Map.delete(@buy, :side)) == {:error, {:missing_field, :side}}
+    end
+
+    test "no order type is refused, with or without a price - never a market order" do
+      assert Orders.build(Map.delete(@buy, :order_type)) ==
+               {:error, {:missing_field, :order_type}}
+
+      assert Orders.build(%{@buy | order_type: nil}) ==
+               {:error, {:missing_field, :order_type}}
+
+      assert Orders.build(@buy |> Map.delete(:order_type) |> Map.put(:price, 150)) ==
+               {:error, {:missing_field, :order_type}}
     end
 
     test "a pair-shaped symbol is refused here too" do
       assert {:error, {:not_an_equity_symbol, "BTC-USD"}} =
                Orders.build(%{@buy | symbol: "BTC-USD"})
+    end
+  end
+
+  describe "the side" do
+    test "buy and sell are accepted as atoms and as text in any case" do
+      for {side, instruction} <- [
+            {:buy, "BUY"},
+            {:sell, "SELL"},
+            {"buy", "BUY"},
+            {"SELL", "SELL"},
+            {"Buy", "BUY"}
+          ] do
+        assert {:ok, payload} = Orders.build(%{@buy | side: side})
+        assert [%{"instruction" => ^instruction}] = payload["orderLegCollection"]
+      end
+    end
+
+    test "anything else is {:invalid_side, value}" do
+      for bad <- [:hold, :short, "hold", "", 1, %{}] do
+        assert Orders.build(%{@buy | side: bad}) == {:error, {:invalid_side, bad}}
+      end
+    end
+
+    test "a text side that conflicts with an explicit instruction is still refused" do
+      request = Map.merge(@buy, %{side: "sell", instruction: "BUY"})
+
+      assert {:error, {:conflicting_order_fields, instruction: "BUY", side: :sell}} =
+               Orders.build(request)
+    end
+  end
+
+  describe "request keys the builder does not read" do
+    test "any other key is {:unsupported_order_field, key}, client_order_id included" do
+      assert Orders.build(Map.put(@buy, :client_order_id, "abc")) ==
+               {:error, {:unsupported_order_field, :client_order_id}}
+
+      assert Orders.build(Map.put(@buy, :bogus, 1)) ==
+               {:error, {:unsupported_order_field, :bogus}}
+
+      assert Orders.build(Map.put(@buy, "symbol", "MSFT")) ==
+               {:error, {:unsupported_order_field, "symbol"}}
+    end
+
+    test "the first offender in key order is the one named" do
+      request = Map.merge(@buy, %{zeta: 1, alpha: 2})
+
+      assert Orders.build(request) == {:error, {:unsupported_order_field, :alpha}}
+    end
+
+    test "an unknown key holding nil is a forwarded unset option and counts as absent" do
+      assert {:ok, _payload} = Orders.build(Map.put(@buy, :client_order_id, nil))
+    end
+
+    test "keys are checked before anything else is" do
+      assert Orders.build(%{client_order_id: "x"}) ==
+               {:error, {:unsupported_order_field, :client_order_id}}
     end
   end
 
@@ -358,7 +481,9 @@ defmodule DpExchange.Schwab.OrdersTest do
         symbol: "AAPL  260320C00200000",
         side: :buy,
         quantity: 1,
-        instruction: "BUY_TO_OPEN"
+        instruction: "BUY_TO_OPEN",
+        order_type: :market,
+        time_in_force: :day
       }
 
       assert {:ok, built} = Orders.build(request)
@@ -378,13 +503,6 @@ defmodule DpExchange.Schwab.OrdersTest do
   end
 
   describe "fields the caller must state" do
-    test "a missing order_type beside a price is refused, not sent as a market order" do
-      # Defaulted to `:market`, a forgotten field became an order at any price, with the
-      # caller's `:price` ignored.
-      request = %{symbol: "AAPL", side: :buy, quantity: 15, price: 150}
-      assert {:error, {:missing_order_field, :order_type}} = Orders.build(request)
-    end
-
     test "an instruction that contradicts the side is refused" do
       request = Map.merge(@buy, %{side: :sell, instruction: "BUY"})
 
@@ -432,18 +550,56 @@ defmodule DpExchange.Schwab.OrdersTest do
       bad = Decimal.new("NaN")
       request = Map.merge(@buy, %{order_type: :limit, price: bad})
 
-      assert {:error, {:invalid_order_field, :price, ^bad}} = Orders.build(request)
+      assert {:error, {:invalid_price, ^bad}} = Orders.build(request)
 
       inf = Decimal.new("Infinity")
       request = Map.merge(@buy, %{order_type: :stop, stop_price: inf})
-      assert {:error, {:invalid_order_field, :stop_price, ^inf}} = Orders.build(request)
+      assert {:error, {:invalid_stop_price, ^inf}} = Orders.build(request)
     end
 
-    test "a very small float price is plain notation, not 1.0e-4" do
+    test "a float price is refused rather than sent with whatever digits it kept" do
       request = @buy |> Map.put(:order_type, :limit) |> Map.put(:price, 0.0001)
 
+      assert Orders.build(request) == {:error, {:invalid_price, 0.0001}}
+    end
+  end
+
+  describe "check_order_id/1" do
+    test "a non-blank string without surrounding whitespace is usable" do
+      assert Orders.check_order_id("1005439821") == :ok
+    end
+
+    test "nil, a non-string, a blank and a padded string are {:invalid_order_id, value}" do
+      for bad <- [nil, 1005, :id, "", "   ", " 12", "12 ", "12\n", %{}] do
+        assert Orders.check_order_id(bad) == {:error, {:invalid_order_id, bad}}
+      end
+    end
+  end
+
+  describe "accepted/2" do
+    test "the order a placement named, read from the payload that was sent" do
+      request =
+        Map.merge(@buy, %{
+          symbol: "MSFT",
+          side: "sell",
+          order_type: :limit,
+          time_in_force: :gtc,
+          price: "190.25",
+          quantity: "2"
+        })
+
       assert {:ok, payload} = Orders.build(request)
-      assert payload["price"] == "0.0001"
+
+      assert {:ok, %Order{} = order} = Orders.accepted("77", payload)
+      assert order.id == "77"
+      assert order.symbol == "MSFT"
+      assert order.side == :sell
+      assert order.order_type == :limit
+      assert order.time_in_force == :gtc
+      assert Decimal.equal?(order.quantity, 2)
+      assert Decimal.equal?(order.price, Decimal.new("190.25"))
+      assert order.status == :pending
+      assert order.provider == :schwab
     end
   end
 end

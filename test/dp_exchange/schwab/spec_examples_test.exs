@@ -519,7 +519,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       body = fixture!("accounts_and_trading/account_summaries_schema.json")
       opts = [credentials: @creds, plug: capturing(body), retry_attempts: 0]
 
-      assert {:error, {:account_number_required, 2}} = Schwab.get_positions(opts)
+      assert {:error, {:missing_option, :account_number}} = Schwab.get_positions(opts)
       assert {:ok, []} = Schwab.get_positions(opts ++ [account_number: "70998877"])
 
       assert {:refused, {:account_not_found, "1"}} =
@@ -643,7 +643,13 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
     test "place_order/3 builds exactly the vendor's documented body and reads the id from Location" do
       expected = fixture!("accounts_and_trading/place_order_request_buy_market_stock.json")
 
-      request = %{symbol: "XYZ", side: :buy, quantity: 15, order_type: :market}
+      request = %{
+        symbol: "XYZ",
+        side: :buy,
+        quantity: 15,
+        order_type: :market,
+        time_in_force: :day
+      }
 
       plug =
         capturing_body(201, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000001"}])
@@ -674,13 +680,17 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
         instruction: "BUY_TO_OPEN",
         quantity: 10,
         order_type: :limit,
+        time_in_force: :day,
         price: "6.45"
       }
 
       plug =
         capturing_body(200, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000002"}])
 
-      assert {:ok, %DpExchange.Core.Types.Order{id: "1000000002"}} =
+      # The venue applied the replacement; this plug cannot answer the read-back (it decodes
+      # a JSON body a GET does not have), so the answer says the replacement is live and
+      # unread - it does not build an `Order` from the request.
+      assert {:error, {:replace_accepted_unread, "1000000002", _reason}} =
                Schwab.replace_order(@creds, "1000000001", request,
                  account_hash: "H",
                  plug: plug,
@@ -712,6 +722,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
         instruction: "BUY_TO_OPEN",
         quantity: 10,
         order_type: :limit,
+        time_in_force: :day,
         price: "6.45"
       }
 

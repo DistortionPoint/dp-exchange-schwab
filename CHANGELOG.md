@@ -31,6 +31,66 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+Family trading conventions (T1-T12). Every answer below is the same on the facade, `Rest` and
+`DpExchange.Schwab.Fake`.
+
+- **BREAKING: an unproven order write is `{:error, {:order_unconfirmed, nil, reason}}`.**
+  `place_order/3` and `replace_order/4` send once; a timeout or transport failure after the
+  request left, or a 5xx, used to be a bare `{:error, reason}` (or
+  `{:error, {:exchange_error, :schwab, "HTTP 5xx"}}`) that a caller read as "worth retrying",
+  and a `201`/`2xx` with no `Location` was `{:error, :order_id_not_returned}`, also on a
+  replacement the venue had already applied. All are now `:order_unconfirmed` (the `nil` is the
+  client order id, which Schwab has no field for; `reason` is bounded). Our own limiter
+  refusing, the venue's 429, validation, a missing option or credential stay plain
+  `{:error, _}`; a venue 4xx stays `{:refused, _}`.
+- **BREAKING: no defaults on an order.** A request without `:order_type` is
+  `{:error, {:missing_field, :order_type}}` (it was a MARKET order when it carried no price) and
+  one without `:time_in_force` is `{:error, {:missing_field, :time_in_force}}` (it was `:day`).
+- **BREAKING: unread request keys are refused.** `client_order_id` (silently ignored: Schwab has
+  no idempotency key) and any other key the builder does not read are
+  `{:error, {:unsupported_order_field, key}}`. A key holding `nil` counts as absent.
+- **BREAKING: preview rejections are refusals.** `preview_order/3` with a non-empty
+  `orderValidationResult.rejects` is `{:refused, {:preview_rejected, rejects}}` (it was
+  `{:ok, body}`); a non-object preview body is `{:error, :unexpected_response_shape}`.
+  `Fake.preview_order/3` rejects an option order for a fractional number of contracts in that
+  shape (the rule name is the fake's own, not the venue's), where it always answered
+  `rejects: []`.
+- **BREAKING: request validation tags and order.** Order: request is a map, unknown keys,
+  symbol, side, order type, time-in-force, quantity, prices, then `opts[:account_hash]`, the
+  order ceiling and the credential (the ceiling used to be checked before the order was built).
+  `{:missing_order_field, f}` is `{:missing_field, f}`; a non-buy/sell side is
+  `{:invalid_side, v}` (was `{:invalid_instruction, v}`); a missing or blank symbol is
+  `{:invalid_symbol, v}` (was `{:missing_order_field, :symbol}` / `{:empty_symbol, v}`);
+  `{:price_not_allowed, t}`, `{:stop_price_not_allowed, t}` and
+  `{:trailing_field_not_allowed, k, t}` are all `{:unexpected_field, key}`; a bad `:price` /
+  `:stop_price` is `{:invalid_price, v}` / `{:invalid_stop_price, v}` (was
+  `{:invalid_order_field, key, v}`, and `{:invalid_price, v}` for both).
+- **Accepted now:** `side: "buy"` / `"sell"` in any case (was `{:invalid_instruction, "buy"}`)
+  and a numeric-string `:quantity` such as `"1"` (was `{:invalid_quantity, "1"}`).
+- **BREAKING: floats are refused** for `:quantity`, `:price`, `:stop_price` and
+  `:stop_price_offset` (`{:invalid_quantity, v}` etc.): a float has lost digits, and one was
+  sent as a JSON float. Pass a Decimal, an integer or a numeric string.
+- **BREAKING: order ids.** `get_order/3`, `cancel_order/3` and `replace_order/4` answer
+  `{:error, {:invalid_order_id, v}}` first (before the account option, the order ceiling and
+  the credential) for `nil`, a non-string, a blank or a padded string. A blank id used to be
+  sent, an integer accepted, and `nil` answered `{:invalid_path_segment, :schwab}` after the
+  account and ceiling checks. `Rest.check_path_segment/1` is removed (`Orders.check_order_id/1`
+  replaces it).
+- **BREAKING: a replacement whose read-back failed** is
+  `{:error, {:replace_accepted_unread, new_id, reason}}`, where it was
+  `{:ok, %Order{status: :pending}}` built from the request. A placement whose read-back failed
+  still answers `{:ok, %Order{status: :pending}}`, now built from the validated payload (the
+  normalised side, symbol and type) rather than the caller's raw request.
+- **BREAKING: a missing option is `{:error, {:missing_option, key}}`.**
+  `{:missing_account_hash, :schwab}` is `{:missing_option, :account_hash}` on every account
+  endpoint (facade and Fake); `get_positions/1` with several accounts and no `:account_number`
+  is `{:missing_option, :account_number}` (was `{:account_number_required, n}`).
+- **BREAKING: a missing order is `{:refused, :not_found}`.** `get_order/3`, `cancel_order/3` and
+  `replace_order/4` answer it for a 404 (was `{:refused, {:venue_error, 404}}`); the Fake for an
+  id it never issued.
+
 ## [0.2.114] - 2026-10-11
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

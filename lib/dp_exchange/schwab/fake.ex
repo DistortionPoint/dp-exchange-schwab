@@ -369,13 +369,14 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_place_order(credentials, request, opts) do
-    # The real order (`Schwab.place_order/3`): account hash, then the order's own shape, then
-    # the credential, which the real path only looks at when it signs the request.
-    with {:ok, _hash} <- require_account(opts),
+    # The real order (`Schwab.place_order/3`): the order's own shape, then the account hash,
+    # the order ceiling, and the credential, which the real path only looks at when it signs
+    # the request. The refusals of `Orders.build/2` are the real ones, from the real module — a
+    # fake that accepted an order the venue publishes as invalid would green-light code that
+    # cannot work.
+    with {:ok, payload} <- Orders.build(request, opts),
+         {:ok, _hash} <- require_account(opts),
          :ok <- OrderLimit.ensure_declared(opts),
-         # The real refusals, from the real module — a fake that accepted an order the
-         # venue publishes as invalid would green-light code that cannot work.
-         {:ok, payload} <- Orders.build(request, opts),
          :ok <- require_credentials(credentials: credentials) do
       # The read-back `Order`, as the real facade returns since 2026-10-10, not the bare id.
       # Of the order that was placed: its symbol, instruction, size and price, and the
@@ -417,22 +418,15 @@ defmodule DpExchange.Schwab.Fake do
   defp remember_body(id, body), do: Process.put(@orders_key, Map.put(placed_bodies(), id, body))
 
   # An order this process placed, else the one canned (filled, historical) order. Anything
-  # else is an id the fake never issued: the venue's 404, `{:refused, {:venue_error, 404}}`
-  # from `Rest.refusal/2` for a status with no readable detail. Every id used to read back
-  # as a filled AAPL buy.
+  # else is an id the fake never issued: the venue's 404, which the facade answers as
+  # `{:refused, :not_found}`. Every id used to read back as a filled AAPL buy.
   defp find_body(order_id) do
-    key = order_key(order_id)
-
-    case Map.fetch(placed_bodies(), key) do
+    case Map.fetch(placed_bodies(), order_id) do
       {:ok, _body} = found -> found
-      :error when key == @order_id -> {:ok, fake_order_body(@order_id)}
-      :error -> {:refused, {:venue_error, 404}}
+      :error when order_id == @order_id -> {:ok, fake_order_body(@order_id)}
+      :error -> {:refused, :not_found}
     end
   end
-
-  # `Rest` puts an integer id into the path as its digits, so the fake reads it the same way.
-  defp order_key(order_id) when is_integer(order_id), do: Integer.to_string(order_id)
-  defp order_key(order_id), do: order_id
 
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
@@ -446,15 +440,38 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_preview_order(credentials, request, opts) do
-    with {:ok, _hash} <- require_account(opts),
-         {:ok, _payload} <- Orders.build(request, opts),
+    with {:ok, payload} <- Orders.build(request, opts),
+         {:ok, _hash} <- require_account(opts),
          :ok <- require_credentials(credentials: credentials) do
-      {:ok,
-       %{
-         "orderStrategy" => %{"orderType" => "MARKET"},
-         "orderValidationResult" => %{"rejects" => []},
-         "commissionAndFee" => %{"commission" => %{}}
-       }}
+      # Answered through the real `Rest.preview_outcome/1`, so a rejection has the shape the
+      # facade gives it: `{:refused, {:preview_rejected, rejects}}`.
+      Rest.preview_outcome(%{
+        "orderStrategy" => %{"orderType" => payload["orderType"]},
+        "orderValidationResult" => %{"rejects" => preview_rejects(payload)},
+        "commissionAndFee" => %{"commission" => %{}}
+      })
+    end
+  end
+
+  # The one rejection this package can know without the venue: an option contract is
+  # indivisible, so an option order for a fractional quantity is rejected. The rule name and
+  # wording are this fake's own (the venue's are unmeasured: no credential is held); the
+  # detail has the documented `OrderValidationDetail` fields. A consumer wanting other
+  # rejections queues one through `DpExchange.Core.FakeInjection`.
+  defp preview_rejects(%{"orderLegCollection" => [%{"quantity" => quantity} = leg | _rest]}) do
+    option? = get_in(leg, ["instrument", "assetType"]) == "OPTION"
+
+    if option? and quantity != trunc(quantity) do
+      [
+        %{
+          "validationRuleName" => "FAKE_OPTION_QUANTITY_NOT_WHOLE",
+          "message" => "Option orders must be for a whole number of contracts",
+          "activityMessage" => "Option orders must be for a whole number of contracts",
+          "originalSeverity" => "REJECT"
+        }
+      ]
+    else
+      []
     end
   end
 
@@ -464,10 +481,10 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_replace_order(credentials, order_id, request, opts) do
-    with {:ok, _hash} <- require_account(opts),
-         :ok <- OrderLimit.ensure_declared(opts),
-         :ok <- Rest.check_path_segment(order_id),
+    with :ok <- Orders.check_order_id(order_id),
          {:ok, payload} <- Orders.build(request, opts),
+         {:ok, _hash} <- require_account(opts),
+         :ok <- OrderLimit.ensure_declared(opts),
          :ok <- require_credentials(credentials: credentials),
          {:ok, old} <- find_body(order_id),
          :ok <- require_working(old) do
@@ -476,7 +493,7 @@ defmodule DpExchange.Schwab.Fake do
       # old one is `REPLACED`, which the decode reads as no status at all, and no longer
       # cancellable; the new one is the working order the request describes.
       id = next_order_id()
-      remember_body(order_key(order_id), %{old | "status" => "REPLACED"})
+      remember_body(order_id, %{old | "status" => "REPLACED"})
       remember_body(id, working_body(id, payload))
       do_get_order(credentials, id, opts)
     end
@@ -488,13 +505,13 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_cancel_order(credentials, order_id, opts) do
-    with {:ok, _hash} <- require_account(opts),
+    with :ok <- Orders.check_order_id(order_id),
+         {:ok, _hash} <- require_account(opts),
          :ok <- OrderLimit.ensure_declared(opts),
-         :ok <- Rest.check_path_segment(order_id),
          :ok <- require_credentials(credentials: credentials),
          {:ok, body} <- find_body(order_id),
          :ok <- require_working(body) do
-      remember_body(order_key(order_id), %{body | "status" => "CANCELED"})
+      remember_body(order_id, %{body | "status" => "CANCELED"})
       {:ok, :cancelled}
     end
   end
@@ -511,8 +528,8 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   defp do_get_order(credentials, order_id, opts) do
-    with {:ok, _hash} <- require_account(opts),
-         :ok <- Rest.check_path_segment(order_id),
+    with :ok <- Orders.check_order_id(order_id),
+         {:ok, _hash} <- require_account(opts),
          :ok <- require_credentials(credentials: credentials) do
       # Decoded through the same `Orders.from_venue/1` the real facade uses, from a body in
       # the venue's own shape — so the fake cannot drift from the real decode. It returned the
@@ -903,7 +920,7 @@ defmodule DpExchange.Schwab.Fake do
   defp require_account(opts) do
     case Keyword.get(opts, :account_hash) do
       hash when is_binary(hash) and hash != "" -> {:ok, hash}
-      _absent -> {:error, {:missing_account_hash, :schwab}}
+      _absent -> {:error, {:missing_option, :account_hash}}
     end
   end
 
@@ -1143,7 +1160,7 @@ defmodule DpExchange.Schwab.Fake do
     # module that sends the request, so the two cannot drift), and the credential last, as the
     # real path only looks at it when it signs. `require_account/1` rather than a second
     # spelling of the same check: this is the identical condition every other account
-    # endpoint reports as `{:missing_account_hash, :schwab}`, and a consumer handling
+    # endpoint reports as `{:missing_option, :account_hash}`, and a consumer handling
     # "you forgot the account hash" uniformly cannot do it against two different atoms.
     with {:ok, _hash} <- require_account(opts),
          :ok <- Rest.check_transactions(opts),

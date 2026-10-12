@@ -301,8 +301,9 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
     test "a 5xx on the trading endpoints is an error, not a refusal" do
       # Both are order writes and meter against `:schwab_orders`, not `:schwab` — see
-      # `Rest.order_write_request_opts/1`.
-      assert {:error, {:exchange_error, :schwab_orders, _msg}} =
+      # `Rest.order_write_request_opts/1`. A placement that met a 5xx may have taken effect, so
+      # it is unconfirmed rather than an error worth retrying; a cancel is a plain error.
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab_orders, _msg}}} =
                Rest.place_order(@creds, "H", %{}, opts(responding(%{}, 500)))
 
       assert {:error, {:exchange_error, :schwab_orders, _msg}} =
@@ -424,6 +425,15 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     end
   end
 
+  # Order type and time-in-force are required of every order: nothing is defaulted.
+  @buy_request %{
+    symbol: "AAPL",
+    side: :buy,
+    quantity: 1,
+    order_type: :market,
+    time_in_force: :day
+  }
+
   describe "order placement edge cases" do
     test "a 4xx that is not a rejection of the credential is still a refusal" do
       assert {:refused, {:venue_error, 404}} =
@@ -438,7 +448,10 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     test "a transport failure surfaces rather than being swallowed" do
       plug = fn _conn -> raise "boom" end
 
-      assert {:error, _reason} = Rest.place_order(@creds, "H", %{}, opts(plug))
+      # A write that may have been sent is unconfirmed; a cancel stays a plain error.
+      assert {:error, {:order_unconfirmed, nil, _reason}} =
+               Rest.place_order(@creds, "H", %{}, opts(plug))
+
       assert {:error, _reason} = Rest.cancel_order(@creds, "H", "1", opts(plug))
     end
   end
@@ -587,7 +600,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
         |> Plug.Conn.resp(201, "")
       end
 
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy_request
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, request, [account_hash: "H"] ++ opts(plug))
@@ -595,7 +608,9 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
     test "preview and replace route through Orders, so both refuse an invalid order" do
       exploding = fn _conn -> raise "an order the venue publishes as invalid was sent" end
-      bad = %{symbol: "AAPL", instruction: "BUY_TO_OPEN", quantity: 1}
+
+      bad =
+        @buy_request |> Map.delete(:side) |> Map.put(:instruction, "BUY_TO_OPEN")
 
       assert {:error, {:instruction_not_valid_for_asset, "BUY_TO_OPEN", "EQUITY"}} =
                Schwab.preview_order(@creds, bad, account_hash: "H", plug: exploding)
@@ -605,17 +620,17 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     end
 
     test "both require an account hash, like every other account-scoped call" do
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy_request
 
       assert Schwab.preview_order(@creds, request) ==
-               {:error, {:missing_account_hash, :schwab}}
+               {:error, {:missing_option, :account_hash}}
 
       assert Schwab.replace_order(@creds, "1", request) ==
-               {:error, {:missing_account_hash, :schwab}}
+               {:error, {:missing_option, :account_hash}}
     end
 
     test "both reach Rest when the request is good" do
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy_request
       base = [account_hash: "H"]
 
       assert {:ok, %{"orderValidationResult" => _r}} =
@@ -626,9 +641,13 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                )
 
       plug = fn conn ->
-        conn
-        |> Plug.Conn.put_resp_header("location", "/orders/9")
-        |> Plug.Conn.resp(201, "")
+        if conn.method == "GET" do
+          Req.Test.json(conn, %{"orderId" => 9})
+        else
+          conn
+          |> Plug.Conn.put_resp_header("location", "/orders/9")
+          |> Plug.Conn.resp(201, "")
+        end
       end
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "9"}} =
@@ -646,7 +665,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
         Req.Test.json(conn, %{"orderValidationResult" => %{}})
       end
 
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @buy_request
 
       assert {:ok, _preview} =
                Schwab.preview_order(@creds, request, [account_hash: "H"] ++ opts(capture))
@@ -664,7 +683,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     test "an invalid order never reaches the venue" do
       exploding = fn _conn -> raise "an order the venue publishes as invalid was sent" end
 
-      request = %{symbol: "AAPL", instruction: "BUY_TO_OPEN", quantity: 1}
+      request = @buy_request |> Map.delete(:side) |> Map.put(:instruction, "BUY_TO_OPEN")
 
       assert {:error, {:instruction_not_valid_for_asset, "BUY_TO_OPEN", "EQUITY"}} =
                Schwab.place_order(@creds, request, account_hash: "H", plug: exploding)

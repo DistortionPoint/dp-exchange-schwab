@@ -907,7 +907,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       # The account hash, then the venue's own three, then the credential — matching the
       # order the facade and `Rest` check them in (the credential is looked at when the
       # request is signed, which is last).
-      assert {:error, {:missing_account_hash, :schwab}} = Fake.get_transactions(@creds)
+      assert {:error, {:missing_option, :account_hash}} = Fake.get_transactions(@creds)
 
       assert {:error, {:from_and_to_required, :schwab}} =
                Fake.get_transactions(@creds, account_hash: "h")
@@ -968,7 +968,7 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
 
       assert {:ok, []} = DpExchange.Schwab.get_positions(base ++ [plug: responding([])])
 
-      assert {:error, {:missing_account_hash, :schwab}} =
+      assert {:error, {:missing_option, :account_hash}} =
                DpExchange.Schwab.get_transactions(@creds, [])
 
       assert {:ok, []} =

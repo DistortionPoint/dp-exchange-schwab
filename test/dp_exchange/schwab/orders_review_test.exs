@@ -31,7 +31,7 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
   end
 
   @creds %{access_token: "at-1"}
-  @buy %{symbol: "AAPL", side: :buy, quantity: 15}
+  @buy %{symbol: "AAPL", side: :buy, quantity: 15, order_type: :market, time_in_force: :day}
 
   defp no_tree_opts do
     [
@@ -66,14 +66,15 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
 
       for value <- zeroes do
         refused = {:error, {:invalid_price, value}}
+        refused_stop = {:error, {:invalid_stop_price, value}}
 
         assert Orders.build(Map.merge(@buy, %{order_type: :limit, price: value})) == refused
 
         assert Orders.build(Map.merge(@buy, %{order_type: :stop, stop_price: value})) ==
-                 refused
+                 refused_stop
 
         stop_limit = Map.merge(@buy, %{order_type: :stop_limit, price: 5, stop_price: value})
-        assert Orders.build(stop_limit) == refused
+        assert Orders.build(stop_limit) == refused_stop
 
         stop_limit = Map.merge(@buy, %{order_type: :stop_limit, price: value, stop_price: 5})
         assert Orders.build(stop_limit) == refused
@@ -147,14 +148,15 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
 
   describe "the facade's order calls" do
     test "replace_order/4 checks the order id before it builds the request" do
-      refused = {:error, {:invalid_path_segment, :schwab}}
       exploding = fn _conn -> raise "a request with an unusable order id was sent" end
       opts = no_tree_opts() ++ [plug: exploding]
 
       # Wrong in both ways: the same answer as `Fake.replace_order/4`, which checks the id first.
       broken_request = %{symbol: "AAPL"}
 
-      for bad <- ["", :nope, nil] do
+      for bad <- ["", "  ", :nope, nil, 12, " 12"] do
+        refused = {:error, {:invalid_order_id, bad}}
+
         assert Schwab.replace_order(@creds, bad, broken_request, opts) == refused
 
         assert Fake.replace_order(@creds, bad, broken_request, account_hash: "H") == refused
@@ -162,11 +164,13 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
     end
 
     test "replace_order/4 still names the request when the id is usable" do
-      assert Schwab.replace_order(@creds, "1", %{symbol: "AAPL"}, no_tree_opts()) ==
-               {:error, {:missing_order_field, :quantity}}
+      no_quantity = Map.delete(@buy, :quantity)
 
-      assert Fake.replace_order(@creds, "1", %{symbol: "AAPL"}, account_hash: "H") ==
-               {:error, {:missing_order_field, :quantity}}
+      assert Schwab.replace_order(@creds, "1", no_quantity, no_tree_opts()) ==
+               {:error, {:missing_field, :quantity}}
+
+      assert Fake.replace_order(@creds, "1", no_quantity, account_hash: "H") ==
+               {:error, {:missing_field, :quantity}}
     end
 
     test "a placed order whose read-back fails carries a text price as a Decimal" do
@@ -183,15 +187,23 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
       assert Decimal.equal?(quantity, 15)
     end
 
-    test "a placed market order with an explicit nil type reads back as a market order" do
+    test "a placed order whose read-back fails carries the normalised side" do
       plug = fn conn ->
         conn |> Plug.Conn.put_resp_header("location", "/orders/7") |> Plug.Conn.resp(201, "")
       end
 
+      request = Map.put(@buy, :side, "SELL")
+
+      assert {:ok, %Order{id: "7", side: :sell, order_type: :market, status: :pending}} =
+               Schwab.place_order(@creds, request, no_tree_opts() ++ [plug: plug])
+    end
+
+    test "a nil order type is refused before anything is sent, never read as a market order" do
+      exploding = fn _conn -> raise "a request with no order type was sent" end
+      opts = no_tree_opts() ++ [plug: exploding]
       request = Map.put(@buy, :order_type, nil)
 
-      assert {:ok, %Order{order_type: :market}} =
-               Schwab.place_order(@creds, request, no_tree_opts() ++ [plug: plug])
+      assert Schwab.place_order(@creds, request, opts) == {:error, {:missing_field, :order_type}}
     end
   end
 

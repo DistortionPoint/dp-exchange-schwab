@@ -18,6 +18,9 @@ defmodule DpExchange.SchwabTest do
 
   @creds %{access_token: "at-1"}
 
+  # Order type and time-in-force are required of every order: nothing is defaulted.
+  @market_buy %{symbol: "AAPL", side: :buy, quantity: 1, order_type: :market, time_in_force: :day}
+
   describe "identity" do
     test "the venue names itself the same way everywhere" do
       assert Schwab.provider_name() == "Schwab"
@@ -51,12 +54,14 @@ defmodule DpExchange.SchwabTest do
       # caller did not choose.
       for call <- [
             fn -> Schwab.get_balances(@creds) end,
-            fn -> Schwab.place_order(@creds, %{symbol: "AAPL", side: :buy, quantity: 1}) end,
+            fn -> Schwab.place_order(@creds, @market_buy) end,
+            fn -> Schwab.preview_order(@creds, @market_buy) end,
+            fn -> Schwab.replace_order(@creds, "1", @market_buy) end,
             fn -> Schwab.cancel_order(@creds, "1") end,
             fn -> Schwab.get_order(@creds, "1") end,
             fn -> Schwab.get_orders(@creds) end
           ] do
-        assert call.() == {:error, {:missing_account_hash, :schwab}}
+        assert call.() == {:error, {:missing_option, :account_hash}}
       end
     end
 
@@ -241,11 +246,38 @@ defmodule DpExchange.SchwabTest do
       :ok
     end
 
-    @order_request %{symbol: "AAPL", side: :buy, quantity: 1}
+    @order_request %{
+      symbol: "AAPL",
+      side: :buy,
+      quantity: 1,
+      order_type: :market,
+      time_in_force: :day
+    }
 
     defp placed_ok_plug do
       fn conn ->
         conn |> Plug.Conn.put_resp_header("location", "/orders/7") |> Plug.Conn.resp(201, "")
+      end
+    end
+
+    # A write answers 201 with the new id; a read answers the working order, so the read-back
+    # after a placement or a replacement succeeds.
+    defp readable_plug do
+      fn conn ->
+        if conn.method == "GET" do
+          Req.Test.json(conn, %{
+            "orderId" => 7,
+            "status" => "WORKING",
+            "orderType" => "MARKET",
+            "duration" => "DAY",
+            "quantity" => 1,
+            "orderLegCollection" => [
+              %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}}
+            ]
+          })
+        else
+          conn |> Plug.Conn.put_resp_header("location", "/orders/7") |> Plug.Conn.resp(201, "")
+        end
       end
     end
 
@@ -284,7 +316,7 @@ defmodule DpExchange.SchwabTest do
 
     test "a tree started WITH :order_limit_per_minute lets every one of the three reach the venue" do
       base = start_order_tree(order_limit_per_minute: 20)
-      call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
+      call_opts = base ++ [plug: readable_plug(), retry_attempts: 0]
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, @order_request, call_opts)
@@ -759,27 +791,33 @@ defmodule DpExchange.SchwabTest do
 
     test "an order the venue publishes as invalid is refused by the fake too" do
       # A fake that accepted it would green-light code that cannot work.
-      request = %{symbol: "AAPL", instruction: "BUY_TO_OPEN", quantity: 1}
+      request = %{
+        symbol: "AAPL",
+        instruction: "BUY_TO_OPEN",
+        quantity: 1,
+        order_type: :market,
+        time_in_force: :day
+      }
 
       assert {:error, {:instruction_not_valid_for_asset, "BUY_TO_OPEN", "EQUITY"}} =
                Fake.place_order(@creds, request, account_hash: "H")
     end
 
     test "a valid order is accepted, and the account hash is still required" do
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @market_buy
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "1005439901", symbol: "AAPL", side: :buy}} =
                Fake.place_order(@creds, request, account_hash: "H")
 
       assert Fake.place_order(@creds, request, []) ==
-               {:error, {:missing_account_hash, :schwab}}
+               {:error, {:missing_option, :account_hash}}
     end
 
     test "accounts, balances, orders and connection all answer" do
       assert {:ok, [%{hash: "9ABCDEF0123456789ABCDEF01234567"}]} = Fake.get_accounts(@creds)
       assert {:ok, [balance]} = Fake.get_balances(@creds, account_hash: "H")
       assert balance.currency == "USD"
-      request = %{symbol: "AAPL", side: :buy, quantity: 1}
+      request = @market_buy
       assert {:ok, placed} = Fake.place_order(@creds, request, account_hash: "H")
       # Was `{:ok, %{"orderId" => "1"}}` — the fake returning the raw venue map, which pinned
       # the same contract violation the real facade had. `Core.Venue.get_order/3` is typed
@@ -922,13 +960,13 @@ defmodule DpExchange.SchwabTest do
       # Each of these is the arity-N-1 head the behaviour's default arguments generate.
       # They are real public API a consumer can reach, and an untested default is a
       # clause nobody has checked.
-      assert Fake.get_balances(@creds) == {:error, {:missing_account_hash, :schwab}}
-      assert Fake.get_orders(@creds) == {:error, {:missing_account_hash, :schwab}}
-      assert Fake.get_order(@creds, "1") == {:error, {:missing_account_hash, :schwab}}
-      assert Fake.cancel_order(@creds, "1") == {:error, {:missing_account_hash, :schwab}}
+      assert Fake.get_balances(@creds) == {:error, {:missing_option, :account_hash}}
+      assert Fake.get_orders(@creds) == {:error, {:missing_option, :account_hash}}
+      assert Fake.get_order(@creds, "1") == {:error, {:missing_option, :account_hash}}
+      assert Fake.cancel_order(@creds, "1") == {:error, {:missing_option, :account_hash}}
 
-      assert Fake.place_order(@creds, %{symbol: "AAPL", side: :buy, quantity: 1}) ==
-               {:error, {:missing_account_hash, :schwab}}
+      assert Fake.place_order(@creds, @market_buy) ==
+               {:error, {:missing_option, :account_hash}}
 
       assert Fake.get_historical_prices("AAPL", "1d", []) ==
                {:error, {:missing_credentials, :schwab}}

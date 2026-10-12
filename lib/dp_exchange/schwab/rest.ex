@@ -54,8 +54,14 @@ defmodule DpExchange.Schwab.Rest do
   ## Placing an order returns an id from a header, or fails
 
   Schwab answers a placed order with `201` and an **empty body**; the id is in `Location`.
-  A `201` with no `Location` returns `{:error, :order_id_not_returned}` rather than
-  success, because a caller that cannot name the order it just placed cannot cancel it.
+  A `201` with no `Location` returns
+  `{:error, {:order_unconfirmed, nil, :order_id_not_returned}}` rather than success, because
+  a caller that cannot name the order it just placed cannot cancel it - and not a plain
+  error, because the order is live and a retry would duplicate it.
+  The same holds for a timeout, a transport failure or a 5xx on a placement or replacement:
+  the request is sent once and may have been acted on, so it is `:order_unconfirmed` (the
+  `nil` is the client order id, which this venue has no field for). A venue 4xx is a refusal;
+  our own limiter refusing, or the venue's 429, is a plain `{:error, _}` - nothing took effect.
   """
 
   alias DpExchange.Core.{Config, HttpClient}
@@ -1555,7 +1561,9 @@ defmodule DpExchange.Schwab.Rest do
 
   **One account at a time.** `Position` has no account field, so with more than one account
   the caller names which by `:account_number`; without it the call is
-  `{:error, {:account_number_required, n}}` rather than one unattributable list.
+  `{:error, {:missing_option, :account_number}}` rather than one unattributable list. (A
+  credential with exactly one account needs no number, so the refusal can only be known after
+  the accounts are fetched, and the count is not part of it: it was never actionable.)
 
   `liquidation_price` is `nil`: Schwab publishes none per position. **That is not safety** —
   the account's maintenance requirement is in the balances beside it.
@@ -1574,7 +1582,7 @@ defmodule DpExchange.Schwab.Rest do
   # into one list, so AAPL long in one account and short in another read as a hedge, or as
   # double the exposure.
   defp one_account(accounts, nil) when length(accounts) <= 1, do: {:ok, accounts}
-  defp one_account(accounts, nil), do: {:error, {:account_number_required, length(accounts)}}
+  defp one_account(_accounts, nil), do: {:error, {:missing_option, :account_number}}
 
   defp one_account(accounts, number) do
     case Enum.filter(accounts, &account_numbered?(&1, number)) do
@@ -2187,19 +2195,6 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  @doc """
-  Whether `value` can be one path segment: a non-empty string or an integer. Anything else is
-  `{:error, {:invalid_path_segment, :schwab}}`. Public so `DpExchange.Schwab.Fake` refuses an
-  unusable order id in the place `Rest` does, before the credential is looked at.
-  """
-  @spec check_path_segment(term()) :: :ok | {:error, {:invalid_path_segment, :schwab}}
-  def check_path_segment(value) do
-    case path_segment(value) do
-      {:ok, _segment} -> :ok
-      :error -> {:error, {:invalid_path_segment, :schwab}}
-    end
-  end
-
   defp path_segments(values) do
     Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
       case path_segment(value) do
@@ -2408,26 +2403,73 @@ defmodule DpExchange.Schwab.Rest do
 
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:post, url, headers, body, order_write_request_opts(opts)) do
-        # Schwab answers a placed order with 201 and an empty body; the id is in the
-        # Location header. A caller that needs the order must be given the id, so a 201
-        # without one is a failure rather than a success with nothing in it.
-        {:ok, %{status: status} = response} when status in 200..299 ->
-          order_id_from_location(response)
-
-        {:ok, %{status: status, body: response}} when status in [400, 401, 403, 404] ->
-          {:refused, refusal(status, response)}
-
-        {:ok, %{status: status, body: response}} ->
-          {:error,
-           {:exchange_error, :schwab,
-            "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      :post
+      |> HttpClient.request(url, headers, body, order_write_request_opts(opts))
+      |> order_write_outcome(false)
     end
   end
+
+  # **An order write that may have reached the venue and is not proven is
+  # `{:error, {:order_unconfirmed, nil, reason}}`, never a bare error.** The request is sent
+  # exactly once (`order_write_request_opts/1`), so a timeout or a 5xx cannot be told from "the
+  # venue acted and the answer was lost": a caller that read `{:error, _}` as "worth retrying"
+  # retried its way into a second order. The `nil` is the client order id, which this venue has
+  # no field for; the caller reconciles with `get_orders/3`.
+  #
+  # What stays plain: a failure decided before anything left this process (our own limiter
+  # refusing, an unusable account path or credential, a payload that cannot be encoded) never
+  # reaches this function, except the limiter, which is recognised below. A 4xx is the venue
+  # saying it did not act: `{:refused, _}`. A 2xx that names no order is unconfirmed too: the
+  # order is live and this package cannot say which.
+  #
+  # `not_found?` is `replace_order`'s: a 404 on `PUT /orders/{id}` is the order (or account)
+  # not existing, `{:refused, :not_found}`; on a placement it keeps the venue's status.
+  defp order_write_outcome({:ok, %{status: status} = response}, _not_found?)
+       when status in 200..299,
+       do: order_id_from_location(response)
+
+  defp order_write_outcome({:ok, %{status: 404}}, true), do: {:refused, :not_found}
+
+  defp order_write_outcome({:ok, %{status: status, body: response}}, _not_found?)
+       when status in [400, 401, 403, 404],
+       do: {:refused, refusal(status, response)}
+
+  defp order_write_outcome({:ok, %{status: status, body: response}}, _not_found?) do
+    unconfirmed(
+      {:exchange_error, :schwab,
+       "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}
+    )
+  end
+
+  defp order_write_outcome({:error, reason}, _not_found?) do
+    if refused_before_sending?(reason), do: {:error, reason}, else: unconfirmed(reason)
+  end
+
+  defp unconfirmed(reason),
+    do: {:error, {:order_unconfirmed, nil, bounded_reason(reason)}}
+
+  # `Core.HttpClient` answers these when OUR limiter said no, before any request was built,
+  # or when the venue answered 429 (it throttled the write and did not act on it). They are
+  # plain errors, safe to retry: nothing took effect, so there is nothing to reconcile.
+  defp refused_before_sending?({:exchange_error, _provider, reason}),
+    do: refused_before_sending?(reason)
+
+  defp refused_before_sending?(:rate_limit_timeout), do: true
+  defp refused_before_sending?("Rate limiter unavailable"), do: true
+
+  defp refused_before_sending?(reason) when is_binary(reason) do
+    String.starts_with?(reason, "Throttled by our own rate limiter") or
+      String.starts_with?(reason, "Rate limited by the venue")
+  end
+
+  defp refused_before_sending?(_reason), do: false
+
+  defp bounded_reason({:exchange_error, provider, reason}),
+    do: {:exchange_error, provider, bounded_reason(reason)}
+
+  defp bounded_reason(reason) when is_binary(reason), do: Bound.text(reason)
+  defp bounded_reason(reason) when is_atom(reason), do: reason
+  defp bounded_reason(reason), do: Bound.reason(reason)
 
   defp order_id_from_location(response) do
     location =
@@ -2436,12 +2478,14 @@ defmodule DpExchange.Schwab.Rest do
       |> header("location")
 
     # A Location ending in `/` has an empty last segment. `{:ok, ""}` is an order id that
-    # names no order, so it is the same "not returned" as no header.
+    # names no order, so it is the same "not returned" as no header. Either way the venue
+    # said 2xx, so the order (or the replacement) exists and this package cannot name it:
+    # `:order_unconfirmed`, not a plain error a caller would retry into a duplicate.
     with value when is_binary(value) <- location,
          id when id != "" <- value |> String.split("/") |> List.last() do
       {:ok, id}
     else
-      _no_id -> {:error, :order_id_not_returned}
+      _no_id -> unconfirmed(:order_id_not_returned)
     end
   end
 
@@ -2488,10 +2532,37 @@ defmodule DpExchange.Schwab.Rest do
   @spec preview_order(map(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, account_hash, payload, opts) do
-    with {:ok, path} <- account_path(account_hash, ["previewOrder"]) do
-      post_json(credentials, trader_url(opts) <> path, payload, opts)
+    with {:ok, path} <- account_path(account_hash, ["previewOrder"]),
+         {:ok, body} <- post_json(credentials, trader_url(opts) <> path, payload, opts) do
+      preview_outcome(body)
     end
   end
+
+  # **A preview the venue rejects is a refusal, not a success.** `/previewOrder` answers 200
+  # with `orderValidationResult.rejects` listing the rules the order breaks
+  # (`OrderValidationResult`, AT:1534-1568), so an order that would be rejected on placement
+  # used to come back `{:ok, _}`. A caller that checked only the tag went on to place it. The
+  # list is capped and each detail's text bounded before it enters the error tuple.
+  # `alerts`, `warns` and `reviews` are advisory and ride along in the body.
+  #
+  @doc """
+  A decoded `/previewOrder` body as the facade answers it: `{:refused, {:preview_rejected,
+  rejects}}` when `orderValidationResult.rejects` is non-empty, `{:ok, body}` otherwise.
+
+  Public so `DpExchange.Schwab.Fake` answers a preview body through the same function.
+  """
+  @spec preview_outcome(term()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_outcome(%{"orderValidationResult" => %{"rejects" => [_first | _rest] = rejects}}),
+    do: {:refused, {:preview_rejected, rejects |> Enum.take(50) |> Enum.map(&bound_reject/1)}}
+
+  def preview_outcome(%{} = body), do: {:ok, body}
+  def preview_outcome(_other), do: {:error, :unexpected_response_shape}
+
+  defp bound_reject(%{} = detail),
+    do: Map.new(detail, fn {key, value} -> {key, bound_reject(value)} end)
+
+  defp bound_reject(text) when is_binary(text), do: Bound.text(text)
+  defp bound_reject(other), do: other
 
   @doc """
   Replace an open order **atomically**.
@@ -2514,21 +2585,9 @@ defmodule DpExchange.Schwab.Rest do
       headers = [{"Content-Type", "application/json"} | headers]
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:put, url, headers, body, order_write_request_opts(opts)) do
-        {:ok, %{status: status} = response} when status in 200..299 ->
-          order_id_from_location(response)
-
-        {:ok, %{status: status, body: response}} when status in [400, 401, 403, 404] ->
-          {:refused, refusal(status, response)}
-
-        {:ok, %{status: status, body: response}} ->
-          {:error,
-           {:exchange_error, :schwab,
-            "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      :put
+      |> HttpClient.request(url, headers, body, order_write_request_opts(opts))
+      |> order_write_outcome(true)
     end
   end
 
@@ -2567,6 +2626,10 @@ defmodule DpExchange.Schwab.Rest do
         {:ok, %{status: status}} when status in 200..299 ->
           :ok
 
+        # The order (or account) does not exist: a refusal by name, as `get_order/4` answers.
+        {:ok, %{status: 404}} ->
+          {:refused, :not_found}
+
         {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
           {:refused, refusal(status, body)}
 
@@ -2588,9 +2651,15 @@ defmodule DpExchange.Schwab.Rest do
     # `object/1` makes the `{:ok, map()}` in this spec true: a list body used to be returned as
     # sent to callers that read it as one order.
     with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
-         {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
+         {:ok, body} <- order_not_found(get(trader_url(opts) <> path, credentials, opts)),
          do: object(body)
   end
+
+  # `GET /orders/{id}` on an order that does not exist: `{:refused, :not_found}` (the family's
+  # one word for it), not the venue's status. Other refusals keep their status and detail.
+  defp order_not_found({:refused, {:venue_error, 404}}), do: {:refused, :not_found}
+  defp order_not_found({:refused, {:venue_error, 404, _detail}}), do: {:refused, :not_found}
+  defp order_not_found(other), do: other
 
   @doc """
   Orders for one account within a window the venue requires.
