@@ -24,14 +24,22 @@ defmodule DpExchange.Schwab.NaNGuardTest do
 
   describe "a NaN or Infinity from the venue is dropped, never admitted as a number" do
     for value <- @poison do
-      test "#{value} in a LEVELONE bid is nil, not a Decimal" do
-        fields = %{bid: unquote(value), ask: "100.5"}
+      test "#{value} in a LEVELONE bid or ask refuses the book, never becomes nil" do
+        # A `nil` side is `TopOfBook`'s "no resting order": an unreadable price must not turn
+        # into that claim (tick R, MD6). Refused by name, whichever side carries it.
+        assert {:error, {:invalid_decimal, :bid, unquote(value)}} =
+                 StreamerDecode.to_top_of_book(
+                   %{bid: unquote(value), ask: "100.5"},
+                   "AAPL",
+                   @observed_at
+                 )
 
-        assert {:ok, top} = StreamerDecode.to_top_of_book(fields, "AAPL", @observed_at)
-        assert top.bid == nil
-        # The rest of the frame is untouched — one poisoned field must not discard a
-        # perfectly good one beside it.
-        assert Decimal.equal?(top.ask, Decimal.new("100.5"))
+        assert {:error, {:invalid_decimal, :ask, unquote(value)}} =
+                 StreamerDecode.to_top_of_book(
+                   %{bid: "99.5", ask: unquote(value)},
+                   "AAPL",
+                   @observed_at
+                 )
       end
     end
 
@@ -59,14 +67,15 @@ defmodule DpExchange.Schwab.NaNGuardTest do
       assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
     end
 
-    test "a poisoned last SIZE does not discard the price beside it" do
+    test "a poisoned total VOLUME does not discard the price beside it" do
       # `:volume` is not enforced on `Core.Types.Quote`, so the same asymmetry applies one
-      # field over: an unreadable size is `nil` and the quote still stands.
-      assert {:ok, quoted} =
-               StreamerDecode.to_quote(%{last: "227.5", last_size: "NaN"}, "AAPL", @observed_at)
+      # field over: an unreadable volume is `nil` and the quote still stands.
+      fields = %{last: "227.5", total_volume: "NaN"}
+      assert {:ok, quoted} = StreamerDecode.to_quote(fields, "AAPL", @observed_at)
 
       assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
       assert quoted.volume == nil
+      assert quoted.volume_window == nil
     end
 
     test "a real number still decodes, so the guard has not eaten the happy path" do

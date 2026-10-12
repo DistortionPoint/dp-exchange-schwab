@@ -60,11 +60,13 @@ defmodule DpExchange.Schwab.Rest do
   error, because the order is live and a retry would duplicate it.
   The same holds for a timeout, a transport failure or a 5xx on a placement or replacement:
   the request is sent once and may have been acted on, so it is `:order_unconfirmed` (the
-  `nil` is the client order id, which this venue has no field for). A venue 4xx is a refusal;
-  our own limiter refusing, or the venue's 429, is a plain `{:error, _}` - nothing took effect.
+  `nil` is the client order id, which this venue has no field for). **Every venue 4xx except
+  429 is a refusal** `{:refused, _}` (409, 415 and 422 included): writes are sent once, so a
+  4xx is always the answer to the first attempt. Our own limiter refusing, or the venue's 429,
+  is a plain `{:error, _}` - nothing took effect.
   """
 
-  alias DpExchange.Core.{Config, HttpClient}
+  alias DpExchange.Core.{Config, HttpClient, Timeframe}
 
   alias DpExchange.Core.Types.{
     Candle,
@@ -263,21 +265,49 @@ defmodule DpExchange.Schwab.Rest do
 
   defp top_of_book(native, row) do
     if book_fields?(row) do
-      {:ok,
-       %TopOfBook{
-         symbol: SymbolFormat.to_canonical_symbol(native),
-         bid: decimal(row["bidPrice"]),
-         ask: decimal(row["askPrice"]),
-         bid_size: decimal(row["bidSize"]),
-         ask_size: decimal(row["askSize"]),
-         venue_time: top_of_book_time(row),
-         observed_at: DateTime.utc_now(),
-         provider: :schwab
-       }}
+      with {:ok, {bid, bid_size}} <- book_side(row, "bidPrice", "bidSize", :bid),
+           {:ok, {ask, ask_size}} <- book_side(row, "askPrice", "askSize", :ask) do
+        {:ok,
+         %TopOfBook{
+           symbol: SymbolFormat.to_canonical_symbol(native),
+           bid: bid,
+           ask: ask,
+           bid_size: bid_size,
+           ask_size: ask_size,
+           venue_time: top_of_book_time(row),
+           observed_at: DateTime.utc_now(),
+           provider: :schwab
+         }}
+      end
     else
       {:error, :no_top_of_book}
     end
   end
+
+  # One side, `{price, size}`. A price of 0 is **no resting order** on that side (`nil` price
+  # and `nil` size), as on the Streamer: a bid of zero is not a bid. An absent price (`null`)
+  # is `nil`. A price that is PRESENT but unreadable - a string that is not a number, an empty
+  # string, NaN, a negative - refuses the whole book as `{:error, {:invalid_decimal, :bid,
+  # value}}`; `nil` there would say "no resting order", a statement about the market that the
+  # venue did not make.
+  defp book_side(row, price_key, size_key, side) do
+    case row[price_key] do
+      nil ->
+        {:ok, {nil, nil}}
+
+      raw ->
+        case decimal(raw) do
+          nil -> {:error, {:invalid_decimal, side, raw}}
+          price -> side_from_price(Decimal.compare(price, 0), price, raw, row[size_key], side)
+        end
+    end
+  end
+
+  defp side_from_price(:gt, price, _raw, size, _side), do: {:ok, {price, decimal(size)}}
+  defp side_from_price(:eq, _price, _raw, _size, _side), do: {:ok, {nil, nil}}
+
+  defp side_from_price(:lt, _price, raw, _size, side),
+    do: {:error, {:invalid_decimal, side, raw}}
 
   # `QuoteMutualFund` never carries `bidPrice` or `askPrice` — not null, absent from the
   # schema entirely, unlike `QuoteEquity`/`QuoteOption`/`QuoteFuture`/`QuoteForex`, which
@@ -342,8 +372,8 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, price} <- required_decimal(row[field], :price) do
       # `totalVolume` is the trading day's cumulative volume, so it is a running total to
       # difference, never one print to sum — dp-exchange-core issue #42. The Streamer's
-      # `Quote` carries the opposite (`last_size`, one print); `volume_window` is what lets a
-      # consumer tell the two apart.
+      # `Quote` now carries the same cumulative figure under the same label (LEVELONE is
+      # conflated, so `last_size` as `:print` was a claim the stream cannot keep).
       volume = decimal(row["totalVolume"])
 
       {:ok,
@@ -467,15 +497,44 @@ defmodule DpExchange.Schwab.Rest do
     `{:invalid_range_bound, key, value}` (and before that was ignored, answering the most
     recent window).
 
+  - `{:error, {:invalid_option, :include_partial, value}}` — `:include_partial` that is not
+    a boolean.
+
   The lookback is measured in whole days rounded up, so ten days and an hour is eleven.
+
+  ## The window
+
+  `:start` is inclusive and `:end` exclusive, on a candle's `opened_at`. **An absent `:end`
+  is now, and `endDate` is always sent.** The venue's own default for an absent `endDate` is
+  "the market close of previous business day" (market-data-production.openapi.json,
+  `QueryParamenddate`), which silently dropped today. The window is also enforced on the
+  decoded bars, so a bar outside it is never returned whatever the venue sent. (Whether the
+  venue's own `endDate` is inclusive is unmeasured; the client-side cut makes it exclusive.)
+  With no `:start`, `period` is sent beside `endDate = now`; that the venue counts `period`
+  back from `endDate` is read from the document, not measured.
+
+  ## The in-progress candle
+
+  A bar is in progress when `opened_at + width > now`. It is never returned unless the
+  caller passes `include_partial: true`, in which case it is returned as-is — the last bar
+  may still change. `Candle` carries no flag for it.
+
+  ## Daily, weekly and monthly times
+
+  The venue stamps these at exchange-local midnight (the document's example, 1451624400000,
+  is 05:00Z). The fact is the session DATE, not that instant, so `opened_at` is 00:00 UTC of
+  the same date. A caller's `:start` is compared with that mapped time.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
+    now = DateTime.utc_now()
+
     with {:ok, native} <- SymbolFormat.validate_read(symbol),
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
          :ok <- check_range(range),
-         {:ok, period} <- fetch_period(timeframe, period_type, range, DateTime.utc_now()) do
+         {:ok, period} <- fetch_period(timeframe, period_type, range, now),
+         {:ok, include_partial} <- fetch_include_partial(opts) do
       params =
         %{
           "symbol" => native,
@@ -487,30 +546,103 @@ defmodule DpExchange.Schwab.Rest do
           # blank `needExtendedHoursData=`.
           "needExtendedHoursData" => Config.opt(opts, :extended_hours, false)
         }
-        |> put_range_or_period(period, range)
+        |> put_range_or_period(period, range, now)
 
       path = "/pricehistory?" <> URI.encode_query(params)
 
-      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
-        candles(body, native, timeframe)
+      with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts),
+           {:ok, bars} <- candles(body, native, timeframe) do
+        {:ok, window_candles(bars, range, now, include_partial)}
       end
     end
   end
 
+  # `:include_partial` is a boolean; a forwarded nil is silence (false).
+  defp fetch_include_partial(opts) do
+    case Config.opt(opts, :include_partial, false) do
+      flag when is_boolean(flag) -> {:ok, flag}
+      other -> {:error, {:invalid_option, :include_partial, other}}
+    end
+  end
+
+  @doc """
+  Cuts `bars` (anything with `:opened_at` and `:timeframe`) to the window and to what has
+  finished: `:start` inclusive, `:end` exclusive (absent: `now`), on `opened_at`, and a bar
+  still forming (`bar_end/2` after `now`) only when `include_partial` is true.
+
+  Public so `DpExchange.Schwab.Fake` cuts its series by the same rule rather than a copy.
+  """
+  @spec window_candles([Candle.t()], keyword(), DateTime.t(), boolean()) :: [Candle.t()]
+  def window_candles(bars, range, now, include_partial) do
+    start = Keyword.get(range, :start)
+    upper = Keyword.get(range, :end) || now
+
+    Enum.filter(bars, fn bar ->
+      (is_nil(start) or DateTime.compare(bar.opened_at, start) != :lt) and
+        DateTime.compare(bar.opened_at, upper) == :lt and
+        (include_partial or DateTime.compare(bar_end(bar.opened_at, bar.timeframe), now) != :gt)
+    end)
+  end
+
+  @doc """
+  The start of the bar of width `timeframe` that contains `at`. Daily, weekly (Monday) and
+  monthly bars start at 00:00 UTC of their session date, as `get_historical_prices/5` maps
+  them.
+  """
+  @spec bar_open(DateTime.t(), String.t()) :: DateTime.t()
+  def bar_open(%DateTime{} = at, "1w") do
+    at |> DateTime.to_date() |> Date.beginning_of_week(:monday) |> midnight()
+  end
+
+  def bar_open(%DateTime{} = at, "1M") do
+    at |> DateTime.to_date() |> Date.beginning_of_month() |> midnight()
+  end
+
+  def bar_open(%DateTime{} = at, timeframe), do: Timeframe.boundary(at, timeframe)
+
+  @doc """
+  The instant the bar opened at `opened_at` closes: `opened_at` plus its width. A weekly bar
+  closes at the next Monday and a monthly one at the first of the next month, whichever day
+  of the period it was stamped on, so a stamp late in the period only ever makes the bar
+  look in progress for longer.
+  """
+  @spec bar_end(DateTime.t(), String.t()) :: DateTime.t()
+  def bar_end(%DateTime{} = opened_at, "1w") do
+    opened_at
+    |> DateTime.to_date()
+    |> Date.beginning_of_week(:monday)
+    |> Date.add(7)
+    |> midnight()
+  end
+
+  def bar_end(%DateTime{} = opened_at, "1M") do
+    date = DateTime.to_date(opened_at)
+    date |> Date.beginning_of_month() |> Date.add(Date.days_in_month(date)) |> midnight()
+  end
+
+  def bar_end(%DateTime{} = opened_at, timeframe) do
+    {:ok, width} = Timeframe.seconds(timeframe)
+    DateTime.add(opened_at, width, :second)
+  end
+
+  defp midnight(%Date{} = date), do: DateTime.new!(date, ~T[00:00:00], "Etc/UTC")
+
   @doc """
   The refusals `get_historical_prices/5` makes before any request, and nothing else: an
-  unsupported width, a range with an end and no start or a start after its end, and a
-  lookback the width cannot reach.
+  unsupported width, a range with an end and no start or a start after its end, a
+  lookback the width cannot reach, and an `:include_partial` that is not a boolean.
 
   Public so `DpExchange.Schwab.Fake` asks the same question in the same order rather than
   keeping a second copy of the rules. `now` is the instant a start-only range is measured
   back from; the real call passes the clock, the fake passes its fixed instant.
   """
-  @spec check_history(String.t(), keyword(), DateTime.t()) :: :ok | {:error, term()}
-  def check_history(timeframe, range, now \\ DateTime.utc_now()) do
+  @spec check_history(String.t(), keyword(), DateTime.t(), keyword()) ::
+          :ok | {:error, term()}
+  def check_history(timeframe, range, now \\ DateTime.utc_now(), opts \\ []) do
     with {:ok, {period_type, _frequency_type, _frequency}} <- fetch_candle(timeframe),
          :ok <- check_range(range),
-         {:ok, _period} <- fetch_period(timeframe, period_type, range, now) do
+         {:ok, _period} <- fetch_period(timeframe, period_type, range, now),
+         {:ok, _include_partial} <- fetch_include_partial(opts) do
       :ok
     end
   end
@@ -527,10 +659,11 @@ defmodule DpExchange.Schwab.Rest do
   # So an explicit `:start` sends `startDate`/`endDate` instead of `period`, never both:
   # the vendor's document does not say what happens if a relative lookback and an absolute
   # window are sent together, and this package does not guess at an interaction it cannot
-  # measure. An `:end` is sent only when the caller gave one; omitted, the venue's own
-  # documented default applies — "the endDate will default to the market close of previous
-  # business day" (MD:2090) — which is the honest reading of "from start until now" a
-  # caller who named no end is asking for.
+  # measure. `endDate` is ALWAYS sent now (tick R): the caller's `:end`, else the current
+  # instant. The venue's documented default for an omitted `endDate` is "the market close of
+  # previous business day" (MD:2090), which silently dropped today from "start until now".
+  # With no `:start` at all, `period` is sent beside that `endDate` (the one place the two
+  # travel together; that `period` counts back from `endDate` is read, not measured).
   #
   # **A range with only `:end` was ignored.** Found 2026-10-10 by reading the path:
   # `put_range_or_period/3` keys on `:start` alone, so `range: [end: ~U[2026-06-05 ...]]`
@@ -579,22 +712,27 @@ defmodule DpExchange.Schwab.Rest do
 
   defp invalid_range(range), do: {:error, {:invalid_range, range}}
 
-  defp put_range_or_period(params, period, range) do
-    case Keyword.get(range, :start) do
-      %DateTime{} = start ->
-        params
-        |> Map.put("startDate", DateTime.to_unix(start, :millisecond))
-        |> put_end_date(Keyword.get(range, :end))
+  # `endDate` is ALWAYS sent: the caller's `:end`, else `now`. Omitted, the venue defaults it
+  # to the previous business day's close and today is silently dropped (MD2).
+  defp put_range_or_period(params, period, range, now) do
+    params =
+      case Keyword.get(range, :start) do
+        %DateTime{} = start ->
+          Map.put(params, "startDate", DateTime.to_unix(start, :millisecond))
 
-      _no_explicit_range ->
-        Map.put(params, "period", period)
-    end
+        _no_explicit_range ->
+          Map.put(params, "period", period)
+      end
+
+    Map.put(params, "endDate", DateTime.to_unix(window_end(range, now), :millisecond))
   end
 
-  defp put_end_date(params, %DateTime{} = finish),
-    do: Map.put(params, "endDate", DateTime.to_unix(finish, :millisecond))
-
-  defp put_end_date(params, _absent), do: params
+  defp window_end(range, now) do
+    case Keyword.get(range, :end) do
+      %DateTime{} = finish -> finish
+      _absent -> now
+    end
+  end
 
   defp fetch_candle(timeframe) do
     case Map.fetch(@candles, timeframe) do
@@ -624,13 +762,12 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # The window actually sent: `startDate` to `endDate`, where an absent `:end` is `now` -
+  # the same instant `put_range_or_period/4` sends.
   defp requested_days(range, now) do
-    case {Keyword.get(range, :start), Keyword.get(range, :end)} do
-      {%DateTime{} = start, %DateTime{} = finish} ->
-        finish |> DateTime.diff(start, :second) |> ceil_days()
-
-      {%DateTime{} = start, nil} ->
-        now |> DateTime.diff(start, :second) |> ceil_days()
+    case Keyword.get(range, :start) do
+      %DateTime{} = start ->
+        range |> window_end(now) |> DateTime.diff(start, :second) |> ceil_days()
 
       _no_range ->
         nil
@@ -702,7 +839,7 @@ defmodule DpExchange.Schwab.Rest do
     # specific refusal this package is built around — and checking prices ahead of it would
     # report `:unexpected_response_shape` for a row whose real problem is that it cannot be
     # placed in time.
-    with {:ok, timestamp} <- candle_time(row),
+    with {:ok, timestamp} <- candle_time(row, timeframe),
          {:ok, raw_open} <- required(row, "open"),
          {:ok, raw_high} <- required(row, "high"),
          {:ok, raw_low} <- required(row, "low"),
@@ -728,13 +865,24 @@ defmodule DpExchange.Schwab.Rest do
 
   # A zero (or negative) `datetime` is "not stated", exactly as it is for a quote's times:
   # `DateTime.from_unix(0)` answered 1970-01-01 and placed the bar in the series at the epoch.
-  defp candle_time(%{"datetime" => datetime}) do
-    if positive_epoch?(datetime),
-      do: parse_time(datetime),
-      else: {:error, :missing_venue_timestamp}
+  #
+  # **Daily, weekly and monthly bars are stamped exchange-local midnight** (the document's
+  # example `1451624400000` is 05:00Z). The fact is the session DATE, not that instant, so
+  # they are mapped to 00:00 UTC of the same date. A minute bar's instant is kept as sent.
+  defp candle_time(%{"datetime" => datetime}, timeframe) do
+    if positive_epoch?(datetime) do
+      with {:ok, at} <- parse_time(datetime), do: {:ok, session_time(at, timeframe)}
+    else
+      {:error, :missing_venue_timestamp}
+    end
   end
 
-  defp candle_time(_no_datetime), do: {:error, :missing_venue_timestamp}
+  defp candle_time(_no_datetime, _timeframe), do: {:error, :missing_venue_timestamp}
+
+  defp session_time(at, timeframe) when timeframe in ["1d", "1w", "1M"],
+    do: at |> DateTime.to_date() |> midnight()
+
+  defp session_time(at, _minute_width), do: at
 
   defp required(row, key) do
     case Map.get(row, key) do
@@ -2482,20 +2630,28 @@ defmodule DpExchange.Schwab.Rest do
 
   defp order_write_outcome({:ok, %{status: 404}}, true), do: {:refused, :not_found}
 
+  # **Every 4xx except 429 is the venue's refusal of the request it received** (tick R, DV6;
+  # 409, 415 and 422 included - BREAKING for the undocumented ones, which were unconfirmed).
+  # This is always the FIRST and only attempt (`order_write_request_opts/1` sends exactly
+  # once), so a 4xx is a definite "not acted on". 429 is the venue throttling the write: a
+  # plain `{:error, _}`, safe to retry, nothing to reconcile.
+  defp order_write_outcome({:ok, %{status: 429, body: response}}, _not_found?),
+    do: {:error, {:exchange_error, :schwab, http_error_text(429, response)}}
+
   defp order_write_outcome({:ok, %{status: status, body: response}}, _not_found?)
-       when status in [400, 401, 403, 404],
+       when status in 400..499,
        do: {:refused, refusal(status, response)}
 
   defp order_write_outcome({:ok, %{status: status, body: response}}, _not_found?) do
-    unconfirmed(
-      {:exchange_error, :schwab,
-       "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}
-    )
+    unconfirmed({:exchange_error, :schwab, http_error_text(status, response)})
   end
 
   defp order_write_outcome({:error, reason}, _not_found?) do
     if refused_before_sending?(reason), do: {:error, reason}, else: unconfirmed(reason)
   end
+
+  defp http_error_text(status, response),
+    do: "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"
 
   defp unconfirmed(reason),
     do: {:error, {:order_unconfirmed, nil, bounded_reason(reason)}}
@@ -2688,13 +2844,12 @@ defmodule DpExchange.Schwab.Rest do
         {:ok, %{status: 404}} ->
           {:refused, :not_found}
 
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
+        # Every 4xx but 429 is the venue's refusal (DV6); 429 is throttling, a plain error.
+        {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
           {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
-          {:error,
-           {:exchange_error, :schwab,
-            "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
+          {:error, {:exchange_error, :schwab, http_error_text(status, body)}}
 
         {:error, reason} ->
           {:error, reason}

@@ -69,9 +69,41 @@ is guarded separately and `Core.Types.Quote` does not enforce the time, so disca
 traded price over it threw away what the caller asked for. **Write the `nil` branch for REST
 quotes too**, not only for streamed ones.
 
-`get_historical_prices/4` is unchanged and still refuses an undated bar, because
+`get_historical_prices/4` still refuses an undated bar, because
 `Core.Types.Candle` enforces `:opened_at` and a bar at an invented minute lands in the series
 looking like a real one.
+
+## Candle windows, the forming bar, and daily times
+
+`get_historical_prices(symbol, timeframe, range, opts)` takes `range: [start: dt, end: dt]`.
+`:start` is **inclusive** and `:end` **exclusive** on `opened_at`; an absent `:end` is now.
+The request always carries `endDate` (the venue's own default is the previous business day's
+close and would drop today). An `:end` without a `:start` is
+`{:error, {:range_start_required, :schwab}}`.
+
+The bar still forming (`opened_at + width > now`) is **not returned** unless you pass
+`include_partial: true`; with it the last bar may still change (`Candle` has no flag for it).
+`include_partial` must be a boolean.
+
+Daily, weekly and monthly bars are stamped exchange-local midnight by the venue; `opened_at`
+here is **00:00 UTC of that session date**, not the instant sent. Minute bars keep the
+instant. Whether the venue counts `period` back from `endDate` (sent when you give no
+`:start`) is read from its document, not measured.
+
+## A bid or ask of 0 is no order; an unreadable one is an error
+
+On `get_top_of_book/2` and the streamed `TopOfBook`, a price of `0` means no resting order on
+that side: `nil` price and `nil` size. A present side that cannot be read (non-numeric, empty
+string, NaN, negative) is `{:error, {:invalid_decimal, :bid | :ask, value}}` on REST; on the
+stream that frame's book is not delivered and the last one stands. `nil` is never produced
+for something unreadable.
+
+A streamed `Quote`'s `volume` is the day's cumulative total with `volume_window:
+:running_total` (difference it), exactly as REST. It is never one print: LEVELONE is
+conflated.
+
+A streamed order book with an unreadable level (no price or size, a price <= 0, a negative
+size, a non-list side) is not delivered at all; a level of size 0 is dropped as no liquidity.
 
 Nothing is ever substituted into `venue_time` on either path: it is the venue's own instant
 or it is `nil`, never this package's clock. That is what `dp_exchange_core` issue #31 split
@@ -460,7 +492,9 @@ venue names the id. The venue answers a write with only a `Location` header.
   never retry on it: list the account's orders (`get_orders/2`) to find out whether the order
   exists. The `nil` is the client order id, which Schwab has no field for. Failures decided
   before anything was sent (validation, a missing option or credential, our own rate limiter
-  refusing, the venue's 429) stay plain `{:error, _}`; a venue 4xx is `{:refused, _}`.
+  refusing, the venue's 429) stay plain `{:error, _}`; **every venue 4xx except 429 is
+  `{:refused, _}`** (409, 415 and 422 included: writes are sent once, so a 4xx is always the
+  answer to the first attempt). `cancel_order/3` follows the same rule.
   A missing order (404) on `get_order/3`, `cancel_order/3` or `replace_order/4` is
   `{:refused, :not_found}`.
 
@@ -474,8 +508,9 @@ venue names the id. The venue answers a write with only a `Location` header.
 `{:missing_field, :time_in_force}` (never `:day`). A price the order type does not read is
 `{:unexpected_field, :price}`; prices follow the quantity rule (`{:invalid_price, v}`,
 `{:invalid_stop_price, v}`). **Any key the builder does not read is
-`{:unsupported_order_field, key}`, `client_order_id` included**: Schwab has no idempotency
-key, so silently ignoring it would let you believe a retry was safe. Checks run in this order:
+`{:unsupported_order_field, key}`, `client_order_id` included, whatever its value (`nil`
+too)**: Schwab has no idempotency key, so silently ignoring it would let you believe a retry
+was safe. Checks run in this order:
 request shape, unknown keys, symbol, side, order type, time-in-force, quantity, prices, then
 `opts[:account_hash]` (`{:missing_option, :account_hash}`), the order ceiling, and the
 credential. `get_order/3`, `cancel_order/3` and `replace_order/4` check the order id first:

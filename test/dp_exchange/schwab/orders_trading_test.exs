@@ -153,6 +153,35 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
                Rest.place_order(@creds, "H", %{}, plug: plug, retry_attempts: 0)
     end
 
+    test "EVERY 4xx but 429 is a refusal, undocumented ones included (DV6, BREAKING)" do
+      for status <- [405, 406, 409, 410, 415, 422, 428] do
+        plug = fn conn -> Plug.Conn.resp(conn, status, ~s({"message":"no"})) end
+
+        assert {:refused, {:venue_error, ^status, "no"}} =
+                 Rest.place_order(@creds, "H", %{}, plug: plug, retry_attempts: 0)
+
+        assert {:refused, {:venue_error, ^status, "no"}} =
+                 Rest.replace_order(@creds, "H", "1", %{}, plug: plug, retry_attempts: 0)
+
+        assert {:refused, {:venue_error, ^status, "no"}} =
+                 Rest.cancel_order(@creds, "H", "1", plug: plug, retry_attempts: 0)
+      end
+    end
+
+    test "a 429 on a replace or a cancel stays a plain error, never a refusal" do
+      plug = fn conn -> Plug.Conn.resp(conn, 429, "") end
+
+      assert {:error, {:exchange_error, _provider, message}} =
+               Rest.replace_order(@creds, "H", "1", %{}, plug: plug, retry_attempts: 0)
+
+      assert message =~ "Rate limited by the venue"
+
+      assert {:error, {:exchange_error, _provider, message}} =
+               Rest.cancel_order(@creds, "H", "1", plug: plug, retry_attempts: 0)
+
+      assert message =~ "Rate limited by the venue"
+    end
+
     test "our own limiter refusing, or the venue's 429, is a plain error: nothing took effect" do
       Config.put_override(:rate_limit_module, ThrottlingLimiter)
       boom = exploding("a throttled write was sent")

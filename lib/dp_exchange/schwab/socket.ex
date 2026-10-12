@@ -924,9 +924,17 @@ defmodule DpExchange.Schwab.Socket do
       end
 
     if book_moved?(fields) do
-      {:ok, delta} = StreamerDecode.to_top_of_book(fields, symbol, observed_at)
-      top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
-      {quoted ++ [top], put_in(state.last_top[symbol], top)}
+      case StreamerDecode.to_top_of_book(fields, symbol, observed_at) do
+        {:ok, delta} ->
+          top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
+          {quoted ++ [top], put_in(state.last_top[symbol], top)}
+
+        # An unreadable (or negative) bid/ask refuses this frame's book: publishing `nil`
+        # would say "no resting order", and carrying the old level would answer a question
+        # the venue did ask. The last published book stays as it was.
+        {:error, _unreadable_side} ->
+          {quoted, state}
+      end
     else
       # A frame that moved no book field (a trade, a volume tick) says nothing about the
       # book. Republishing the carried-forward levels stamped it `observed_at: now` with no
@@ -987,10 +995,20 @@ defmodule DpExchange.Schwab.Socket do
 
   defp merge_top_of_book(previous, delta, fields) do
     Enum.reduce([:bid, :ask, :bid_size, :ask_size], delta, fn field, merged ->
-      if Map.has_key?(fields, field),
+      if Map.has_key?(fields, field) or size_of_cleared_side?(field, fields, delta),
         do: merged,
         else: Map.put(merged, field, Map.get(previous, field))
     end)
+  end
+
+  # A price of 0 means no resting order, so that side's size is `nil` now: the previous size
+  # must not survive a frame that cleared its side.
+  defp size_of_cleared_side?(:bid_size, fields, delta), do: cleared?(fields, delta, :bid)
+  defp size_of_cleared_side?(:ask_size, fields, delta), do: cleared?(fields, delta, :ask)
+  defp size_of_cleared_side?(_price_field, _fields, _delta), do: false
+
+  defp cleared?(fields, delta, side) do
+    Map.has_key?(fields, side) and is_nil(Map.get(delta, side))
   end
 
   defp notify(%{subscriber: subscriber} = state, payload) do

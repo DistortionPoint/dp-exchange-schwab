@@ -88,11 +88,11 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       }
 
       assert {:ok, candles} =
-               Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
+               Rest.get_historical_prices("AAPL", "5m", [], @creds, opts(responding(body)))
 
       times = Enum.map(candles, & &1.opened_at)
       assert times == Enum.sort(times, DateTime)
-      assert length(times) == 3
+      assert length(Enum.uniq(times)) == 3
     end
 
     test "an explicitly null candle datetime is missing, not zero" do
@@ -128,7 +128,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert {:ok, [bar]} =
                Rest.get_historical_prices("AAPL", "1d", [], @creds, opts(responding(body)))
 
-      assert bar.opened_at == ~U[1971-08-02 16:53:20.000Z]
+      # A daily bar is the session DATE at 00:00 UTC (MD3), not the instant sent.
+      assert bar.opened_at == ~U[1971-08-02 00:00:00Z]
     end
 
     test "an epoch delivered as a string is read" do
@@ -391,17 +392,50 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       end
     end
 
-    test "an empty-string numeric field is nil, not zero" do
-      # Zero is a price. A venue that sent no bid has not quoted a bid of nothing.
+    test "an empty-string bid is PRESENT but unreadable: the book is refused, not nil" do
+      # `nil` would say "no resting order" (tick R, MD6), which the venue did not say.
       body = %{
         "AAPL" => %{
           "quote" => %{"lastPrice" => 1.0, "bidPrice" => "", "quoteTime" => 1_787_936_147_000}
         }
       }
 
-      # The assertion moved to TopOfBook with the field: an empty bid is nil, never zero.
+      assert {:error, {:invalid_decimal, :bid, ""}} =
+               Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
+    end
+
+    test "a bid or ask of 0 is no resting order: nil price and nil size" do
+      body = %{
+        "AAPL" => %{
+          "quote" => %{
+            "lastPrice" => 1.0,
+            "bidPrice" => 0,
+            "bidSize" => 7,
+            "askPrice" => 1.1,
+            "askSize" => 3,
+            "quoteTime" => 1_787_936_147_000
+          }
+        }
+      }
+
       assert {:ok, top} = Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
       assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.from_float(1.1))
+      assert Decimal.equal?(top.ask_size, Decimal.new(3))
+    end
+
+    test "an unreadable or negative ask refuses the book" do
+      for bad <- ["abc", "NaN", -1.5] do
+        body = %{
+          "AAPL" => %{
+            "quote" => %{"lastPrice" => 1.0, "bidPrice" => 1.0, "askPrice" => bad}
+          }
+        }
+
+        assert {:error, {:invalid_decimal, :ask, _unreadable}} =
+                 Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
+      end
     end
 
     test "numbers arrive as integers, floats, strings or Decimals and all become Decimal" do

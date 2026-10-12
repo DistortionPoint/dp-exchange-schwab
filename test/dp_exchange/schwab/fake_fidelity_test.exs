@@ -252,6 +252,39 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert {:error, {:lookback_exceeds_venue, "1m", 30, 10}} =
                Fake.get_historical_prices("AAPL", "1m", range, credentials: @creds)
     end
+
+    test "the bar still forming is withheld unless include_partial: true, as the real path" do
+      opts = [credentials: @creds]
+      forming = ~U[2026-08-31 00:00:00Z]
+
+      assert {:ok, finished} = Fake.get_historical_prices("AAPL", "1d", [], opts)
+      assert length(finished) == 4
+      assert Enum.all?(finished, &(DateTime.compare(&1.opened_at, forming) == :lt))
+
+      assert {:ok, all} =
+               Fake.get_historical_prices("AAPL", "1d", [], opts ++ [include_partial: true])
+
+      assert length(all) == 5
+      assert List.last(all).opened_at == forming
+    end
+
+    test "a non-boolean include_partial is refused by the fake as by the real path" do
+      opts = [credentials: @creds, include_partial: "yes"]
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Fake.get_historical_prices("AAPL", "1d", [], opts)
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Schwab.get_historical_prices("AAPL", "1d", [], opts)
+    end
+
+    test ":start is inclusive and :end exclusive on opened_at" do
+      start = ~U[2026-08-27 00:00:00Z]
+      range = [start: start, end: ~U[2026-08-29 00:00:00Z]]
+
+      assert {:ok, bars} = Fake.get_historical_prices("AAPL", "1d", range, credentials: @creds)
+      assert Enum.map(bars, & &1.opened_at) == [start, ~U[2026-08-28 00:00:00Z]]
+    end
   end
 
   describe "a credential is judged by the module that signs" do

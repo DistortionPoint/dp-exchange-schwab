@@ -1135,6 +1135,43 @@ defmodule DpExchange.Schwab.SocketTest do
       assert Decimal.equal?(aapl.bid, Decimal.new("99.50"))
     end
 
+    test "a bid of 0 clears the side: nil bid AND nil size, not the previous size (MD6)" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50", "4" => "3", "5" => "7"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      {:ok, _state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => 0}), state)
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{} = top}
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.new("100.50"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("7"))
+    end
+
+    test "an unreadable bid refuses that frame's book and keeps the last one" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      {:ok, state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "garbage"}), state)
+
+      refute_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      # The next readable frame still merges onto the last GOOD book.
+      {:ok, _state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "2" => "101.00"}), state)
+      assert_received {:dp_exchange, :schwab, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid, Decimal.new("99.50"))
+    end
+
     test "a reconnect drops what the previous session knew" do
       {:ok, state} =
         Socket.handle_frame(

@@ -31,6 +31,53 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed -- market-data and order conventions (family tick R, MD1-MD3, MD5, MD6, MD8, DV1, DV6)
+
+- **BREAKING: `get_historical_prices/4` always sends `endDate` (MD2).** With no range, or
+  only `:start`, the request omitted `endDate`, and the venue defaults it to "the market
+  close of previous business day" (market-data-production.openapi.json,
+  `QueryParamenddate`), which silently dropped today. `endDate` is now the caller's `:end`
+  or now. `:start` is inclusive and `:end` exclusive on `opened_at`, also enforced on the
+  decoded bars. With no `:start`, `period` is sent beside `endDate = now`; that `period`
+  counts back from `endDate` is read from the document and **unmeasured**. The lookback
+  check (`requested_days`) is sized over the same window and the same instant that is sent.
+- **BREAKING: the bar still forming is no longer returned (MD1).** A bar is in progress when
+  `opened_at + width > now`; it is dropped unless the caller passes `include_partial: true`
+  (any other non-boolean is `{:error, {:invalid_option, :include_partial, v}}`). With the
+  option the bar is returned as-is and may still change. Weekly bars close at the next
+  Monday and monthly bars at the next first of the month.
+- **BREAKING: daily, weekly and monthly `opened_at` is 00:00 UTC of the session date
+  (MD3).** The venue stamps exchange-local midnight (the document's example,
+  `1451624400000`, is 05:00Z); the date is the fact, not that instant. Minute bars keep the
+  instant sent.
+- **BREAKING: an unreadable order-book level refuses the frame's book (MD5).** The Streamer
+  silently dropped levels missing a price or size and turned a non-list side into `[]`.
+  `StreamerDecode.to_order_book/2` now answers
+  `{:error, {:unreadable_level, :bids | :asks, value}}` for a level without a readable price
+  or size, a price <= 0, a negative size, or a present non-list side. A size of exactly 0 is
+  no liquidity and is dropped; an absent side is empty.
+- **BREAKING: a bid or ask is `nil` only when the venue says there is no order (MD6).** A
+  price of `0` is no resting order on that side (`nil` price and `nil` size), on REST
+  `get_top_of_book/2` and on the stream. A present side that cannot be read (a non-number,
+  an empty string, NaN, a negative) refuses the book: REST answers
+  `{:error, {:invalid_decimal, :bid | :ask, value}}`, the stream drops that frame's book
+  and keeps the last published one. It used to become `nil`, which `TopOfBook` reads as "no
+  resting order". On the stream a cleared side also clears its previous size.
+  `StreamerDecode.to_top_of_book/3` now returns `{:ok, _} | {:error, _}`.
+- **BREAKING: a streamed `Quote` reports `total_volume` as `:running_total` (MD8).**
+  LEVELONE is conflated, so `last_size` labelled `:print` was a claim the stream cannot
+  keep. `volume` is now the day's cumulative total, as on REST; with no total the volume
+  and its window are `nil`.
+- **BREAKING: an unknown request key holding `nil` is refused (DV1).**
+  `client_order_id: nil` and any other unread key is `{:unsupported_order_field, key}`
+  whatever its value. A nil on a key the builder reads is still an unset option.
+- **BREAKING: every 4xx except 429 on an order write is `{:refused, _}` (DV6).** 409, 415,
+  422 and any other undocumented 4xx used to be `:order_unconfirmed`. Writes are sent
+  exactly once, so a 4xx is always the answer to the first attempt; 429 stays a plain
+  `{:error, _}`. `cancel_order/3` follows the same rule.
+- Fake parity: the fake's candle series is aligned to the width, cut by the same
+  `Rest.window_candles/4`, honours `include_partial` and refuses it the same way.
+
 ## [0.2.117] - 2026-10-12
 
 ### Fixed -- regression review of the trading conventions and Decimal switch (family tick R)

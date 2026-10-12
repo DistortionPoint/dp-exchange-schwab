@@ -223,28 +223,57 @@ defmodule DpExchange.Schwab.Fake do
          :ok <- require_credential_map(opts),
          {:ok, native} <- SymbolFormat.validate(symbol),
          # The real module's own question, in its order: width, range shape, then reach.
-         :ok <- Rest.check_history(timeframe, range, @as_of),
+         :ok <- Rest.check_history(timeframe, range, @as_of, opts),
          :ok <- require_credentials(opts),
          {:ok, price} <- fetch_price(native) do
-      {:ok,
-       for offset <- 4..0//-1 do
-         base = Decimal.new(price)
+      include_partial = Config.opt(opts, :include_partial, false)
+      base = Decimal.new(price)
 
-         %Candle{
-           symbol: native,
-           timeframe: timeframe,
-           opened_at: DateTime.add(@as_of, -offset * 60, :second),
-           # A bar with four distinct prices. A fake whose OHLC all equal one number cannot
-           # catch a caller that reads the wrong one.
-           open: Decimal.sub(base, Decimal.new("0.50")),
-           high: Decimal.add(base, Decimal.new("1.00")),
-           low: Decimal.sub(base, Decimal.new("1.00")),
-           close: base,
-           volume: Decimal.new("250000"),
-           provider: :schwab
-         }
-       end}
+      series =
+        for opened_at <- bar_opens(timeframe, window_upper(range)) do
+          %Candle{
+            symbol: native,
+            timeframe: timeframe,
+            opened_at: opened_at,
+            # A bar with four distinct prices. A fake whose OHLC all equal one number cannot
+            # catch a caller that reads the wrong one.
+            open: Decimal.sub(base, Decimal.new("0.50")),
+            high: Decimal.add(base, Decimal.new("1.00")),
+            low: Decimal.sub(base, Decimal.new("1.00")),
+            close: base,
+            volume: Decimal.new("250000"),
+            provider: :schwab
+          }
+        end
+
+      # The real path's own cut: `:start` inclusive, `:end` exclusive, and the bar still
+      # forming at `as_of` only when `include_partial: true`.
+      {:ok, Rest.window_candles(series, range, @as_of, include_partial)}
     end
+  end
+
+  # The window's exclusive upper end: the caller's `:end` (never past the fake's "now"), else
+  # now.
+  defp window_upper(range) do
+    case Keyword.get(range, :end) do
+      %DateTime{} = finish ->
+        if DateTime.compare(finish, @as_of) == :gt, do: @as_of, else: finish
+
+      _absent ->
+        @as_of
+    end
+  end
+
+  # Five bar opens, oldest first, ending with the bar that contains the last instant before
+  # `upper`. Each is aligned to its width, daily and longer at 00:00 UTC of the session date,
+  # as the real decoder maps them. The newest is the bar still forming when `upper` is `now`
+  # and the width is a day or more.
+  defp bar_opens(timeframe, upper) do
+    newest = Rest.bar_open(DateTime.add(upper, -1, :second), timeframe)
+
+    Enum.reduce(1..4, [newest], fn _step, [oldest | _rest] = opens ->
+      [Rest.bar_open(DateTime.add(oldest, -1, :second), timeframe) | opens]
+    end)
   end
 
   @impl true

@@ -509,13 +509,48 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerDecode.to_quote(%{bid: 10.50, ask: 10.60}, "AAPL", @observed)
     end
 
-    test "the quote's volume is the trade's own size, not the day's aggregate" do
+    test "the quote's volume is the day's cumulative total, labelled :running_total (MD8)" do
+      # LEVELONE is conflated: `last_size` is one arbitrary print, not a sum of prints, so
+      # `:print` would tell a consumer it can add frames up. The cumulative figure is what is
+      # differenced, exactly as on the REST arm.
       fields = %{last: 10.55, last_size: 100, total_volume: 4_000_000}
 
       assert {:ok, quote_} = StreamerDecode.to_quote(fields, "AAPL", @observed)
 
-      assert Decimal.equal?(quote_.volume, Decimal.new("100"))
-      refute Decimal.equal?(quote_.volume, Decimal.new("4000000"))
+      assert Decimal.equal?(quote_.volume, Decimal.new("4000000"))
+      assert quote_.volume_window == :running_total
+    end
+
+    test "a frame with no cumulative total has no volume and no window" do
+      assert {:ok, quote_} =
+               StreamerDecode.to_quote(%{last: 10.55, last_size: 100}, "AAPL", @observed)
+
+      assert quote_.volume == nil
+      assert quote_.volume_window == nil
+    end
+
+    test "a bid or ask of 0 is no resting order: nil price and nil size (MD6)" do
+      assert {:ok, top} =
+               StreamerDecode.to_top_of_book(
+                 %{bid: 0, bid_size: 9, ask: 10.60, ask_size: 5},
+                 "AAPL",
+                 @observed
+               )
+
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.new("10.60"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("5"))
+    end
+
+    test "an unreadable or negative bid or ask refuses the book" do
+      for bad <- ["abc", -1, "-2.5"] do
+        assert {:error, {:invalid_decimal, :bid, ^bad}} =
+                 StreamerDecode.to_top_of_book(%{bid: bad, ask: 1}, "AAPL", @observed)
+
+        assert {:error, {:invalid_decimal, :ask, ^bad}} =
+                 StreamerDecode.to_top_of_book(%{bid: 1, ask: bad}, "AAPL", @observed)
+      end
     end
 
     test "the same frame gives a top of book with no price at all" do
@@ -737,12 +772,43 @@ defmodule DpExchange.Schwab.StreamerTest do
       refute Decimal.equal?(size, Decimal.new("150"))
     end
 
-    test "a level with no size is dropped, as one with no price is" do
-      fields = %{snapshot_time: 1_787_936_147_000, bids: [[10.5], [10.4, 100]], asks: [[11, nil]]}
+    test "a level with no size refuses the whole book, it is not dropped (MD5)" do
+      fields = %{snapshot_time: 1_787_936_147_000, bids: [[10.5], [10.4, 100]], asks: []}
 
-      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert {:error, {:unreadable_level, :bids, [10.5]}} =
+               StreamerDecode.to_order_book(fields, "AAPL")
+
+      fields = %{snapshot_time: 1_787_936_147_000, bids: [], asks: [[11, nil]]}
+
+      assert {:error, {:unreadable_level, :asks, [11, nil]}} =
+               StreamerDecode.to_order_book(fields, "AAPL")
+    end
+
+    test "a size of 0 is no liquidity and is dropped; a negative size or price <= 0 refuses" do
+      base = %{snapshot_time: 1_787_936_147_000, asks: []}
+
+      assert {:ok, book} =
+               StreamerDecode.to_order_book(Map.put(base, :bids, [[10.5, 0], [10.4, 100]]), "A")
+
       assert [{price, _size}] = book.bids
       assert Decimal.equal?(price, Decimal.new("10.4"))
+
+      for bad <- [[10.5, -1], [0, 100], [-1, 100]] do
+        assert {:error, {:unreadable_level, :bids, ^bad}} =
+                 StreamerDecode.to_order_book(Map.put(base, :bids, [bad]), "A")
+      end
+    end
+
+    test "a side that is present but not a list refuses; an absent side is empty" do
+      fields = %{snapshot_time: 1_787_936_147_000, bids: "not a list", asks: []}
+
+      assert {:error, {:unreadable_level, :bids, "not a list"}} =
+               StreamerDecode.to_order_book(fields, "AAPL")
+
+      assert {:ok, book} =
+               StreamerDecode.to_order_book(%{snapshot_time: 1_787_936_147_000}, "AAPL")
+
+      assert book.bids == []
       assert book.asks == []
     end
 
@@ -817,11 +883,11 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert Decimal.equal?(second, Decimal.new("10.49"))
     end
 
-    test "a level with no price is dropped rather than carried as nil" do
+    test "a level with no price refuses the book rather than being dropped" do
       fields = %{snapshot_time: 1_787_936_147_000, bids: [[nil, 100, 1, []]], asks: []}
 
-      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
-      assert book.bids == []
+      assert {:error, {:unreadable_level, :bids, [nil, 100, 1, []]}} =
+               StreamerDecode.to_order_book(fields, "AAPL")
     end
 
     test "an empty side is an empty list and the sequence is nil" do

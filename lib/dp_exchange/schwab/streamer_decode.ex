@@ -60,19 +60,23 @@ defmodule DpExchange.Schwab.StreamerDecode do
   def to_quote(%{last: last} = fields, symbol, observed_at) when last != nil do
     with {:ok, price} <- required_decimal(last, :price),
          :ok <- traded_price(price) do
-      # The venue's `total_volume` is the day's aggregate, not this trade's. `last_size` is
-      # the trade's own, so this quote's volume is one print, and says so in
-      # `volume_window` (dp-exchange-core issue #42). Read rather than required: `:volume`
-      # is not enforced on `Core.Types.Quote`, so an unreadable size is `nil`, the window
-      # with it, and the quote still stands.
-      volume = decimal(Map.get(fields, :last_size))
+      # **The day's cumulative volume, labelled `:running_total`, as REST does.** `:print` is
+      # only true where every print is delivered, and LEVELONE is CONFLATED ("Data is
+      # conflated by the streamer"): `last_size` is the size of whichever trade the
+      # streamer happened to emit last, so it is neither a sum of prints nor a figure to
+      # difference, and calling it `:print` told a consumer it could add frames up (tick R,
+      # MD8; it did, until then). `total_volume` is the venue's cumulative figure and is
+      # what a consumer differences. Read rather than required: `:volume` is not enforced on
+      # `Core.Types.Quote`, so an absent or unreadable total is `nil`, the window with it,
+      # and the quote still stands.
+      volume = decimal(Map.get(fields, :total_volume))
 
       {:ok,
        %Quote{
          symbol: symbol,
          price: price,
          volume: volume,
-         volume_window: volume && :print,
+         volume_window: volume && :running_total,
          # **The venue's own trade time, where the service names one — `nil` otherwise.**
          # `LEVELONE_EQUITIES` field 35, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS`
          # field 11 — "Trade Time in Long" / "Trade Time", the last trade time in
@@ -135,19 +139,52 @@ defmodule DpExchange.Schwab.StreamerDecode do
   for the symbol, and the merged snapshot is what a consumer receives. Nothing that calls
   this function directly should publish its result.
   """
-  @spec to_top_of_book(map(), String.t(), DateTime.t()) :: {:ok, TopOfBook.t()}
+  @spec to_top_of_book(map(), String.t(), DateTime.t()) ::
+          {:ok, TopOfBook.t()} | {:error, term()}
   def to_top_of_book(fields, symbol, observed_at) do
-    {:ok,
-     %TopOfBook{
-       symbol: symbol,
-       bid: decimal(Map.get(fields, :bid)),
-       ask: decimal(Map.get(fields, :ask)),
-       bid_size: decimal(Map.get(fields, :bid_size)),
-       ask_size: decimal(Map.get(fields, :ask_size)),
-       venue_time: field_time(fields, :quote_time),
-       observed_at: observed_at,
-       provider: :schwab
-     }}
+    with {:ok, {bid, bid_size}} <- book_side(fields, :bid, :bid_size),
+         {:ok, {ask, ask_size}} <- book_side(fields, :ask, :ask_size) do
+      {:ok,
+       %TopOfBook{
+         symbol: symbol,
+         bid: bid,
+         ask: ask,
+         bid_size: bid_size,
+         ask_size: ask_size,
+         venue_time: field_time(fields, :quote_time),
+         observed_at: observed_at,
+         provider: :schwab
+       }}
+    end
+  end
+
+  # One side of the top of book, `{price, size}`.
+  #
+  # **A price of 0 means no resting order on that side** (`nil` price, `nil` size), exactly as
+  # on the REST arm; a bid of zero is not a bid. **A present side that cannot be read refuses**
+  # the whole frame's book - `{:error, {:invalid_decimal, :bid, value}}` - and is never turned
+  # into `nil`, which `TopOfBook` reads as "no resting order": an unreadable price must not
+  # become a statement about the market. A negative price refuses with it. An ABSENT price
+  # (`nil`: this Change frame did not mention the side) is `nil` and the size is whatever the
+  # frame carried; `Socket` merges that onto the last book.
+  defp book_side(fields, price_key, size_key) do
+    case Map.get(fields, price_key) do
+      nil ->
+        {:ok, {nil, decimal(Map.get(fields, size_key))}}
+
+      raw ->
+        raw |> decimal() |> side_price(raw, price_key, Map.get(fields, size_key))
+    end
+  end
+
+  defp side_price(nil, raw, price_key, _size), do: {:error, {:invalid_decimal, price_key, raw}}
+
+  defp side_price(price, raw, price_key, size) do
+    case Decimal.compare(price, 0) do
+      :gt -> {:ok, {price, decimal(size)}}
+      :eq -> {:ok, {nil, nil}}
+      :lt -> {:error, {:invalid_decimal, price_key, raw}}
+    end
   end
 
   @doc """
@@ -266,15 +303,23 @@ defmodule DpExchange.Schwab.StreamerDecode do
   The size kept is the venue's **aggregate** for the level, not a sum over the makers: those
   are different numbers when attribution is partial, and the aggregate is the one the venue
   stands behind.
+
+  ## An unreadable level refuses the book
+
+  `{:error, {:unreadable_level, :bids | :asks, value}}` for a level without a readable price
+  or size, a price <= 0, a negative size, or a side that is present but not a list. A level
+  of size 0 is no liquidity and is dropped. Nothing is silently thinned.
   """
   @spec to_order_book(map(), String.t()) :: {:ok, OrderBook.t()} | {:error, term()}
   def to_order_book(fields, symbol) do
-    with {:ok, timestamp} <- snapshot_time(Map.get(fields, :snapshot_time)) do
+    with {:ok, timestamp} <- snapshot_time(Map.get(fields, :snapshot_time)),
+         {:ok, bids} <- levels(Map.get(fields, :bids), :bids, :desc),
+         {:ok, asks} <- levels(Map.get(fields, :asks), :asks, :asc) do
       {:ok,
        %OrderBook{
          symbol: symbol,
-         bids: levels(Map.get(fields, :bids), :desc),
-         asks: levels(Map.get(fields, :asks), :asc),
+         bids: bids,
+         asks: asks,
          venue_time: timestamp,
          observed_at: DateTime.utc_now(),
          # The Streamer publishes no sequence on a book frame. `nil` means the venue did
@@ -307,8 +352,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   defp from_unix_ms(_non_positive), do: {:error, :missing_venue_timestamp}
 
-  # A level is `[price, aggregate_size, …]`. A level without a price is not a level, and
-  # keeping it would put `{nil, size}` into a book a caller folds over.
+  # A level is `[price, aggregate_size, …]`.
   # Sorted here, not passed through in the venue's row order. `Core.Types.OrderBook` makes the
   # ordering part of the contract in as many words — "a caller reading `hd(bids)` as the best
   # bid is reading it correctly, and a venue package that returns venue-order without
@@ -319,22 +363,52 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # `sorted/2` — the only package in the family that was already doing this — because
   # `Decimal` structs do not compare correctly as plain terms.
   #
-  # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
-  defp levels(rows, direction) when is_list(rows) do
+  #
+  # **An unreadable level refuses the whole book** (tick R, MD5). Levels missing a price or a
+  # size used to be dropped, and a side that was not a list became `[]`: every remaining level
+  # was true and the book was silently thinner than the venue's, which is how a wrong best
+  # price gets published. Now `{:error, {:unreadable_level, side, value}}`: a level that is not
+  # `[price, size, ...]` (or the object form), has no readable price or size, a price <= 0 or
+  # a negative size; and a side that is present but not a list. A side that is ABSENT (`nil`)
+  # is empty. A size of exactly 0 is no liquidity at that price and is dropped.
+  defp levels(rows, side, direction) when is_list(rows) do
     rows
-    |> Enum.flat_map(fn row ->
-      # A level without a size is dropped as one without a price is: `{price, nil}` reached
-      # a caller summing the book, and `OrderBook`'s level type has no nil in it.
-      case {level_at(row, 0), level_at(row, 1)} do
-        {nil, _size} -> []
-        {_price, nil} -> []
-        {price, size} -> [{price, size}]
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case level(row) do
+        {:ok, level} -> {:cont, {:ok, [level | acc]}}
+        :empty -> {:cont, {:ok, acc}}
+        :unreadable -> {:halt, {:error, {:unreadable_level, side, row}}}
       end
     end)
-    |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})
+    |> case do
+      {:ok, built} ->
+        {:ok, Enum.sort_by(built, fn {price, _size} -> price end, {direction, Decimal})}
+
+      error ->
+        error
+    end
   end
 
-  defp levels(_absent, _direction), do: []
+  defp levels(nil, _side, _direction), do: {:ok, []}
+  defp levels(other, side, _direction), do: {:error, {:unreadable_level, side, other}}
+
+  defp level(row) do
+    case {level_at(row, 0), level_at(row, 1)} do
+      {nil, _size} -> :unreadable
+      {_price, nil} -> :unreadable
+      {price, size} -> classify_level({price, size}, Decimal.compare(price, 0), size)
+    end
+  end
+
+  defp classify_level(level, :gt, size) do
+    case Decimal.compare(size, 0) do
+      :gt -> {:ok, level}
+      :eq -> :empty
+      :lt -> :unreadable
+    end
+  end
+
+  defp classify_level(_level, _non_positive_price, _size), do: :unreadable
 
   defp level_at(row, index) when is_list(row), do: row |> Enum.at(index) |> decimal()
 

@@ -350,6 +350,9 @@ defmodule DpExchange.Schwab.RestTest do
     end
 
     test "a range within reach is served" do
+      # One day back: inside the three-day window and finished (5m width) long ago.
+      stamp = DateTime.to_unix(DateTime.add(DateTime.utc_now(), -1, :day), :millisecond)
+
       body = %{
         "candles" => [
           %{
@@ -358,7 +361,7 @@ defmodule DpExchange.Schwab.RestTest do
             "low" => 0.5,
             "close" => 1.5,
             "volume" => 100,
-            "datetime" => 1_787_936_147_000
+            "datetime" => stamp
           }
         ]
       }
@@ -379,7 +382,7 @@ defmodule DpExchange.Schwab.RestTest do
       assert Decimal.equal?(candle.open, Decimal.from_float(1.0))
       assert Decimal.equal?(candle.high, Decimal.from_float(2.0))
       assert Decimal.equal?(candle.low, Decimal.from_float(0.5))
-      assert candle.opened_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert candle.opened_at == DateTime.from_unix!(stamp, :millisecond)
     end
 
     test "no range asks for the deepest the width allows" do
@@ -418,12 +421,15 @@ defmodule DpExchange.Schwab.RestTest do
       refute query =~ "period="
     end
 
-    test "an explicit start with no end sends only startDate, leaving the venue's own default" do
+    test "an explicit start with no end sends endDate = now, never the venue's default" do
+      # The venue defaults an absent endDate to the PREVIOUS business day's close, which
+      # silently drops today (MD2).
       capture = fn conn ->
         send(self(), {:request, conn.query_string})
         Req.Test.json(conn, %{"candles" => []})
       end
 
+      before = DateTime.to_unix(DateTime.utc_now(), :millisecond)
       range = [start: DateTime.add(DateTime.utc_now(), -3, :day)]
 
       assert {:ok, []} =
@@ -433,16 +439,21 @@ defmodule DpExchange.Schwab.RestTest do
                )
 
       assert_received {:request, query}
-      assert query =~ "startDate="
-      refute query =~ "endDate="
+      params = URI.decode_query(query)
+      assert params["startDate"]
+      sent = String.to_integer(params["endDate"])
+      assert sent >= before
+      assert sent <= DateTime.to_unix(DateTime.utc_now(), :millisecond)
       refute query =~ "period="
     end
 
-    test "no explicit range still sends period, not a date range" do
+    test "no explicit range sends period beside endDate = now" do
       capture = fn conn ->
         send(self(), {:request, conn.query_string})
         Req.Test.json(conn, %{"candles" => []})
       end
+
+      before = DateTime.to_unix(DateTime.utc_now(), :millisecond)
 
       assert {:ok, []} =
                Rest.get_historical_prices("AAPL", "1d", [], @creds,
@@ -451,9 +462,158 @@ defmodule DpExchange.Schwab.RestTest do
                )
 
       assert_received {:request, query}
-      assert query =~ "period="
-      refute query =~ "startDate="
-      refute query =~ "endDate="
+      params = URI.decode_query(query)
+      assert params["period"]
+      refute Map.has_key?(params, "startDate")
+      assert String.to_integer(params["endDate"]) >= before
+    end
+
+    test "a caller's :end is sent as endDate and is exclusive on opened_at" do
+      end_at = DateTime.utc_now() |> DateTime.add(-2, :day) |> DateTime.truncate(:millisecond)
+      inside = DateTime.add(end_at, -3_600, :second)
+
+      body = %{
+        "candles" =>
+          for at <- [inside, end_at] do
+            %{
+              "open" => 1,
+              "high" => 1,
+              "low" => 1,
+              "close" => 1,
+              "volume" => 1,
+              "datetime" => DateTime.to_unix(at, :millisecond)
+            }
+          end
+      }
+
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, body)
+      end
+
+      range = [start: DateTime.add(end_at, -1, :day), end: end_at]
+
+      assert {:ok, [bar]} =
+               Rest.get_historical_prices("AAPL", "5m", range, @creds,
+                 plug: capture,
+                 retry_attempts: 0
+               )
+
+      assert bar.opened_at == DateTime.truncate(inside, :millisecond)
+      assert_received {:request, query}
+      assert URI.decode_query(query)["endDate"] == "#{DateTime.to_unix(end_at, :millisecond)}"
+    end
+
+    test "the lookback is measured over the window actually sent (start to now)" do
+      # 9 days 23 hours back is ten days to the minute width; the same instant `now` that
+      # goes out as endDate sizes it, so it is served, not refused.
+      exploding_free = responding(%{"candles" => []})
+      range = [start: DateTime.add(DateTime.utc_now(), -(10 * 86_400 - 3_600), :second)]
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL", "1m", range, @creds,
+                 plug: exploding_free,
+                 retry_attempts: 0
+               )
+    end
+
+    test "the bar still forming is dropped unless include_partial: true (MD1)" do
+      now = DateTime.utc_now()
+      forming = DateTime.add(now, -30, :second)
+      done = DateTime.add(now, -3_600, :second)
+
+      body = %{
+        "candles" =>
+          for at <- [done, forming] do
+            %{
+              "open" => 1,
+              "high" => 1,
+              "low" => 1,
+              "close" => 1,
+              "volume" => 1,
+              "datetime" => DateTime.to_unix(at, :millisecond)
+            }
+          end
+      }
+
+      assert {:ok, [only]} =
+               Rest.get_historical_prices("AAPL", "5m", [], @creds,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert only.opened_at == DateTime.truncate(done, :millisecond)
+
+      assert {:ok, [_done, last]} =
+               Rest.get_historical_prices("AAPL", "5m", [], @creds,
+                 plug: responding(body),
+                 retry_attempts: 0,
+                 include_partial: true
+               )
+
+      assert last.opened_at == DateTime.truncate(forming, :millisecond)
+    end
+
+    test "a non-boolean include_partial is refused before any request" do
+      exploding = fn _conn -> raise "a request was sent for a bad option" end
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Rest.get_historical_prices("AAPL", "1d", [], @creds,
+                 plug: exploding,
+                 retry_attempts: 0,
+                 include_partial: "yes"
+               )
+    end
+
+    test "daily, weekly and monthly bars are the 00:00 UTC of the session date (MD3)" do
+      # 1451624400000 is the document's example: 2016-01-01T05:00Z, exchange-local midnight.
+      body = %{
+        "candles" => [
+          %{"open" => 1, "high" => 1, "low" => 1, "close" => 1, "datetime" => 1_451_624_400_000}
+        ]
+      }
+
+      for timeframe <- ~w(1d 1w 1M) do
+        assert {:ok, [bar]} =
+                 Rest.get_historical_prices("AAPL", timeframe, [], @creds,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+
+        assert bar.opened_at == ~U[2016-01-01 00:00:00Z]
+      end
+    end
+
+    test "a minute bar keeps the instant the venue sent" do
+      stamp = DateTime.add(DateTime.utc_now(), -86_400, :second)
+
+      body = %{
+        "candles" => [
+          %{
+            "open" => 1,
+            "high" => 1,
+            "low" => 1,
+            "close" => 1,
+            "datetime" => DateTime.to_unix(stamp, :millisecond)
+          }
+        ]
+      }
+
+      assert {:ok, [bar]} =
+               Rest.get_historical_prices("AAPL", "5m", [], @creds,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert bar.opened_at == DateTime.truncate(stamp, :millisecond)
+    end
+
+    test "bar_end/2 closes weekly bars at the next Monday and monthly at the next first" do
+      assert Rest.bar_end(~U[2016-01-06 00:00:00Z], "1w") == ~U[2016-01-11 00:00:00Z]
+      assert Rest.bar_end(~U[2016-02-03 00:00:00Z], "1M") == ~U[2016-03-01 00:00:00Z]
+      assert Rest.bar_end(~U[2016-01-04 00:00:00Z], "1d") == ~U[2016-01-05 00:00:00Z]
+      assert Rest.bar_open(~U[2016-01-06 12:00:00Z], "1w") == ~U[2016-01-04 00:00:00Z]
+      assert Rest.bar_open(~U[2016-02-03 12:00:00Z], "1M") == ~U[2016-02-01 00:00:00Z]
     end
 
     test "the venue's own empty flag is a refusal, not zero candles" do

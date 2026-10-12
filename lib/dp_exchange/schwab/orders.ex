@@ -114,7 +114,8 @@ defmodule DpExchange.Schwab.Orders do
   Refuses, by name and before any request, in this order:
 
   - a request that is not a map: `{:invalid_order_request, request}`
-  - a key this builder does not read: `{:unsupported_order_field, key}`
+  - a key this builder does not read: `{:unsupported_order_field, key}` - **whatever its
+    value, `nil` included**
   - a nil, non-text or blank symbol: `{:invalid_symbol, value}`
   - a side that is not `:buy`/`:sell` (or `"buy"`/`"sell"`, any case):
     `{:invalid_side, value}`; no side and no instruction: `{:missing_field, :side}`
@@ -265,9 +266,12 @@ defmodule DpExchange.Schwab.Orders do
   defp preview_leg(leg), do: leg
 
   # The keys this builder reads. Anything else is refused by name (`client_order_id` among
-  # them: Schwab has no idempotency key to carry it). A key whose value is `nil` is a
-  # forwarded unset option and counts as absent, as it does for every field below. The
-  # first offender in key order is named, so the answer does not depend on map iteration.
+  # them: Schwab has no idempotency key to carry it). **An unknown key is refused whatever
+  # its value, `nil` included** (tick R, DV1; BREAKING): a `client_order_id: nil` is still a
+  # caller reaching for a field this venue cannot honour, and the family refuses it the same
+  # way on every venue. A nil on a key this builder DOES read still counts as absent, as it
+  # does for every field below. The first offender in key order is named, so the answer does
+  # not depend on map iteration.
   @request_keys [
     :symbol,
     :side,
@@ -286,7 +290,7 @@ defmodule DpExchange.Schwab.Orders do
 
   defp check_keys(request) do
     request
-    |> Enum.reject(fn {key, value} -> is_nil(value) or key in @request_keys end)
+    |> Enum.reject(fn {key, _value} -> key in @request_keys end)
     |> Enum.map(fn {key, _value} -> key end)
     |> Enum.sort()
     |> case do

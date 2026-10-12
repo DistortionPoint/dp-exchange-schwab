@@ -399,8 +399,17 @@ defmodule DpExchange.Schwab.OrdersTest do
       assert Orders.build(request) == {:error, {:unsupported_order_field, :alpha}}
     end
 
-    test "an unknown key holding nil is a forwarded unset option and counts as absent" do
-      assert {:ok, _payload} = Orders.build(Map.put(@buy, :client_order_id, nil))
+    test "an unknown key holding nil is refused too (DV1, BREAKING)" do
+      assert Orders.build(Map.put(@buy, :client_order_id, nil)) ==
+               {:error, {:unsupported_order_field, :client_order_id}}
+
+      assert Orders.build(Map.put(@buy, :bogus, nil)) ==
+               {:error, {:unsupported_order_field, :bogus}}
+    end
+
+    test "a nil on a key the builder reads is still an unset option" do
+      assert {:ok, _payload} = Orders.build(Map.put(@buy, :price, nil))
+      assert {:ok, _payload} = Orders.build(Map.put(@buy, :session, nil))
     end
 
     test "keys are checked before anything else is" do
