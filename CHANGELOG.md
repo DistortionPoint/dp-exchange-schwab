@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.120] - 2026-10-12
+
 ### Fixed -- tick T (regression review of tick S, docs vs code, hot path)
 
 - **BREAKING: a candle with a zero or negative open, high, low or close is refused (MD6).**
