@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.124] - 2026-10-12
+
 - **A Streamer session accepted and then severed within seconds reconnected at once, forever.**
   The backoff count reset on every successful LOGIN, so a venue that accepts the login and then
   closes (`12 CLOSE_CONNECTION`, one Streamer connection per user; `30 STOP_STREAMING`) got a
