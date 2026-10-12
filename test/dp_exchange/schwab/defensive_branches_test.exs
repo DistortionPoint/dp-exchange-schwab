@@ -246,8 +246,10 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       # window itself: a `period` beside `startDate` would be a second, unmeasured opinion on
       # the same question. This used to claim the range picked a small `period`, and asserted
       # nothing about what was sent.
+      test_pid = self()
+
       capture = fn conn ->
-        send(self(), {:request, conn.query_string})
+        send(test_pid, {:request, conn.query_string})
         Req.Test.json(conn, %{"candles" => []})
       end
 
@@ -725,9 +727,11 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       # AT:1372), whose legs are `orderLegs` of `OrderLeg` (AT:1471) — flat `assetType`/
       # `finalSymbol`, no nested `instrument`. This used to send `place_order/3`'s own
       # `OrderRequest`/`orderLegCollection` body verbatim to `/previewOrder`.
+      test_pid = self()
+
       capture = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(self(), {:preview_body, Jason.decode!(body)})
+        send(test_pid, {:preview_body, Jason.decode!(body)})
         Req.Test.json(conn, %{"orderValidationResult" => %{}})
       end
 

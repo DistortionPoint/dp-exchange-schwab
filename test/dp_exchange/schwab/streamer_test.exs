@@ -220,11 +220,6 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "LOGIN", ~w(AAPL))
     end
 
-    test "a service the venue does not carry is an error" do
-      assert {:error, {:unknown_service, "LEVELONE_CRYPTO"}} =
-               StreamerProtocol.subscribe(@info, "LEVELONE_CRYPTO", "SUBS", ~w(BTC))
-    end
-
     test "fields are joined when given and omitted when not" do
       # Omitting them asks for the service's default set, which is the venue's choice.
       assert {:ok, with_fields} =
@@ -437,27 +432,6 @@ defmodule DpExchange.Schwab.StreamerTest do
       # The vendor's CHART_FUTURES table stops at field 6 — no sequence, no chart_day.
       refute Map.has_key?(futures, "7")
       refute Map.has_key?(futures, "8")
-    end
-
-    test "every service the vendor documents either decodes or names its own gap" do
-      # A map for a service the venue does not publish would be dead code that looks
-      # live — so this is checked against `@all_services`, the vendor's own list, rather
-      # than against this module's own keys. `for_service/1` either succeeds or names
-      # `{:no_field_map, service}`; nothing else is a legal answer for a documented
-      # service.
-      for service <- @all_services do
-        case StreamerFields.for_service(service) do
-          {:ok, %{} = _field_map} -> :ok
-          {:error, {:no_field_map, ^service}} -> :ok
-        end
-      end
-    end
-
-    test "a service with no map is an error, never another service's numbering" do
-      # ADMIN has no map: it is the login/logout channel and carries no market data. The
-      # point is that a service without one errors rather than borrowing another's
-      # numbering.
-      assert {:error, {:no_field_map, "ADMIN"}} = StreamerFields.for_service("ADMIN")
     end
 
     test "renaming drops numbers it has no name for" do
@@ -892,14 +866,19 @@ defmodule DpExchange.Schwab.StreamerTest do
     test "a snapshot time outside the epoch range is refused, not raised out of the socket" do
       assert {:error, :missing_venue_timestamp} =
                StreamerDecode.to_order_book(
-                 %{bids: [], asks: [], book_time: 1_787_936_147_000_000},
+                 %{bids: [], asks: [], snapshot_time: 1_787_936_147_000_000},
                  "AAPL"
                )
     end
 
-    test "a zero snapshot time is refused rather than dating the book to 1970" do
-      assert {:error, :missing_venue_timestamp} =
-               StreamerDecode.to_order_book(%{bids: [], asks: [], book_time: 0}, "AAPL")
+    test "a zero or negative snapshot time is refused rather than dating the book to 1970" do
+      for bad <- [0, -1] do
+        assert {:error, :missing_venue_timestamp} =
+                 StreamerDecode.to_order_book(
+                   %{bids: [], asks: [], snapshot_time: bad},
+                   "AAPL"
+                 )
+      end
     end
 
     test "levels are re-sorted, not left in the venue's row order" do

@@ -924,7 +924,9 @@ defmodule DpExchange.SchwabTest do
 
     test "subscribe_notices registers and sends nothing on registration" do
       assert Fake.subscribe_notices(to: self()) == :ok
-      refute_receive {:dp_exchange, :schwab, %Notice{}}, 100
+      # The fake keeps its state in the caller and sends from the caller, so anything it
+      # sent on registration is already in the mailbox: no window is needed to prove none.
+      refute_received {:dp_exchange, :schwab, %Notice{}}
       assert Fake.subscribe_notices(to: "nope") == {:error, {:invalid_subscriber, "nope"}}
     end
 
@@ -960,7 +962,7 @@ defmodule DpExchange.SchwabTest do
 
       assert Fake.coverage() == %{}
       assert Fake.coverage_by_kind() == %{quotes: %{}}
-      refute_receive {:dp_exchange, :schwab, _anything}, 50
+      refute_received {:dp_exchange, :schwab, _anything}
     end
 
     test "the short arities answer too — a default nothing calls is dead code" do

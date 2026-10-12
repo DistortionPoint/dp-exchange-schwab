@@ -85,16 +85,5 @@ defmodule DpExchange.Schwab.NaNGuardTest do
       assert Decimal.equal?(top.bid, Decimal.new("99.5"))
       assert Decimal.equal?(top.ask, Decimal.new("100.5"))
     end
-
-    test "what a NaN would have done downstream, stated rather than assumed" do
-      # The reason this guard exists rather than a comment saying "should not happen".
-      {nan, ""} = Decimal.parse("NaN")
-
-      assert Decimal.nan?(nan)
-      # Silently poisons arithmetic...
-      assert Decimal.add(nan, Decimal.new(1)) |> Decimal.nan?()
-      # ...and raises on the comparison a consumer is most likely to reach for.
-      assert_raise Decimal.Error, fn -> Decimal.compare(nan, Decimal.new(1)) end
-    end
   end
 end

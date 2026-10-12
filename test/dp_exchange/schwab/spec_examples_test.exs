@@ -187,8 +187,10 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
     test "get_symbol_quote/3 returns the vendor's body unnormalised, from the one-segment path" do
       body = fixture!("market_data/price_history_single_symbol.json")
 
+      test_pid = self()
+
       capture = fn conn ->
-        send(self(), {:request_path, conn.request_path})
+        send(test_pid, {:request_path, conn.request_path})
         Req.Test.json(conn, body)
       end
 

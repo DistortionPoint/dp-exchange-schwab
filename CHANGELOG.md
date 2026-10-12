@@ -31,6 +31,12 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **Test suite (tick V, every test file read line by line):** the Streamer snapshot-time
+  refusal tests fed an ignored key and never reached the epoch guard, now they do; the status
+  enum test checks the status is sent; a huge-exponent leg test no longer passes vacuously;
+  fallback-poll and Fake tests wait on observed state, not timed windows; socket and feed waits
+  on spawned processes are 5s; duplicate and Decimal-only tests removed.
+
 ## [0.2.121] - 2026-10-12
 
 ### Fixed -- tick U (test-suite quality, regression review of tick T)

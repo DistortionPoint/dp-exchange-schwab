@@ -567,7 +567,7 @@ defmodule DpExchange.Schwab.SocketTest do
 
       # The next connection starts with a fresh LOGIN, carrying whatever token is current.
       assert {:ok, _state} = Socket.handle_connect(:conn, closed)
-      assert_receive :login
+      assert_receive :login, 5_000
       assert {:reply, {:text, login}, _state} = Socket.handle_info(:login, closed)
       assert login =~ "LOGIN"
     end
@@ -1085,7 +1085,7 @@ defmodule DpExchange.Schwab.SocketTest do
       }
 
       assert {:ok, _state} = Socket.handle_frame(frame(response), state())
-      assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}
+      assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}, 5_000
     end
 
     test "disconnecting emits link down and a reconnect attempt carrying the real backoff" do
@@ -1101,12 +1101,15 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:reconnect, _state} =
                Socket.handle_disconnect(%{reason: :closed}, state(%{login_failures: 2}))
 
-      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, down_metadata}
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, down_metadata},
+                     5_000
+
       assert is_binary(down_metadata.reason)
       assert down_metadata.reason =~ "closed"
 
       assert_receive {:telemetry, [:dp_exchange, :link, :reconnect_attempt], %{count: 1},
-                      metadata}
+                      metadata},
+                     5_000
 
       assert metadata.attempt == 3
       # The backoff this socket is about to sleep, not a constant. 1s base doubling per
@@ -1121,7 +1124,7 @@ defmodule DpExchange.Schwab.SocketTest do
       payload = Jason.encode!(%{"notify" => [%{"heartbeat" => "1"}]})
       assert {:ok, _state} = Socket.handle_frame({:text, payload}, state())
 
-      assert_receive {:telemetry, [:dp_exchange, :link, :event], measurements, metadata}
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], measurements, metadata}, 5_000
       assert measurements.bytes == byte_size(payload)
       assert metadata.type == :frame
     end
@@ -1130,7 +1133,7 @@ defmodule DpExchange.Schwab.SocketTest do
       # On this venue especially: delivering nothing overnight is the NORMAL state, so a real
       # outage and a quiet market already look alike. A decoder bug must not join them.
       assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
-      assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}, 5_000
     end
   end
 

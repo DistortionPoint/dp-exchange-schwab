@@ -143,10 +143,12 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
 
     task = Task.async(fn -> Orders.from_venue(spread) end)
 
-    assert {:ok, {:ok, %Order{legs: legs}}} =
+    # `legs: nil` is "the legs are not known": one unreadable quantity gives no ratio to ANY
+    # leg (the ratios are quantities over their gcd), and the top stays without a symbol or
+    # side because it is still a spread. An assertion over the legs themselves would pass
+    # vacuously on the empty list.
+    assert {:ok, {:ok, %Order{legs: nil, symbol: nil, side: nil}}} =
              Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
-
-    refute Enum.any?(List.wrap(legs), &is_integer(&1.ratio))
   end
 
   test "an order with no id is refused, and so is a list containing one" do

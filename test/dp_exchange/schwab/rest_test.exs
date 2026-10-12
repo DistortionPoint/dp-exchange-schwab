@@ -507,12 +507,12 @@ defmodule DpExchange.Schwab.RestTest do
     test "the lookback is measured over the window actually sent (start to now)" do
       # 9 days 23 hours back is ten days to the minute width; the same instant `now` that
       # goes out as endDate sizes it, so it is served, not refused.
-      exploding_free = responding(%{"candles" => []})
+      empty_answer = responding(%{"candles" => []})
       range = [start: DateTime.add(DateTime.utc_now(), -(10 * 86_400 - 3_600), :second)]
 
       assert {:ok, []} =
                Rest.get_historical_prices("AAPL", "1m", range, @creds,
-                 plug: exploding_free,
+                 plug: empty_answer,
                  retry_attempts: 0
                )
     end

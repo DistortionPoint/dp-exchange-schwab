@@ -201,13 +201,24 @@ defmodule DpExchange.Schwab.PathAndWindowTest do
     end
 
     test "every listed status is sent as given" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+        Req.Test.json(conn, [])
+      end
+
       for status <- Rest.order_statuses() do
         assert {:ok, []} =
                  Rest.get_orders(
                    @creds,
                    "HASH",
-                   [status: status, plug: capturing([], self()), retry_attempts: 0] ++ @window
+                   [status: status, plug: plug, retry_attempts: 0] ++ @window
                  )
+
+        # Received, not assumed: without this the loop proved only that nothing raised.
+        assert_receive {:query, query}, 5_000
+        assert query =~ URI.encode_query(status: status)
       end
     end
 

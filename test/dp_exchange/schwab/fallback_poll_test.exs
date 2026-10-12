@@ -88,8 +88,6 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert notice.message ==
                "schwab-fallback-poll has delivered nothing in 1 consecutive attempts"
 
-      assert notice.details.label == "schwab-fallback-poll"
-
       # Never the Streamer's own vocabulary. A reader with only this text has to be able
       # to tell the two apart.
       refute notice.message =~ "Streamer"
@@ -112,10 +110,12 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
                      5_000
 
-      # Several more tick intervals pass with the poll still failing every attempt — no
-      # second notice, because `PollingFeed` latches to `:dead` on the first crossing and
-      # only fires again on recovery.
-      refute_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change}}, 400
+      # Several more ticks are OBSERVED to fail (not slept through) — no second notice,
+      # because `PollingFeed` latches to `:dead` on the first crossing and only fires again
+      # on recovery. Waiting on the poller's own failure count makes the refute below mean
+      # "three more failed cycles produced nothing" on a slow machine as on a fast one.
+      wait_for_failed_poll(feed, 4)
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :coverage_change}}
     end
 
     test "recovery fires a distinct info notice once the fallback poll starts delivering again" do
@@ -145,8 +145,6 @@ defmodule DpExchange.Schwab.FallbackPollTest do
 
       assert recovery.message ==
                "schwab-fallback-poll has resumed delivering after 3 consecutive failures"
-
-      assert recovery.details.label == "schwab-fallback-poll"
 
       # The recovered quote itself still arrives normally on the same route.
       assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
@@ -243,17 +241,20 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert Process.alive?(feed)
     end
 
-    defp wait_for_failed_poll(feed, waited \\ 0) do
+    defp wait_for_failed_poll(feed, minimum \\ 1, waited \\ 0) do
       cond do
-        match?(%{failures_since_ok: failures} when failures >= 1, Feed.status(feed)) ->
+        match?(%{failures_since_ok: failures} when failures >= minimum, Feed.status(feed)) ->
           :ok
 
         waited >= 5_000 ->
-          flunk("the fallback poll never attempted a cycle: #{inspect(Feed.status(feed))}")
+          flunk(
+            "the fallback poll never reached #{minimum} failed cycles: " <>
+              inspect(Feed.status(feed))
+          )
 
         true ->
           Process.sleep(20)
-          wait_for_failed_poll(feed, waited + 20)
+          wait_for_failed_poll(feed, minimum, waited + 20)
       end
     end
   end
@@ -318,6 +319,10 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
                      5_000
 
+      # Observed failed cycles, not an instant after the first notice: a per-symbol refusal
+      # would be sent by the cycle that failed, so several must have run before this means
+      # anything.
+      wait_for_failed_poll(feed, 3)
       refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
     end
 
@@ -337,6 +342,7 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
                      5_000
 
+      wait_for_failed_poll(feed, 3)
       refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
     end
   end

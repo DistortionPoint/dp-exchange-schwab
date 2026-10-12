@@ -908,7 +908,8 @@ defmodule DpExchange.Schwab.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert_receive {:dp_exchange, :schwab,
-                      %Notice{kind: :degraded, severity: :warning, details: details}}
+                      %Notice{kind: :degraded, severity: :warning, details: details}},
+                     5_000
 
       assert details.bound == 1
       assert details.dropping == :newest
@@ -1138,7 +1139,7 @@ defmodule DpExchange.Schwab.FeedTest do
     end
   end
 
-  describe "found 2026-10-10" do
+  describe "init without a subscriber, refused symbols and stale poll deliveries" do
     test "a feed started without :subscriber does not subscribe itself" do
       # `self()` in `init/1` is the Feed: a self-subscribed Feed re-delivered every message
       # to its own mailbox, forever.

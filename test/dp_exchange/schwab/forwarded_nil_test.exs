@@ -44,7 +44,7 @@ defmodule DpExchange.Schwab.ForwardedNilTest do
     # `Core.Fanout.deliver/4` resolves `nil` the way it resolves any registered name
     # nothing answers to: nobody. `subscribe/3` answered `:ok` and nothing ever arrived.
     probe = probe()
-    Feed.subscribe(probe, ["BTC-USD"], to: nil)
+    Feed.subscribe(probe, ["AAPL"], to: nil)
 
     assert_receive {:probed, message}, 5_000
     assert elem(message, 0) == :subscribe

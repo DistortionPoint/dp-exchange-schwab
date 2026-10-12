@@ -93,7 +93,7 @@ defmodule DpExchange.Schwab.InvalidSubscriberTest do
       assert Schwab.subscribe_notices(feed: name, to: "consumer") ==
                {:error, {:invalid_subscriber, "consumer"}}
 
-      assert %{} = Schwab.status(feed: name)
+      # A live feed answers its status; an absent one answers `%{}` (next test).
       assert map_size(Schwab.status(feed: name)) > 0
     end
 

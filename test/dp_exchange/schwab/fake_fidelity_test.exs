@@ -156,6 +156,8 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
       assert {:error, {:unknown_transaction_types, [:TRADE]}} =
                Schwab.get_transactions(@creds, opts)
+
+      assert Fake.get_transactions(@creds, opts) == Schwab.get_transactions(@creds, opts)
     end
 
     test "an empty list names no type" do
