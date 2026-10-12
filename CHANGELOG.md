@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.122] - 2026-10-12
+
 - **Test suite (tick V, every test file read line by line):** the Streamer snapshot-time
   refusal tests fed an ignored key and never reached the epoch guard, now they do; the status
   enum test checks the status is sent; a huge-exponent leg test no longer passes vacuously;
