@@ -552,7 +552,7 @@ defmodule DpExchange.Schwab.Feed do
   immediately, so the socket's next `LOGIN` can use it. Does not force a reconnect.
   """
   @spec update_credentials(GenServer.server(), term()) ::
-          :ok | {:error, {:invalid_credentials, term()}}
+          :ok | {:error, {:invalid_credentials, :schwab}}
   def update_credentials(feed, credentials) when is_map(credentials) do
     # Wrapped BEFORE it is sent. OTP prints the call message in full in two places the feed's
     # own state redaction cannot reach: the caller's exit reason when the call times out
@@ -564,7 +564,14 @@ defmodule DpExchange.Schwab.Feed do
 
   # Refused in the caller: a non-map reached `handle_call/3`, raised there, and the restart
   # lost every subscription made since start.
-  def update_credentials(_feed, credentials), do: {:error, {:invalid_credentials, credentials}}
+  #
+  # **The refused value is NOT echoed back.** The argument is by definition not the map this
+  # function wanted, and the likely mistakes are exactly the ones that carry secrets: a bare
+  # access token string, or the credentials as a keyword list (`[access_token: ..,
+  # refresh_token: .., client_secret: ..]`). Returning it put the refresh token and client
+  # secret into an error tuple that callers `inspect/1`, log, or print in a `MatchError`. The
+  # facade and `Fake` already answer `{:invalid_credentials, :schwab}`; this matches them.
+  def update_credentials(_feed, _credentials), do: {:error, {:invalid_credentials, :schwab}}
 
   @doc "Child spec, so a consumer supervises this the same way it supervises any venue."
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -1374,7 +1381,13 @@ defmodule DpExchange.Schwab.Feed do
             # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
             # chooses deliberate defaults rather than inheriting websockex's, which do not
             # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
-            Keyword.take(state.opts, [:url, :socket_connect_timeout, :socket_recv_timeout]),
+            Keyword.take(state.opts, [
+              :url,
+              :socket_connect_timeout,
+              :socket_recv_timeout,
+              # Test-only seam, see `Socket.start_link/1`: a plain-TCP stand-in for the Streamer.
+              :allow_insecure_socket
+            ]),
             streamer_info: info,
             access_token: token,
             subscriber: self(),

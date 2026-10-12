@@ -168,9 +168,45 @@ defmodule DpExchange.Schwab.Auth do
     cond do
       trimmed == "" -> {:error, {:missing_credentials, :schwab}}
       trimmed != value -> {:error, {:invalid_credentials, :schwab}}
+      unsendable?(value) -> {:error, {:invalid_credentials, :schwab}}
       true -> {:ok, value}
     end
   end
+
+  # **A credential that cannot travel as sent is refused here, not discovered downstream.**
+  # Only the ends were checked, so a token with an INTERIOR newline or control byte reached
+  # the `Authorization` header, where the HTTP client refuses it with an error that quotes
+  # the offending header value (the access token) into the `{:error, _}` the caller gets and
+  # logs. A token that is not valid UTF-8 did the same through `Jason.encode!/1` in the
+  # Streamer `LOGIN` frame, whose `EncodeError` message prints the whole binary and crashed
+  # the socket. Refusing both by name keeps the value out of every error path.
+  defp unsendable?(value) do
+    not String.valid?(value) or String.match?(value, ~r/[[:cntrl:]]/u)
+  end
+
+  @doc """
+  Whether a request carrying a credential may go to `url`.
+
+  `:ok` for an `https://` URL. `{:error, {:insecure_url, :schwab}}` for anything else,
+  checked before the request leaves: `:market_data_url`, `:trader_url` and `:token_url` are
+  consumer-overridable, and a bearer token or a Basic client secret sent to an `http://` URL
+  is readable by anyone on the path. The one exception is a request with a `:plug` or a
+  `:req_adapter`, the test seams that answer in-process and never open a connection.
+  """
+  @spec check_secure_url(term(), keyword()) :: :ok | {:error, {:insecure_url, :schwab}}
+  def check_secure_url(url, opts) do
+    if secure_url?(url) or in_process_seam?(opts),
+      do: :ok,
+      else: {:error, {:insecure_url, :schwab}}
+  end
+
+  defp secure_url?(url) when is_binary(url),
+    do: url |> String.downcase() |> String.starts_with?("https://")
+
+  defp secure_url?(_other), do: false
+
+  defp in_process_seam?(opts),
+    do: Config.opt(opts, :plug, nil) != nil or Config.opt(opts, :req_adapter, nil) != nil
 
   @doc """
   Whether `credentials` should be refreshed before the next call.
@@ -218,6 +254,9 @@ defmodule DpExchange.Schwab.Auth do
 
   - `{:error, {:missing_credentials, :schwab}}` — no refresh token, or no client
     credentials to authenticate the refresh with. Nothing was sent, and nothing is spent.
+  - `{:error, {:insecure_url, :schwab}}` — an overridden `:token_url` that is not `https://`.
+    Nothing was sent: the Basic client pair and the refresh token are not put on a clear
+    channel.
   - `{:refused, {:reauthorization_required, status, detail}}` — Schwab rejected the
     refresh token. **Terminal.** The refresh token's seven days elapsed, or the user reset
     their password. Only a person at a browser can fix it; a caller must not retry.
@@ -287,6 +326,14 @@ defmodule DpExchange.Schwab.Auth do
 
     body = URI.encode_query(%{"grant_type" => "refresh_token", "refresh_token" => refresh_token})
 
+    # The Basic client pair and the refresh token ride this request, so an overridden
+    # `:token_url` that is not https is refused before anything is sent. See `check_secure_url/2`.
+    with :ok <- check_secure_url(token_url(opts), opts) do
+      post_refresh(credentials, headers, body, opts)
+    end
+  end
+
+  defp post_refresh(credentials, headers, body, opts) do
     case HttpClient.request(:post, token_url(opts), headers, body, request_opts(opts)) do
       {:ok, %{status: status, body: response}} when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(response),

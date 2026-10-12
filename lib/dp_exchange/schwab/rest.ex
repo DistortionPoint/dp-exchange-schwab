@@ -2631,6 +2631,8 @@ defmodule DpExchange.Schwab.Rest do
   def place_order(credentials, account_hash, payload, opts) do
     with {:ok, path} <- account_path(account_hash, ["orders"]),
          {:ok, headers} <- Auth.headers(credentials, opts),
+         # Before anything is sent: a bearer token never goes to a non-https override.
+         :ok <- Auth.check_secure_url(trader_url(opts), opts),
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
 
@@ -2828,6 +2830,7 @@ defmodule DpExchange.Schwab.Rest do
   def replace_order(credentials, account_hash, order_id, payload, opts) do
     with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
          {:ok, headers} <- Auth.headers(credentials, opts),
+         :ok <- Auth.check_secure_url(trader_url(opts), opts),
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
       url = trader_url(opts) <> path
@@ -2840,6 +2843,7 @@ defmodule DpExchange.Schwab.Rest do
 
   defp post_json(credentials, url, payload, opts) do
     with {:ok, headers} <- Auth.headers(credentials, opts),
+         :ok <- Auth.check_secure_url(url, opts),
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
 
@@ -2866,7 +2870,8 @@ defmodule DpExchange.Schwab.Rest do
           :ok | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, account_hash, order_id, opts) do
     with {:ok, path} <- account_path(account_hash, ["orders", order_id]),
-         {:ok, headers} <- Auth.headers(credentials, opts) do
+         {:ok, headers} <- Auth.headers(credentials, opts),
+         :ok <- Auth.check_secure_url(trader_url(opts), opts) do
       url = trader_url(opts) <> path
 
       case HttpClient.request(:delete, url, headers, nil, order_write_request_opts(opts)) do
@@ -2945,7 +2950,10 @@ defmodule DpExchange.Schwab.Rest do
   # --- request ------------------------------------------------------------
 
   defp get(url, credentials, opts) do
-    with {:ok, headers} <- Auth.headers(credentials, opts) do
+    # The URL is checked after the credential and before the request: every read here carries
+    # a bearer token, and `:market_data_url` / `:trader_url` are consumer-overridable.
+    with {:ok, headers} <- Auth.headers(credentials, opts),
+         :ok <- Auth.check_secure_url(url, opts) do
       case HttpClient.request(:get, url, headers, nil, request_opts(opts)) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
           decoded_body(body)

@@ -108,9 +108,14 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
         DpExchange.Schwab.Feed.start_link(name: nil, credentials: @creds, symbols: ["AAPL"])
 
       for bad <- [nil, "token", [access_token: "x"], {:error, :refresh_failed}] do
+        # The refused value is never echoed: `bad` may be a token or a keyword list of secrets.
         assert DpExchange.Schwab.Feed.update_credentials(feed, bad) ==
-                 {:error, {:invalid_credentials, bad}}
+                 {:error, {:invalid_credentials, :schwab}}
       end
+
+      secret_list = [refresh_token: "test-secret-not-real"]
+      leaked = DpExchange.Schwab.Feed.update_credentials(feed, secret_list)
+      refute inspect(leaked) =~ "test-secret-not-real"
 
       assert Process.alive?(feed)
       assert DpExchange.Schwab.Feed.wanted(feed) == ["AAPL"]

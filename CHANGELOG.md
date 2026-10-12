@@ -31,6 +31,21 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **Security: no credential is sent to a non-https override.** A `:token_url`, `:trader_url`
+  or `:market_data_url` that is not https answers `{:error, {:insecure_url, :schwab}}` before
+  any request (`:plug` and `:req_adapter` are exempt); an order write refused this way is a
+  plain error, never `order_unconfirmed`.
+- **Security: the Streamer is wss only.** `Socket.start_link/1` refuses a non-`wss://` URL,
+  venue-supplied or overridden, with `{:error, {:insecure_url, :schwab}}`; the LOGIN frame
+  carries the access token. `allow_insecure_socket: true` is the test-only seam.
+- **Security: a token, client id or client secret with a control character or invalid UTF-8 is
+  refused** as `{:invalid_credentials, :schwab}`. It reached the `Authorization` header or the
+  LOGIN encoder, and the resulting error quoted it.
+- **`Feed.update_credentials/2` with a non-map answers `{:invalid_credentials, :schwab}`** like
+  the facade, instead of echoing the rejected value.
+- **`Socket.start_link/1` with a missing required option raises naming the key only**, not a
+  `KeyError` that printed the access token.
+
 ## [0.2.125] - 2026-10-12
 
 - **Docs (`usage-rules.md` checked line by line against the code):** the Core requirement is

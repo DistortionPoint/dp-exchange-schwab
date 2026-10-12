@@ -242,7 +242,7 @@ defmodule DpExchange.Schwab.Socket do
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
-    info = Keyword.fetch!(opts, :streamer_info)
+    info = fetch_opt!(opts, :streamer_info)
 
     state = %{
       info: info,
@@ -254,8 +254,8 @@ defmodule DpExchange.Schwab.Socket do
       # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the
       # token for as long as the Streamer connection is up, and a WebSockex crash
       # prints its state via the same OTP crash report `Feed`'s does.
-      credentials: opts |> Keyword.fetch!(:access_token) |> Credentials.wrap_token(),
-      subscriber: Keyword.fetch!(opts, :subscriber),
+      credentials: opts |> fetch_opt!(:access_token) |> Credentials.wrap_token(),
+      subscriber: fetch_opt!(opts, :subscriber),
       # Optional `:tag`. When given, every payload reaches the subscriber wrapped as
       # `{:dp_exchange, :schwab, {:from_socket, tag, payload}}`, so a subscriber that replaces
       # sockets can tell a late message from a dead one apart from the current one's. Absent,
@@ -300,12 +300,33 @@ defmodule DpExchange.Schwab.Socket do
       short_sessions: 0
     }
 
-    VendoredWebSockex.start_link(
-      Config.opt(opts, :url, info.socket_url),
-      __MODULE__,
-      state,
-      connection_opts(opts)
-    )
+    url = Config.opt(opts, :url, info.socket_url)
+
+    # The LOGIN frame carries the access token, so the connection it rides must be TLS.
+    # `streamerSocketUrl` is venue-supplied and `:url` is consumer-overridable; either could
+    # say `ws://`, and `tls_options/1` only has an effect on `wss://`. Refused before dialling.
+    if secure_socket_url?(url, opts) do
+      VendoredWebSockex.start_link(url, __MODULE__, state, connection_opts(opts))
+    else
+      {:error, {:insecure_url, :schwab}}
+    end
+  end
+
+  # `Keyword.fetch!/2` raises a `KeyError` whose message prints the WHOLE keyword list, and
+  # this one holds `:access_token`. A missing `:subscriber` therefore wrote the token into the
+  # exception message (and any log of it). Name the key and nothing else.
+  defp fetch_opt!(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "Socket.start_link/1 requires the #{inspect(key)} option"
+    end
+  end
+
+  # `allow_insecure_socket: true` is a TEST-ONLY seam: a local plain TCP server standing in for
+  # the Streamer cannot speak TLS. Nothing in this package sets it.
+  defp secure_socket_url?(url, opts) do
+    (is_binary(url) and String.starts_with?(String.downcase(url), "wss://")) or
+      Config.opt(opts, :allow_insecure_socket, false) == true
   end
 
   @doc """

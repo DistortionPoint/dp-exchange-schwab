@@ -119,6 +119,8 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
   defp socket_opts(port) do
     [
       url: "ws://127.0.0.1:#{port}/",
+      # Test-only seam: this server is plain TCP. `Socket` refuses `ws://` without it.
+      allow_insecure_socket: true,
       subscriber: self(),
       access_token: "test-token",
       streamer_info: %StreamerInfo{

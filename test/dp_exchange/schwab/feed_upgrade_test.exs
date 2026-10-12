@@ -121,7 +121,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
   test "a transient bootstrap failure is retried on the tick, and the stream takes over" do
     {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
     url = websocket_endpoint()
-    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url, allow_insecure_socket: true)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
 
@@ -213,7 +213,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
   test "a frame and a link_down from a replaced socket are dropped, the current one's are not" do
     {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
     url = websocket_endpoint()
-    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url, allow_insecure_socket: true)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
@@ -287,7 +287,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     # parked on it is answered as ever; the route it settled is torn down.
     {_agent, plug} = switchable({:hang, self()})
     url = websocket_endpoint()
-    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url, allow_insecure_socket: true)
 
     subscribing = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
     assert_receive {:hanging, request}, 5_000
@@ -309,7 +309,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
   test "an upgrade that completes after everything was unsubscribed opens nothing" do
     {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
     url = websocket_endpoint()
-    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url, allow_insecure_socket: true)
 
     :ok = Feed.subscribe(feed, ["AAPL"])
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
