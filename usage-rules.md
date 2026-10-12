@@ -17,7 +17,7 @@ the top and carries its `legs`. An order with no `orderId` is refused rather tha
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `~> 0.3.50`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.74`.
 
 ```elixir
 # before
@@ -57,6 +57,8 @@ Those `LEVELONE_*` and `*_BOOK` rows are withheld, and the first one per symbol 
 Streamer session raises a `:degraded` `Core.Notice` with `details.symbol`, `details.service`
 and the reason. A symbol that is subscribed and never delivers, with that notice, is an
 entitlement problem on the account, not a feed fault. `CHART_*` candles are still delivered.
+At most 5,000 symbols are announced per session; past that, delayed rows are still withheld but
+not announced again.
 
 The **book** is the opposite and always was: `to_order_book/2` reads the venue's
 `snapshot_time` and fails closed without it, so an `OrderBook` always carries a real
@@ -104,7 +106,8 @@ is no longer published as `nil`. The quoted value is as sent when short and cut 
 or close is refused too, on REST and on the stream) raises one `:degraded` `Core.Notice` per
 symbol and kind per Streamer session, with `details.symbol`, `details.service` and
 `details.reason`. A book that has stopped updating while that notice stands is frozen on the
-last good frame, not live. The set of announced symbols is capped and cleared on reconnect.
+last good frame, not live. The set of announced symbols and kinds is capped at 5,000 (past it the frame is still dropped,
+just not announced again) and cleared on reconnect.
 
 A streamed `Quote`'s `volume` is the day's cumulative total with `volume_window:
 :running_total` (difference it), exactly as REST. It is never one print: LEVELONE is
@@ -271,7 +274,8 @@ package emits:
 
 Subscribe with `DpExchange.Schwab.subscribe_notices/1` and treat that kind as "refresh now" —
 the same `refresh_credentials/2` → persist → `update_credentials/2` sequence above. **The
-socket cannot fix its own token.** It backs off (one second, doubling, capped at thirty) and
+socket cannot fix its own token.** It backs off (one second, doubling, capped at thirty, each wait
+randomly shortened by up to a quarter so nodes sharing an outage do not retry in step) and
 retries the same rejected credential until you replace it, so a host that ignores this notice
 has a feed that reconnects forever and never logs in. This also covers what
 `needs_refresh?/2` structurally cannot: a token the venue stops accepting *early* — revoked,
@@ -285,10 +289,18 @@ venue being down; a fresh token is the remedy for neither, and reporting them as
 credential would be this package claiming something the venue never said.
 
 **Any refused login ends that Streamer connection and is retried.** The package closes the
-socket itself, backs off on the consecutive-failure count (1s, doubling, capped at 30s) and
+socket itself, backs off on the consecutive-failure count (1s, doubling, capped at 30s, jittered shorter by
+up to a quarter; a session that connected but ended quickly counts as a failure too) and
 logs in again on a fresh connection, presenting whatever token `update_credentials/2` last
 supplied. So a `:degraded` login notice means a retry is in progress, not a feed that has
 stopped for good. There is nothing to restart.
+
+**A crashed route is redialled with its own backoff, and only while something is wanted.** The
+first crash in a quiet period is redialled at once; further crashes within 60 seconds wait 1s,
+doubling to 30s, and each announces a `:link_down` notice (`details.reason`). If the last symbol
+was unsubscribed before the crash, nothing is redialled until the next `subscribe/2` or
+`update_symbols/2`. The same holds for a bootstrap still in flight: if the last symbol was
+unsubscribed while it ran, the route it just created is closed on settling rather than kept.
 
 **The refresh token is one-time use.** Every refresh spends the old one and returns a new
 one. So:
@@ -352,6 +364,12 @@ sent, so a timed-out call's exit reason does not print the tokens) and for the S
 `customer_id` and `correl_id` in `StreamerInfo`, which `Socket` keeps in its state and which
 `inspect/1` now hides.
 
+`DpExchange.Schwab.child_spec/1` wraps the `:credentials` in its start arguments too, so a
+supervisor's own crash report of its children does not print them. **A child spec you build
+by hand skips that.** If you start `Feed` or `Supervisor` from your own map, pass the
+credentials through `DpExchange.Schwab.Credentials.wrap/1` (or the whole keyword list
+through `Credentials.wrap_opt/1`) first.
+
 ## 4. A symbol is one instrument, not a pair
 
 `"AAPL"`, not `"AAPL-USD"`. Pair-shaped input is refused, and this matters more than it
@@ -400,7 +418,8 @@ reading it as a flat position would drop the short from the reply.
 Venue times (`quoteTime`, `tradeTime`, a candle's `datetime`) are read as epoch **milliseconds**
 always; a small integer is not guessed to be seconds.
 
-A margin account's `available_balance` is `availableFunds`, not `buyingPower`. Buying power
+A margin account's `available_balance` is `availableFunds` (a cash account's is
+`cashAvailableForTrading`; one the venue did not state is `nil`), not `buyingPower`. Buying power
 is leveraged and can exceed the balance it would sit inside.
 
 `balance` means **the cash in the account** for both account types: `totalCash` on a cash
@@ -520,7 +539,8 @@ venue names the id. The venue answers a write with only a `Location` header.
 `{:unsupported_order_field, key}`, `client_order_id` included, whatever its value (`nil`
 too)**: Schwab has no idempotency key, so silently ignoring it would let you believe a retry
 was safe. Checks run in this order:
-request shape, unknown keys, symbol, side, order type, time-in-force, quantity, prices, then
+request shape, unknown keys, symbol, side, order type, time-in-force, quantity, prices,
+session, instrument type, trailing-stop links, then
 `opts[:account_hash]` (`{:missing_option, :account_hash}`), the order ceiling, and the
 credential. `get_order/3`, `cancel_order/3` and `replace_order/4` check the order id first:
 `{:error, {:invalid_order_id, v}}` for `nil`, a non-string, a blank or a padded string.
@@ -818,8 +838,9 @@ it has nothing to inject into.)
 
 **The fake models the normal route.** `Fake.coverage/1` reports `:stream` and
 `Fake.status/1` `route: :stream`, as a real feed does once the Streamer bootstraps (the
-`:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` registers and sends
-nothing, as the real feed sends no notice on registration. `Fake.update_symbols/2` ignores
+`:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` judges `:to`
+(`{:invalid_subscriber, _}`) and sends nothing, as the real feed sends no notice on
+registration; the fake emits no notices at all. `Fake.update_symbols/2` ignores
 `:to`, as the real one does.
 
 **The fake judges a credential as the real package does.** A call whose credential has no
@@ -828,7 +849,9 @@ non-blank `:access_token` — `%{refresh_token: "x"}`, `%{access_token: ""}` —
 order of refusals: market-data calls first refuse a nil, non-string or blank symbol
 (`{:invalid_symbol, v}`), then want a credential map, then judge their own arguments
 (equity-ness of the symbol, width, range, market), then sign; account calls judge theirs and
-sign last. A `to:` atom naming no registered process is skipped on delivery (and covers
+sign last (`place_order/3`: order shape, `:account_hash`, order ceiling, then credential).
+Calls with no symbol skip the first step, and `get_positions/1` signs before it judges
+`:account_number`. A `to:` atom naming no registered process is skipped on delivery (and covers
 nothing), as the real feed's fan-out skips it. The
 fake also narrows `get_orders/2` by `:max_results`, refuses an unreadable `:from_date` or
 `:to_date` on `get_option_chain/2`, and answers `{:refused, {:account_not_found, number}}`
@@ -866,7 +889,9 @@ resolution will fail, so resolve to 0.5.1.
 default is not to (`verify: :verify_none`), and until then this package connected with
 that default, accepting any certificate. It now uses the operating system's trust store and
 HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
-error rather than connecting unverified. Pass your own `:ssl_options` to override.
+error rather than connecting unverified. Pass your own `:ssl_options` to change the TLS
+settings, but it is honoured only while it still says `verify: :verify_peer`: `nil`, `[]` or
+anything that drops it gets the verified defaults, never `:verify_none`.
 
 ## 14. A reconnect resubscribes on its own; a crash costs one retry, never a lost consumer state
 
@@ -884,6 +909,14 @@ resubscribes on its own, as soon as the new LOGIN succeeds.** `Socket.handle_dis
 clears the venue's own subscriptions on every reconnect (see `Socket`'s own moduledoc),
 and `Feed` re-issues your `wanted` symbols the moment the socket reports it has logged in
 again. A 60-second unconditional timer re-issues them as well, as a safety net.
+
+**Backoff details** (the ladder itself is in section 3). A "short" session is one that ended
+within 10 seconds of connecting (two nodes sharing one Schwab user sever each other this way);
+a session that lasts longer clears the count, so an ordinary blip still reconnects at once. The
+`delay_ms` on the reconnect telemetry event is the jittered delay actually waited
+(`Socket.jittered_delay_ms/1`), and a stop from the parent ends the wait. After a route crash,
+60 quiet seconds earn the immediate redial back; the `:link_down` message says which it is
+(`reconnecting now` or `reconnecting in N ms`), and a new redial timer replaces any earlier one.
 
 **`subscribe/2` or `update_symbols/2` can answer `{:error, {:route_pending, ms}}`.** The
 first call on a feed waits for the Streamer to be set up (`GET /userPreference`). If that

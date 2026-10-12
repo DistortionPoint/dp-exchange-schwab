@@ -31,6 +31,13 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **Docs (`usage-rules.md` checked line by line against the code):** the Core requirement is
+  `~> 0.3.74`; documents the jittered and short-session reconnect backoff, the route-crash backoff
+  and the closing of a route settled with nothing wanted, the full order-validation check order, the
+  5,000-entry notice caps and what happens past them, the cash-account available-balance field,
+  that `:ssl_options` is honoured only with `verify: :verify_peer`, that a hand-built child spec
+  must wrap its credentials, and corrects the Fake's `subscribe_notices/1` and refusal order.
+
 ## [0.2.124] - 2026-10-12
 
 - **A Streamer session accepted and then severed within seconds reconnected at once, forever.**
