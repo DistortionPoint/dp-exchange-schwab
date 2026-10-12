@@ -88,6 +88,23 @@ defmodule DpExchange.Schwab.Socket do
   through `update_access_token/2` can do that, and this backoff exists to stop hammering the
   venue while nobody has done so yet — not to fix the credential itself.
 
+  ## A session that dies young backs off like a rejected one
+
+  A successful LOGIN resets `login_failures`, so the backoff above never saw a venue that
+  accepts the LOGIN and then severs the connection within seconds. The vendor documents two
+  such causes: `12 CLOSE_CONNECTION` ("a limit of 1 Streamer connection at any given time from
+  a given user", `Connection Severed: Yes`) and `30 STOP_STREAMING` (also severed). Two nodes
+  sharing one Schwab user are the first: each login severs the other, each reconnects at
+  once, and the pair trade the connection back and forth at network speed for as long as
+  both run.
+
+  `connected_at` records when each connection came up, and `short_sessions` counts the
+  consecutive ones that ended inside `@stable_session_ms` (10s, a chosen figure, not a
+  measured one). `handle_disconnect/2` takes the larger of that count, `login_failures` and
+  the websockex `attempt_number` as the failure count for `reconnect_delay_ms/1`, so the
+  same capped doubling applies. A session that outlives the threshold clears the count, so an
+  ordinary blip after a healthy session still reconnects at once.
+
   ## A failed LOGIN always ends the connection
 
   Only `3 LOGIN_DENIED` is certain to be severed by the venue. The same table marks
@@ -196,6 +213,14 @@ defmodule DpExchange.Schwab.Socket do
   @max_held 64
   @max_delayed_reported 5_000
 
+  # A connection that ends sooner than this after it came up counts toward the reconnect
+  # backoff, whether or not its LOGIN succeeded. See `handle_disconnect/2`. **Chosen, not
+  # measured**: the vendor states no session lifetime or severing delay. Ten seconds is
+  # well under the 30s ping interval, so it never mistakes a quiet but healthy session for
+  # a short one, and long enough that a connection which was severed on arrival is not
+  # mistaken for a stable one.
+  @stable_session_ms 10_000
+
   # See the moduledoc's "A dead connection is found by pinging it".
   @ping_every_ms 30_000
   @silence_ms 90_000
@@ -221,6 +246,11 @@ defmodule DpExchange.Schwab.Socket do
 
     state = %{
       info: info,
+      # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
+      # the link to it is how this socket learns it was stopped, and a backoff has to keep
+      # listening for that. `self()` here is the caller of `start_link/1`, not the socket,
+      # which does not exist yet.
+      parent: self(),
       # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the
       # token for as long as the Streamer connection is up, and a WebSockex crash
       # prints its state via the same OTP crash report `Feed`'s does.
@@ -262,7 +292,12 @@ defmodule DpExchange.Schwab.Socket do
       delayed_reported: MapSet.new(),
       # Symbols whose unreadable book frames this session has already reported (a dropped
       # frame is announced once). Cleared with the session.
-      unreadable_reported: MapSet.new()
+      unreadable_reported: MapSet.new(),
+      # Monotonic ms when the current connection came up (`nil` between connections), and how
+      # many consecutive connections ended inside `@stable_session_ms`. Both feed
+      # `handle_disconnect/2`'s backoff.
+      connected_at: nil,
+      short_sessions: 0
     }
 
     VendoredWebSockex.start_link(
@@ -419,6 +454,27 @@ defmodule DpExchange.Schwab.Socket do
     min(@base_reconnect_delay_ms * Bitwise.bsl(1, exponent), @max_reconnect_delay_ms)
   end
 
+  @doc """
+  `delay_ms` shortened by a random amount of up to a quarter of itself, never lengthened.
+
+  **The spread is across nodes and consumers, not across shards.** A `Feed` here owns one
+  Streamer connection, and the venue allows one per Schwab user, so there are no shards to
+  stagger. What drops together is every node or consumer sharing a venue outage: a Streamer
+  restart or a network fault closes each one's connection in the same instant, and
+  `reconnect_delay_ms/1` is a pure function of the failure count, so all of them then retried
+  on identical schedules (1s, 2s, 4s, 8s...) and reached the venue as a synchronised burst on
+  every turn of the ladder, at the one time it is already refusing connections. A random
+  shortening per socket spreads those turns apart.
+
+  Only shortened, so `reconnect_delay_ms/1` stays the ceiling it documents (30 seconds).
+  `0` stays `0`: a live session that dropped once reconnects at once.
+  """
+  @spec jittered_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms) and delay_ms < 4, do: delay_ms
+
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms),
+    do: delay_ms - :rand.uniform(div(delay_ms, 4))
+
   # --- callbacks ----------------------------------------------------------
 
   @impl true
@@ -435,7 +491,11 @@ defmodule DpExchange.Schwab.Socket do
 
     liveness = make_ref()
     schedule_liveness(liveness)
-    {:ok, %{state | last_heard_at: now_ms(), liveness: liveness}}
+    now = now_ms()
+
+    # `connected_at` is what `handle_disconnect/2` measures the session's life against. A
+    # `Map.merge/2`, not `%{state | ...}`, because the key is new to a state built before it.
+    {:ok, Map.merge(state, %{last_heard_at: now, liveness: liveness, connected_at: now})}
   end
 
   @impl true
@@ -517,8 +577,22 @@ defmodule DpExchange.Schwab.Socket do
     # after each failed reconnect with `attempt_number` climbing, and `login_failures` stays
     # 0 when the network is down. Read alone, it gave an instant ECONNREFUSED or DNS failure
     # a zero delay every time, a reconnect spin flooding `:link_down` notices.
-    failures = max(state.login_failures, Map.get(status, :attempt_number, 1) - 1)
-    delay = reconnect_delay_ms(failures)
+    #
+    # **A session that was accepted and then dies young counts too.** `login_failures` is
+    # reset by every successful LOGIN, so a venue that accepts the LOGIN and then severs the
+    # connection at once (the vendor's `12 CLOSE_CONNECTION` is "Connection Severed: Yes" with
+    # a limit of ONE Streamer connection per user, so two nodes sharing a user take each
+    # other's connection in turn; `30 STOP_STREAMING` severs too) never accumulated a
+    # failure, and this socket reconnected at once, forever, at network speed. See
+    # `@stable_session_ms`.
+    short_sessions = short_sessions(state)
+
+    failures =
+      Enum.max([state.login_failures, Map.get(status, :attempt_number, 1) - 1, short_sessions])
+
+    # Jittered per socket — see `jittered_delay_ms/1`. The telemetry event below reports the
+    # delay actually waited, not the ladder's rung.
+    delay = failures |> reconnect_delay_ms() |> jittered_delay_ms()
 
     # This venue is the ONLY one in the family that emits `link_reconnect_attempt`, and the
     # reason is that it is the only one with a real attempt counter. `login_failures` is
@@ -531,7 +605,9 @@ defmodule DpExchange.Schwab.Socket do
     # so they emit `:link, :down` and nothing else.
     Telemetry.link_reconnect_attempt(:schwab, failures + 1, delay)
 
-    if delay > 0, do: Process.sleep(delay)
+    # Blocks THIS socket process only, and only while it has no connection to serve anyway —
+    # but keeps listening for its parent: see `wait_to_reconnect/2`.
+    wait_to_reconnect(state, delay)
 
     # The venue's session is gone. A socket that kept `logged_in?` would send subscriptions
     # the venue ignores and report a healthy feed that receives nothing.
@@ -551,10 +627,53 @@ defmodule DpExchange.Schwab.Socket do
        last_top: %{},
        subscribed: %{},
        login_deadline: nil,
-       liveness: nil
+       liveness: nil,
+       # Cleared so a failed reconnect (which never reaches `handle_connect/2`) does not
+       # re-measure the old session and count it again.
+       connected_at: nil,
+       short_sessions: short_sessions
      })
      |> Map.put(:delayed_reported, MapSet.new())
      |> Map.put(:unreadable_reported, MapSet.new())}
+  end
+
+  # The backoff wait, which still hears its parent stop it.
+  #
+  # `WebSockex` traps exits and learns that its parent has gone (or that `Feed` stopped it,
+  # as it does for a route it replaces or tears down) from an `{:EXIT, parent, reason}`
+  # message that only its own receive loops read. This wait used to be a bare
+  # `Process.sleep/1` of up to `@max_reconnect_delay_ms`, during which that message sat
+  # unread: a socket told to stop, or orphaned by a `Feed` restart, slept out the whole delay
+  # and then dialled the Streamer once more before it noticed. Against a limit of ONE
+  # Streamer connection per user, that stray connection severs the live one a replacement
+  # socket just opened.
+  #
+  # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
+  # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
+  # exit and waits the full delay, exactly as the sleep did.
+  defp wait_to_reconnect(_state, 0), do: :ok
+
+  defp wait_to_reconnect(state, delay) do
+    parent = Map.get(state, :parent)
+
+    receive do
+      {:EXIT, ^parent, reason} when is_pid(parent) -> exit(reason)
+    after
+      delay -> :ok
+    end
+  end
+
+  # The run of consecutive connections that ended inside `@stable_session_ms`, including the
+  # one that just ended. A disconnect with no connection behind it (a reconnect attempt that
+  # failed before `handle_connect/2`) leaves the run as it was; one that outlived the
+  # threshold ends it.
+  defp short_sessions(state) do
+    run = Map.get(state, :short_sessions, 0)
+
+    case Map.get(state, :connected_at) do
+      nil -> run
+      connected_at -> if now_ms() - connected_at < @stable_session_ms, do: run + 1, else: 0
+    end
   end
 
   @impl true

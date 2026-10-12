@@ -1085,6 +1085,21 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, isolate_crashed_route(state, reason)}
   end
 
+  # The delayed redial `isolate_crashed_route/2` schedules once crashes come in a run.
+  #
+  # **Only the redial the LAST crash scheduled is honoured** (`schedule_redial/2`): a timer
+  # message whose ref is not the current one is stale and does nothing. And `wanted` is
+  # judged AGAIN here, not only when the crash was handled: everything may have been
+  # unsubscribed while the timer ran, and redialling then would open a Streamer session (or
+  # a poller) nobody asked for. A route some other path dialled in the meantime (a
+  # `subscribe/2` finds `route` nil and dials at once) makes this a no-op as well.
+  def handle_info({:redial_after_crash, ref}, state) do
+    case Map.get(state, :redial_timer) do
+      {^ref, _timer} -> {:noreply, redial_after_crash(Map.delete(state, :redial_timer))}
+      _stale -> {:noreply, state}
+    end
+  end
+
   # The Streamer bootstrap's HTTP half came back. Everything from here — building the
   # socket, or falling back to the poll — is fast and stays in this process; see the
   # routing section for why the socket must be opened here rather than in the task.
@@ -1094,7 +1109,9 @@ defmodule DpExchange.Schwab.Feed do
   def handle_info({ref, result}, %{route_bootstrap: %{ref: ref, upgrade?: true}} = state) do
     Process.demonitor(ref, [:flush])
     bootstrap = state.route_bootstrap
+    previous_route = state.route
     state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
@@ -1102,6 +1119,7 @@ defmodule DpExchange.Schwab.Feed do
     Process.demonitor(ref, [:flush])
 
     bootstrap = state.route_bootstrap
+    previous_route = state.route
     state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
     applied = apply_symbols(state)
 
@@ -1109,6 +1127,7 @@ defmodule DpExchange.Schwab.Feed do
     # that has already timed out is a no-op, so no bookkeeping is needed for that case.
     Enum.each(waiting, &GenServer.reply(&1, applied))
 
+    state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
@@ -1147,7 +1166,9 @@ defmodule DpExchange.Schwab.Feed do
          %{route_bootstrap: %{upgrade?: true} = bootstrap} = state,
          result
        ) do
+    previous_route = state.route
     state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
 
@@ -1155,13 +1176,54 @@ defmodule DpExchange.Schwab.Feed do
          %{route_bootstrap: %{waiting: waiting} = bootstrap} = state,
          result
        ) do
+    previous_route = state.route
     state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
     applied = apply_symbols(state)
 
     Enum.each(waiting, &GenServer.reply(&1, applied))
 
+    state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
+
+  # **A bootstrap that settles after everything was unsubscribed keeps nothing.** `wanted` was
+  # judged when the bootstrap STARTED, and the bootstrap runs for seconds (up to the ninety
+  # its HTTP retries allow). A consumer that unsubscribed its last symbol in that window
+  # still got a Streamer session (or a fallback poller) when it completed: a venue connection
+  # nobody asked for, which this package's rule that an unrequested venue must not find a
+  # socket open forbids, and which on this venue also holds the user's single Streamer
+  # connection.
+  #
+  # Only a route this very settle created is discarded: `previous_route` is what `route` was
+  # before it, so an upgrade that failed and left the running poll alone (`:poll` before and
+  # after) is not torn down by it. `socket`/`poller` are cleared BEFORE the stop, so the
+  # `:EXIT` that follows matches no route and falls to the catch-all rather than
+  # `isolate_crashed_route/2`. Callers parked on the bootstrap were answered before this runs,
+  # exactly as when the route is kept. The next `subscribe/2` finds `route` nil and dials.
+  defp discard_unwanted_route(%{route: route} = state, previous_route)
+       when route != nil and route != previous_route do
+    if MapSet.size(state.wanted) == 0 do
+      %{socket: socket, poller: poller} = state
+
+      state = %{
+        state
+        | socket: nil,
+          socket_tag: nil,
+          poller: nil,
+          route: nil,
+          delivering: %{},
+          kinds: %{}
+      }
+
+      if is_pid(socket), do: Process.exit(socket, :shutdown)
+      if is_pid(poller), do: Process.exit(poller, :shutdown)
+      state
+    else
+      state
+    end
+  end
+
+  defp discard_unwanted_route(state, _previous_route), do: state
 
   # --- routing ------------------------------------------------------------
 
@@ -1431,11 +1493,23 @@ defmodule DpExchange.Schwab.Feed do
         kinds: %{}
     }
 
+    # **Right away only for the first crash in a quiet period.** A route that crashed on
+    # start (a frame it cannot survive, a venue rejecting the handshake, a credential that
+    # bootstraps and then dies) was redialled at once, crashed, and was redialled again: a
+    # connect storm with no delay anywhere in it, against a venue that allows one Streamer
+    # connection per user. A crash within `@crash_run_ms` of the previous one now waits,
+    # doubling from `@crash_base_delay_ms` to `@crash_max_delay_ms`. The count restarts once
+    # `@crash_run_ms` passes with no crash, which is how a route that settled and stayed up
+    # earns its immediate redial back. Same shape as `dp_exchange_gemini`'s Feed.
+    {run, state} = crash_run(state)
+    state = cancel_redial(state)
+    delay = crash_redial_delay(run)
+
     notify(
       state,
       Notice.new(:link_down, :schwab,
         severity: :warning,
-        message: "route crashed (#{Bound.reason(reason)}) — reconnecting now",
+        message: "route crashed (#{Bound.reason(reason)}) — #{redial_text(delay)}",
         details: %{reason: Bound.reason(reason)}
       )
     )
@@ -1459,8 +1533,69 @@ defmodule DpExchange.Schwab.Feed do
     # unsubscribed was redialled all the same: a Streamer session (or a poller) nobody asked
     # for, which this package's rule that an unrequested venue must not find a socket open
     # forbids. The next `subscribe/2` or `update_symbols/2` finds `route` nil and dials then.
+    cond do
+      MapSet.size(state.wanted) == 0 -> state
+      delay == 0 -> start_route_bootstrap(state, [])
+      true -> schedule_redial(state, delay)
+    end
+  end
+
+  defp redial_after_crash(%{route: nil, route_bootstrap: nil} = state) do
     if MapSet.size(state.wanted) == 0, do: state, else: start_route_bootstrap(state, [])
   end
+
+  defp redial_after_crash(state), do: state
+
+  defp redial_text(0), do: "reconnecting now"
+  defp redial_text(delay), do: "reconnecting in #{delay} ms"
+
+  # One redial timer at a time, identified by a ref the message carries. See the
+  # `:redial_after_crash` clause of `handle_info/2`.
+  defp schedule_redial(state, delay) do
+    ref = make_ref()
+    timer = Process.send_after(self(), {:redial_after_crash, ref}, delay)
+    Map.put(state, :redial_timer, {ref, timer})
+  end
+
+  defp cancel_redial(state) do
+    case Map.pop(state, :redial_timer) do
+      {{_ref, timer}, rest} ->
+        Process.cancel_timer(timer)
+        rest
+
+      {nil, rest} ->
+        rest
+    end
+  end
+
+  # **Chosen, not measured**: the vendor states no reconnect guidance for the Streamer. A
+  # minute is long enough that a route which settled and stayed up is not counted against
+  # an unrelated crash, and the 1s..30s ladder matches `Socket.reconnect_delay_ms/1`.
+  @crash_run_ms 60_000
+  @crash_base_delay_ms 1_000
+  @crash_max_delay_ms 30_000
+
+  # `{length of the current run of crashes, state}`. A crash `@crash_run_ms` or more after
+  # the previous one starts a new run of 1. Read with `Map.get/3` so a state built before
+  # this field existed (or by a test) starts a run.
+  defp crash_run(state) do
+    now = System.monotonic_time(:millisecond)
+
+    run =
+      case Map.get(state, :crash_run) do
+        {count, last_at} when now - last_at < @crash_run_ms -> count + 1
+        _none_or_stale -> 1
+      end
+
+    {run, Map.put(state, :crash_run, {run, now})}
+  end
+
+  @doc false
+  @spec crash_redial_delay(pos_integer()) :: non_neg_integer()
+  def crash_redial_delay(1), do: 0
+
+  def crash_redial_delay(run),
+    do: min(@crash_base_delay_ms * Integer.pow(2, min(run - 2, 5)), @crash_max_delay_ms)
 
   defp failure_reason({:error, reason}), do: reason
   defp failure_reason({:refused, reason}), do: {:refused, reason}

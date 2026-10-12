@@ -31,6 +31,28 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **A Streamer session accepted and then severed within seconds reconnected at once, forever.**
+  The backoff count reset on every successful LOGIN, so a venue that accepts the login and then
+  closes (`12 CLOSE_CONNECTION`, one Streamer connection per user; `30 STOP_STREAMING`) got a
+  zero delay every time. Two nodes sharing one Schwab user would take the connection from each
+  other at network speed. Sessions that end within 10 seconds (chosen, not measured) now count
+  toward the existing 1s-doubling, 30s-capped backoff; a session that lasts clears the count.
+- **A Socket in its reconnect backoff ignored its parent stopping it.** The wait, up to 30s, was
+  a bare sleep, so a socket `Feed` had stopped or orphaned slept out the delay and dialled the
+  Streamer once more, which on a one-connection-per-user venue can sever its replacement. The
+  wait now exits with the parent's reason.
+- **Reconnect backoff is jittered** (`Socket.jittered_delay_ms/1`: shortened by up to a quarter,
+  never lengthened; an immediate reconnect stays immediate), so nodes sharing a venue outage do
+  not retry in lockstep. The `link_reconnect_attempt` telemetry `delay_ms` reports the delay
+  actually waited.
+- **A route that kept crashing was redialled with no backoff.** The first crash in a quiet period
+  still redials at once; a crash within 60s of the previous one now waits 1s, doubling to 30s,
+  and the `:link_down` notice says how long. A stale redial timer does nothing, and the wanted
+  set is checked again when the timer fires.
+- **A route that finished connecting after every symbol was unsubscribed stayed open.** A
+  bootstrap or upgrade that settles with nothing wanted now tears down the Streamer session or
+  poller it just started. Callers waiting on it are answered as before.
+
 ## [0.2.123] - 2026-10-12
 
 - Docs: every public facade function is documented in HexDocs (156 added); docs build is warning-free.

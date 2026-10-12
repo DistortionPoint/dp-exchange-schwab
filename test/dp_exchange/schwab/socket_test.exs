@@ -691,6 +691,22 @@ defmodule DpExchange.Schwab.SocketTest do
     end
   end
 
+  describe "jittered_delay_ms/1" do
+    test "only ever shortens, by at most a quarter, and varies" do
+      # The ladder was a pure function of the failure count, so every node or consumer
+      # sharing one venue outage retried on identical schedules: a synchronised connect
+      # burst on every rung.
+      draws = for _draw <- 1..200, do: Socket.jittered_delay_ms(30_000)
+
+      assert Enum.all?(draws, &(&1 >= 22_500 and &1 < 30_000))
+      assert length(Enum.uniq(draws)) > 1
+    end
+
+    test "leaves an immediate reconnect immediate" do
+      assert Socket.jittered_delay_ms(0) == 0
+    end
+  end
+
   describe "update_access_token/2 — a refreshed token reaches a live socket" do
     test "the cast replaces the access token without touching the session" do
       before = state(%{logged_in?: true, access_token: "stale-token"})
@@ -1113,11 +1129,27 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert metadata.attempt == 3
       # The backoff this socket is about to sleep, not a constant. 1s base doubling per
-      # consecutive failure, so two prior failures is 2s — asserted as the exact number
+      # consecutive failure, so two prior failures is the 2s rung — asserted as a range
       # rather than "greater than zero", which is what caught this test's own first
-      # guess of 4s. Reported BEFORE the sleep, so a consumer sees the wait starting
+      # guess of 4s. Jittered down by up to a quarter (`Socket.jittered_delay_ms/1`), so
+      # 1_500..1_999. Reported BEFORE the wait, so a consumer sees the wait starting
       # rather than learning about it once it is over.
-      assert metadata.delay_ms == 2_000
+      assert metadata.delay_ms >= 1_500
+      assert metadata.delay_ms < 2_000
+    end
+
+    test "the reported reconnect delay is jittered below the ladder's rung, never above" do
+      # One prior failure is the 1_000ms rung. Without the jitter the event reports exactly
+      # 1_000 every time; with it the value is strictly below the rung and within a quarter.
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed}, state(%{login_failures: 1}))
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :reconnect_attempt], %{count: 1},
+                      %{attempt: 2, delay_ms: delay_ms}},
+                     5_000
+
+      assert delay_ms >= 750
+      assert delay_ms < 1_000
     end
 
     test "every frame is a link event, counted with its wire size" do
@@ -1403,7 +1435,59 @@ defmodule DpExchange.Schwab.SocketTest do
           Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 2}, state())
         end)
 
-      assert elapsed_us >= 1_000_000
+      # The 1s rung, jittered down by up to a quarter.
+      assert elapsed_us >= 750_000
+    end
+  end
+
+  describe "a session that dies young backs off, even though its LOGIN succeeded" do
+    test "a connection severed moments after coming up waits before reconnecting" do
+      # `login_failures` is 0: the LOGIN was accepted. Without the short-session count this
+      # reconnected at once, and two nodes sharing one Schwab user (a limit of one Streamer
+      # connection) took each other's connection back and forth at network speed.
+      {:ok, connected} = Socket.handle_connect(%{}, state(%{logged_in?: true}))
+      assert connected.login_failures == 0
+
+      {elapsed_us, {:reconnect, dropped}} =
+        :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, connected) end)
+
+      # The 1s rung, jittered down by up to a quarter.
+      assert elapsed_us >= 750_000
+      assert dropped.short_sessions == 1
+      assert dropped.connected_at == nil
+    end
+
+    test "a session that outlived the threshold reconnects at once and clears the count" do
+      long_lived =
+        state(%{
+          logged_in?: true,
+          short_sessions: 4,
+          connected_at: System.monotonic_time(:millisecond) - 60_000
+        })
+
+      {elapsed_us, {:reconnect, dropped}} =
+        :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, long_lived) end)
+
+      # The smallest backoff is one second, so anything under it proves none was applied.
+      assert elapsed_us < 1_000_000
+      assert dropped.short_sessions == 0
+    end
+
+    test "a reconnect that failed before connecting does not count the old session again" do
+      # `connected_at` was cleared by the disconnect that started this episode, so a second
+      # `handle_disconnect/2` with no connection behind it leaves the run as it stood.
+      {:ok, connected} = Socket.handle_connect(%{}, state())
+
+      # Bypass the backoff sleep of the first disconnect by handing the second the state it
+      # would have produced, which is what the callback returns.
+      first = Map.merge(connected, %{connected_at: nil, short_sessions: 1})
+
+      {_elapsed_us, {:reconnect, second}} =
+        :timer.tc(fn ->
+          Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 1}, first)
+        end)
+
+      assert second.short_sessions == 1
     end
   end
 end

@@ -254,6 +254,156 @@ defmodule DpExchange.Schwab.FeedTest do
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
+    test "the first crash in a quiet period redials at once, with nothing scheduled" do
+      socket = fake_socket()
+
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      :ok = Feed.subscribe_notices(feed, to: self())
+      link_socket_into_feed(feed, socket)
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, message: "route crashed" <> _rest = message}},
+                     5_000
+
+      assert message =~ "reconnecting now"
+      refute Map.has_key?(:sys.get_state(feed), :redial_timer)
+    end
+
+    test "a crash hard on the heels of another waits before redialling" do
+      # A route that crashed on start was redialled at once, crashed, and was redialled
+      # again: a connect storm with no delay anywhere in it. The first crash of a run still
+      # redials at once (above); the second, within a minute of it, waits 1s.
+      socket = fake_socket()
+
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      :ok = Feed.subscribe_notices(feed, to: self())
+      link_socket_into_feed(feed, socket)
+      Process.exit(socket, :kill)
+
+      # The first crash's own notice, taken here so the second crash's is the one read below.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, message: "route crashed" <> _rest = first}},
+                     5_000
+
+      assert first =~ "reconnecting now"
+
+      # The first crash's immediate redial lands on the poll route.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     5_000
+
+      poller = :sys.get_state(feed).poller
+      assert is_pid(poller)
+
+      started = System.monotonic_time(:millisecond)
+      Process.exit(poller, :kill)
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, message: "route crashed" <> _rest = message}},
+                     5_000
+
+      assert message =~ "reconnecting in 1000 ms"
+
+      # Nothing dialled yet: no route, no bootstrap in flight, a redial scheduled.
+      scheduled = :sys.get_state(feed)
+      assert scheduled.route == nil
+      assert scheduled.route_bootstrap == nil
+      assert {_ref, _timer} = scheduled.redial_timer
+
+      # The redial lands on the poll route again, and not before the delay. A LOWER bound,
+      # which load can only lengthen.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     5_000
+
+      assert System.monotonic_time(:millisecond) - started >= 1_000
+    end
+
+    test "a redial message that is not the current one does nothing" do
+      socket = fake_socket()
+
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      # Something wanted and no route, so a stale message that DID redial would start a
+      # bootstrap. It must not.
+      :sys.replace_state(feed, fn state ->
+        %{state | socket: nil, route: nil, wanted: MapSet.new(["AAPL"])}
+      end)
+
+      send(feed, {:redial_after_crash, make_ref()})
+
+      state = :sys.get_state(feed)
+      assert state.route == nil
+      assert state.route_bootstrap == nil
+    end
+
+    test "a pending redial finds nothing wanted if everything was unsubscribed meanwhile" do
+      # `wanted` is judged again when the timer fires, not only when the crash was handled.
+      socket = fake_socket()
+
+      feed =
+        start_feed(
+          socket: socket,
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      :ok = Feed.subscribe_notices(feed, to: self())
+      link_socket_into_feed(feed, socket)
+      Process.exit(socket, :kill)
+
+      # The first crash's own notice, taken here so the second crash's is the one read below.
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, message: "route crashed" <> _rest}},
+                     5_000
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     5_000
+
+      Process.exit(:sys.get_state(feed).poller, :kill)
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, message: "route crashed" <> _rest = second}},
+                     5_000
+
+      assert second =~ "reconnecting in"
+
+      {ref, _timer} = :sys.get_state(feed).redial_timer
+      :ok = Feed.unsubscribe(feed, ["AAPL"])
+
+      # The timer's own message, delivered by hand so the test does not wait for it.
+      send(feed, {:redial_after_crash, ref})
+
+      state = :sys.get_state(feed)
+      assert state.route == nil
+      assert state.route_bootstrap == nil
+      refute Map.has_key?(state, :redial_timer)
+    end
+
     test "a crashed POLLER is isolated too, not only a crashed socket" do
       # `Feed` has two `{:EXIT, pid, reason}` clauses — one matching `state.socket`, one
       # matching `state.poller` — and only the socket one had ever executed. The poll route

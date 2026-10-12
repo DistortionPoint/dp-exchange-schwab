@@ -281,6 +281,55 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     assert_receive {:dp_exchange, :schwab, {:refused, "AAPL", :current}}, 5_000
   end
 
+  test "a bootstrap that completes after everything was unsubscribed opens nothing" do
+    # `wanted` was judged only when the bootstrap STARTED. One that completed after the last
+    # symbol was unsubscribed still opened a Streamer session nobody asked for. The caller
+    # parked on it is answered as ever; the route it settled is torn down.
+    {_agent, plug} = switchable({:hang, self()})
+    url = websocket_endpoint()
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+
+    subscribing = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
+    assert_receive {:hanging, request}, 5_000
+
+    :ok = Feed.unsubscribe(feed, ["AAPL"])
+    send(request, {:release, user_preference(url), 200})
+
+    # Answered, not left to its own call timeout.
+    assert Task.await(subscribing, 15_000)
+
+    state = :sys.get_state(feed)
+    assert state.route == nil
+    assert state.socket == nil
+    assert state.poller == nil
+    assert state.route_bootstrap == nil
+    assert MapSet.size(state.wanted) == 0
+  end
+
+  test "an upgrade that completes after everything was unsubscribed opens nothing" do
+    {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    url = websocket_endpoint()
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+
+    test_pid = self()
+    Agent.update(agent, &%{&1 | answer: {:hang, test_pid}})
+    send(feed, :resubscribe)
+    assert_receive {:hanging, request}, 5_000
+
+    :ok = Feed.unsubscribe(feed, ["AAPL"])
+    send(request, {:release, user_preference(url), 200})
+
+    wait_until(fn -> :sys.get_state(feed).route_bootstrap == nil end)
+
+    state = :sys.get_state(feed)
+    assert state.route == nil
+    assert state.socket == nil
+    assert state.poller == nil
+  end
+
   defp wait_until(fun, timeout \\ 5_000) do
     cond do
       fun.() ->
