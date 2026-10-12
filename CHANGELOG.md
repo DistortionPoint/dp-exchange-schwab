@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.126] - 2026-10-12
+
 - **Security: no credential is sent to a non-https override.** A `:token_url`, `:trader_url`
   or `:market_data_url` that is not https answers `{:error, {:insecure_url, :schwab}}` before
   any request (`:plug` and `:req_adapter` are exempt); an order write refused this way is a
