@@ -457,7 +457,8 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert first.symbol == "AAPL"
       assert first.rank == 1
       assert second.rank == 2
-      assert second.metrics["netPercentChange"] == 0.09
+      # A JSON number keeps its digits: a Decimal, not a float.
+      assert Decimal.equal?(second.metrics["netPercentChange"], Decimal.new("0.09"))
     end
 
     test "an expiration list that is not a list is refused, not read as no expirations" do
@@ -704,6 +705,40 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       end
     end
 
+    test "a row whose quantities are absent or unreadable REFUSES the reply, it is not flat" do
+      rows = [
+        %{"instrument" => %{"symbol" => "AAPL"}},
+        %{"instrument" => %{"symbol" => "AAPL"}, "longQuantity" => "abc"},
+        %{"instrument" => %{"symbol" => "AAPL"}, "longQuantity" => 5, "shortQuantity" => ""},
+        %{"instrument" => %{"symbol" => "AAPL"}, "longQuantity" => nil, "shortQuantity" => nil},
+        %{"instrument" => %{"symbol" => "AAPL"}, "longQuantity" => "NaN", "shortQuantity" => 1}
+      ]
+
+      for row <- rows do
+        body = [%{"securitiesAccount" => %{"positions" => [row]}}]
+
+        assert {:error, {:unexpected_position_quantity, :unreadable}} =
+                 Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0),
+               "row #{inspect(row)} must be refused"
+      end
+    end
+
+    test "one leg omitted beside a readable other leg is that leg alone" do
+      body = [
+        %{
+          "securitiesAccount" => %{
+            "positions" => [%{"instrument" => %{"symbol" => "AAPL"}, "longQuantity" => 5}]
+          }
+        }
+      ]
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
+
+      assert position.side == :long
+      assert Decimal.equal?(position.quantity, Decimal.new(5))
+    end
+
     test "an account with no positions block yields none rather than raising" do
       body = [%{"securitiesAccount" => %{"accountNumber" => "1"}}]
       assert {:ok, []} = Rest.get_positions(@creds, plug: responding(body), retry_attempts: 0)
@@ -839,6 +874,30 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert_receive {:request, _path, query}
       assert query =~ "types=TRADE"
       refute query =~ ","
+    end
+
+    test "a reply at the venue's 3000-row cap is refused as truncated, not returned complete" do
+      opts = [
+        from: ~U[2026-08-01 00:00:00Z],
+        to: ~U[2026-09-01 00:00:00Z],
+        types: "TRADE",
+        retry_attempts: 0
+      ]
+
+      full = Enum.map(1..3000, fn id -> %{"activityId" => id} end)
+      under = Enum.take(full, 2999)
+
+      assert {:error, :history_truncated} =
+               Rest.get_transactions(@creds, "hash-1", [plug: responding(full)] ++ opts)
+
+      assert {:ok, rows} =
+               Rest.get_transactions(@creds, "hash-1", [plug: responding(under)] ++ opts)
+
+      assert length(rows) == 2999
+
+      # The fake answers through the same check.
+      assert {:error, :history_truncated} = Rest.within_transactions_cap(full)
+      assert {:ok, [_row]} = Fake.get_transactions(@creds, [account_hash: "h"] ++ opts)
     end
 
     test "one transaction is fetched by id" do

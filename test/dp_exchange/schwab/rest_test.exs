@@ -608,7 +608,7 @@ defmodule DpExchange.Schwab.RestTest do
   end
 
   describe "balances read the account's declared type, never guessing" do
-    test "a margin account reports its total equity and buying power" do
+    test "a margin account reports its cash (not its equity) and available funds" do
       # `"liquidationValue"` used to be the fixture's key, pinning a field that does not
       # occur on `MarginBalance` (AT:2491-2589,
       # `docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`) —
@@ -622,6 +622,7 @@ defmodule DpExchange.Schwab.RestTest do
           "type" => "MARGIN",
           "currentBalances" => %{
             "equity" => 50_000.0,
+            "marginBalance" => 8_000.25,
             "availableFunds" => 20_000.0,
             "buyingPower" => 100_000.0
           }
@@ -632,7 +633,9 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)
 
       assert balance.currency == "USD"
-      assert Decimal.equal?(balance.balance, Decimal.from_float(50_000.0))
+      # `balance` means cash in the account for both account types: `marginBalance` here
+      # (as `totalCash` on a cash account), never `equity`, which includes securities' value.
+      assert Decimal.equal?(balance.balance, Decimal.new("8000.25"))
       # Not `buyingPower`: leveraged, larger than the balance it would sit inside.
       assert Decimal.equal?(balance.available_balance, Decimal.from_float(20_000.0))
     end
@@ -649,6 +652,32 @@ defmodule DpExchange.Schwab.RestTest do
                Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)
 
       assert Decimal.equal?(balance.balance, Decimal.from_float(2_500.0))
+    end
+
+    test "a margin account that states only equity is unreadable, equity is not substituted" do
+      body = %{
+        "securitiesAccount" => %{
+          "type" => "MARGIN",
+          "currentBalances" => %{"equity" => 50_000.0, "availableFunds" => 20_000.0}
+        }
+      }
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_balances(@creds, "ABCDEF", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a JSON number keeps every digit the venue sent, it is not rounded through a float" do
+      raw =
+        ~s({"securitiesAccount":{"type":"CASH","currentBalances":) <>
+          ~s({"totalCash":1234567890.123456789012,"cashAvailableForTrading":0.1000000000000000055}}})
+
+      plug = fn conn -> Plug.Conn.resp(conn, 200, raw) end
+
+      assert {:ok, [balance]} =
+               Rest.get_balances(@creds, "ABCDEF", plug: plug, retry_attempts: 0)
+
+      assert Decimal.equal?(balance.balance, Decimal.new("1234567890.123456789012"))
+      assert Decimal.equal?(balance.available_balance, Decimal.new("0.1000000000000000055"))
     end
 
     test "an account whose type the venue did not state is unreadable, not assumed" do

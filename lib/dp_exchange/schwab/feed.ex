@@ -1713,21 +1713,29 @@ defmodule DpExchange.Schwab.Feed do
 
   defp canonical_symbols(other), do: other
 
+  defp canonical_symbol(symbol) when is_binary(symbol),
+    do: SymbolFormat.to_canonical_symbol(symbol)
+
+  defp canonical_symbol(other), do: other
+
   @doc """
   The one judgement of a symbol list every streaming call makes, in the facade, here and in
   `DpExchange.Schwab.Fake`.
 
-  `:ok`, or `{:error, {:invalid_symbols, value}}`: `value` is the argument itself when it is
-  not a proper list, and otherwise the elements refused. An element is refused when it is
+  `:ok`, or `{:error, {:invalid_symbols, value}}`: `value` is always the argument itself, as
+  the caller passed it, whether it is not a proper list or holds a refused element. An element is refused when it is
   not a string, is blank after trim, or is not an equity or option symbol (see
   `SymbolFormat.validate/1`). Spelling is not judged: `" aapl"` is valid.
   """
   @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
   def check_symbols(symbols) do
     if proper_list?(symbols) do
-      case invalid_symbols(canonical_symbols(symbols)) do
+      # Judged canonically (a padded `" aapl"` is valid) but REPORTED as given: the error
+      # carries the caller's argument itself (the family convention, Core's assertion 32),
+      # never the trimmed forms (`"  "` is not `""`).
+      case Enum.reject(symbols, &(invalid_symbols([canonical_symbol(&1)]) == [])) do
         [] -> :ok
-        invalid -> {:error, {:invalid_symbols, invalid}}
+        _invalid -> {:error, {:invalid_symbols, symbols}}
       end
     else
       {:error, {:invalid_symbols, symbols}}

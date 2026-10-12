@@ -57,6 +57,7 @@
       "equity": 45825,
       "longMarginValue": 22750,
       "maintenanceRequirement": 6825,
+      "marginBalance": 1250.5,
       "sma": 15000
     },
     "projectedBalances": {}

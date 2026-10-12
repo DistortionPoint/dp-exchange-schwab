@@ -1660,6 +1660,26 @@ defmodule DpExchange.Schwab.Rest do
     long = decimal(row["longQuantity"])
     short = decimal(row["shortQuantity"])
 
+    # **A row whose quantities cannot be read is refused, never read as flat.** Both legs
+    # absent, or a leg that is present but not a readable finite number (`"abc"`, `""`,
+    # NaN, an absurd exponent), left `position_side/2` nothing positive and the row was
+    # dropped as a closed position: a held instrument vanished from the reply. Only a row
+    # that STATES its quantities as zero is flat. One leg absent beside a readable other leg
+    # is the venue's optional field omitted, and is read as that leg alone.
+    if unreadable_legs?(row, long, short) do
+      [{:error, {:unexpected_position_quantity, :unreadable}}]
+    else
+      signed_legs(row, instrument, long, short)
+    end
+  end
+
+  defp unreadable_legs?(row, long, short) do
+    (is_nil(long) and is_nil(short)) or
+      (is_nil(long) and not is_nil(row["longQuantity"])) or
+      (is_nil(short) and not is_nil(row["shortQuantity"]))
+  end
+
+  defp signed_legs(row, instrument, long, short) do
     # **A negative leg is refused, not read as flat.** The spec types both quantities as bare
     # `number`s and says nothing of their sign, so a short sent as `shortQuantity: -40` is a
     # sign convention this package has not measured. `position_side/2` only takes a POSITIVE
@@ -2010,6 +2030,11 @@ defmodule DpExchange.Schwab.Rest do
   type and merges the results itself, knowing that is what it is doing.
 
   `opts[:symbol]` narrows to one instrument.
+
+  **A reply at the venue's cap is refused, not returned as complete.** The spec says "Maximum
+  number of transactions in response is 3000", so a reply of 3000 or more rows may have been
+  cut off and the rest of the window is unseen. It answers `{:error, :history_truncated}`. The caller narrows the window (or the `:symbol`) and asks again;
+  this package does not walk the window in halves on its behalf.
   """
   @spec get_transactions(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -2025,11 +2050,26 @@ defmodule DpExchange.Schwab.Rest do
         })
 
       with {:ok, path} <- account_path(account_hash, ["transactions"]),
-           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts) do
-        list_body(body)
+           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts),
+           {:ok, rows} <- list_body(body) do
+        within_transactions_cap(rows)
       end
     end
   end
+
+  @transactions_cap 3000
+
+  @doc """
+  Whether `rows` is a complete transactions reply: `{:ok, rows}` below the venue's cap of 3000
+  rows per reply (from the spec), `{:error, :history_truncated}` at or above it, since a reply
+  that full may have been cut off. `DpExchange.Schwab.Fake` answers through this
+  too.
+  """
+  @spec within_transactions_cap([map()]) :: {:ok, [map()]} | {:error, :history_truncated}
+  def within_transactions_cap(rows) when length(rows) >= @transactions_cap,
+    do: {:error, :history_truncated}
+
+  def within_transactions_cap(rows), do: {:ok, rows}
 
   # The spec documents "Maximum date range is 1 year" for transactions as for orders
   # (`accounts-and-trading-production.openapi.json`, `/accounts/{accountNumber}/transactions`),
@@ -2280,8 +2320,10 @@ defmodule DpExchange.Schwab.Rest do
   different balance fields entirely, and the response says which through `type`. Both are
   read; neither is guessed at from the other.
 
-  Cash is reported as a `USD` balance. `balance` is `equity` for a margin account and
-  `totalCash` for a cash account. `available_balance` is `availableFunds` for a margin
+  Cash is reported as a `USD` balance. `balance` is the **cash in the account** for both
+  account types: `marginBalance` for a margin account (negative when borrowing; documented,
+  not measured) and `totalCash` for a cash account. It is never `equity`, which includes the
+  market value of securities held. `available_balance` is `availableFunds` for a margin
   account and `cashAvailableForTrading` for a cash account — the same *question* answered
   by different fields, and the venue answers only the one that applies. It is **not**
   `buyingPower`: that is leveraged and can exceed the balance it would sit inside, and
@@ -2343,25 +2385,19 @@ defmodule DpExchange.Schwab.Rest do
   # is unreadable rather than assumed to be either — reading a margin account as cash
   # would report a buying power of nil for an account that has one.
   #
-  # **`liquidationValue` is not a `MarginBalance` field.** It used to be read from a MARGIN
-  # account's `currentBalances` under that name, but the vendor's own schema puts
-  # `liquidationValue` on `MarginInitialBalance`
-  # (`docs/reference/schwab/openapi/accounts-and-trading-production.openapi.json`,
-  # AT:2354-2477) — the account's `initialBalances`, not `currentBalances` — while
-  # `MarginAccount.currentBalances` is `MarginBalance` (AT:2491-2589), which has no
-  # `liquidationValue` at all. So this always read `nil` off a key that was never there,
-  # collapsed by `fetch_balance/2`'s `nil -> :unexpected_response_shape` into refusing
-  # every margin balance this package ever decoded.
+  # **One meaning under `balance` for both account types: the cash in the account.**
+  # `CashBalance.totalCash` is the cash holding. `MarginBalance` (a different schema: it has
+  # no `totalCash`, and `liquidationValue` lives on `MarginInitialBalance`, not on the
+  # `currentBalances` read here) states its cash-side figure as `marginBalance`, a plain
+  # `number`, read as the cash holding and negative when the account is borrowing. That sign
+  # and meaning are DOCUMENTED, NOT MEASURED: this repository holds no Schwab credential and
+  # the spec gives no description.
   #
-  # `MarginBalance` carries no field the vendor documents as "total account value" the way
-  # `CashBalance.totalCash` is unambiguous — read the whole schema and there is no
-  # `liquidationValue`, `netLiquidationValue` or similarly-named total. `equity` (AT:2518,
-  # inside `MarginBalance`) is chosen instead: it is the schema's own field for the
-  # account's total equity — assets net of the margin loan — which is the closest honest
-  # reading of "the account's balance" a margin account states, as against `buyingPower`
-  # (AT:2502), which is leveraged and is not read here at all. Recorded as a
-  # documented choice, not a measured one — this repository holds no Schwab credential.
-  defp balance_total("MARGIN", current), do: fetch_balance(current, "equity")
+  # `equity` is not read: it is the account's net worth, securities' market value included,
+  # and `Core.Types.Balance` has no field for it, so putting it under `balance` would mix two
+  # quantities under one name. `buyingPower` is leveraged and is not read here either. A MARGIN
+  # reply without `marginBalance` is unreadable, never filled from another field.
+  defp balance_total("MARGIN", current), do: fetch_balance(current, "marginBalance")
   defp balance_total("CASH", current), do: fetch_balance(current, "totalCash")
   defp balance_total(_unknown, _current), do: {:error, :unexpected_response_shape}
 
@@ -2739,7 +2775,7 @@ defmodule DpExchange.Schwab.Rest do
       :req_adapter,
       :rate_limit_blocking
     ])
-    |> Keyword.merge(provider: :schwab, raw_status: true)
+    |> Keyword.merge(provider: :schwab, raw_status: true, decode_body: false)
   end
 
   # **`:schwab_orders`, not `:schwab` — found by the same review that corrected
@@ -2830,8 +2866,13 @@ defmodule DpExchange.Schwab.Rest do
   # 2xx body is legitimately empty — a placed or replaced order, which answers `201` with
   # the id in `Location`, and a cancel, which answers with nothing — never come through
   # here; they read the header or return `:ok` directly.
+  #
+  # **JSON numbers are decoded as decimals, not floats** (`floats: :decimals`; the request is
+  # sent with `decode_body: false`, see `request_opts/1`, so the bytes reach here). A balance or
+  # quantity read through a float lost digits before `decimal/1` saw it. A fractional or
+  # exponent number is now a `Decimal` with every digit the venue sent; an integer stays one.
   defp decoded_body(body) when is_binary(body) do
-    case Jason.decode(body) do
+    case Jason.decode(body, floats: :decimals) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, _reason} -> {:error, {:undecodable_response, :schwab}}
     end

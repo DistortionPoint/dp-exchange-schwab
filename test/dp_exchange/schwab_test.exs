@@ -879,7 +879,9 @@ defmodule DpExchange.SchwabTest do
         assert {:error, {:invalid_symbols, _value}} = Fake.unsubscribe(bad)
       end
 
-      assert {:error, {:invalid_symbols, [:x, 42]}} = Fake.unsubscribe(["AAPL", :x, 42])
+      assert {:error, {:invalid_symbols, ["AAPL", :x, 42]}} =
+               Fake.unsubscribe(["AAPL", :x, 42])
+
       assert Fake.coverage() == %{"AAPL" => :stream}
     end
 

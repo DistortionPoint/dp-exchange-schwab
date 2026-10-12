@@ -362,6 +362,22 @@ always; a small integer is not guessed to be seconds.
 A margin account's `available_balance` is `availableFunds`, not `buyingPower`. Buying power
 is leveraged and can exceed the balance it would sit inside.
 
+`balance` means **the cash in the account** for both account types: `totalCash` on a cash
+account, `marginBalance` on a margin account (negative when borrowing; documented, not
+measured). It is never `equity`, which includes the market value of securities held. A margin
+reply without `marginBalance` is `{:error, :unexpected_response_shape}`.
+
+Money and quantities are decoded without float rounding (`floats: :decimals`), so every digit
+the venue sent survives.
+
+A `get_positions` row whose `longQuantity` and `shortQuantity` are both absent, or one of them
+present but unreadable, refuses the whole reply: `{:error, {:unexpected_position_quantity,
+:unreadable}}`. Only quantities stated as zero are a flat position, which is skipped.
+
+`get_transactions/2` returns at most 3000 rows per the spec; a reply of 3000 or more is
+`{:error, :history_truncated}` and is never returned as complete. Narrow the window or
+`:symbol` and ask again.
+
 ## 7. Orders: only what Core can name
 
 Order types: `:market`, `:limit`, `:stop`, `:stop_limit`, `:trailing_stop`,

@@ -334,12 +334,12 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     test "available buying power is nil rather than invented" do
       # `"liquidationValue"` used to be the fixture's key; it is not a `MarginBalance`
       # field (AT:2491-2589) — see `Rest.balance_total/2`'s own comment. Corrected to
-      # `"equity"` (AT:2518), the schema's own total field.
+      # `"marginBalance"`, the cash-side field `balance` is read from for a margin account.
       body = %{
         "securitiesAccount" => %{
           "type" => "MARGIN",
           "currentBalances" => %{
-            "equity" => 1.0
+            "marginBalance" => 1.0
           }
         }
       }

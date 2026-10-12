@@ -31,6 +31,37 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `get_balances` reports the same quantity for both account types: the cash in the
+  account.** A MARGIN account's `balance` was `equity` (net worth, securities' market value
+  included, the loan netted off) while a CASH account's was `totalCash`; one field carried two
+  meanings. A MARGIN account's `balance` is now `marginBalance` (its cash side; negative when
+  borrowing; documented in the spec as a bare `number`, **not measured**) and `equity` is no
+  longer read. A MARGIN reply with no `marginBalance` is `{:error, :unexpected_response_shape}`
+  (it never substitutes `equity`). `available_balance` is unchanged.
+- **BREAKING: money and quantities keep every digit.** Reads are sent with `decode_body: false`
+  and decoded with Jason `floats: :decimals`, so a fractional JSON number reaches the decoders
+  as a `Decimal` (previously a float then `Decimal.from_float/1`, which carried the binary
+  error). `preview_order` returns the venue's body as-is, so its fractional numbers are now
+  `Decimal`s, not floats.
+- **BREAKING: `get_positions` refuses a row whose quantities cannot be read.** A row with both
+  `longQuantity` and `shortQuantity` absent, or one present but unreadable (`"abc"`, `""`,
+  NaN), used to be dropped as flat; it is now `{:error, {:unexpected_position_quantity,
+  :unreadable}}` for the whole reply. Only quantities stated as zero are flat. One leg omitted
+  beside a readable leg is read as that leg alone.
+- **BREAKING: `get_transactions` refuses a reply of 3000 or more rows** as `{:error,
+  :history_truncated}` (the spec: "Maximum number of transactions in response is 3000"). It
+  was returned as complete. Narrow the window or `:symbol` and ask again; the package does not
+  walk the window itself. `Fake.get_transactions/2` answers through the same check
+  (`Rest.within_transactions_cap/1`).
+- **BREAKING (error value): `{:error, {:invalid_symbols, v}}` carries the caller's argument as
+  given.** A list holding a refused element used to report only the refused elements, trimmed
+  (`["  "]` became `[""]`; `["AAPL", :x]` became `[:x]`). `v` is now the whole list passed, on
+  the facade, `Feed` and `Fake` alike (Core's assertion 32).
+- Numbers decoded as `Decimal` now also reach the order decoder (`Orders` reads a `Decimal`
+  price, stop price and quantities as itself); a filled order's `price` was `nil` otherwise.
+
 ## [0.2.115] - 2026-10-12
 
 ### Changed

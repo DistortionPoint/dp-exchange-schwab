@@ -33,7 +33,7 @@ defmodule DpExchange.Schwab.ArgumentOrderTest do
       end
 
       assert Schwab.unsubscribe(["AAPL", :x, 42], missing) ==
-               {:error, {:invalid_symbols, [:x, 42]}}
+               {:error, {:invalid_symbols, ["AAPL", :x, 42]}}
 
       improper = ["AAPL" | "MSFT"]
       assert Schwab.subscribe(improper, missing) == {:error, {:invalid_symbols, improper}}
@@ -64,7 +64,9 @@ defmodule DpExchange.Schwab.ArgumentOrderTest do
       feed = start_feed(socket: fake_socket())
       assert Feed.subscribe(feed, ["AAPL", "MSFT"]) == :ok
 
-      assert Feed.unsubscribe(feed, ["AAPL", :x, 42]) == {:error, {:invalid_symbols, [:x, 42]}}
+      assert Feed.unsubscribe(feed, ["AAPL", :x, 42]) ==
+               {:error, {:invalid_symbols, ["AAPL", :x, 42]}}
+
       improper = ["AAPL" | "MSFT"]
       assert Feed.unsubscribe(feed, improper) == {:error, {:invalid_symbols, improper}}
       assert Enum.sort(Feed.wanted(feed)) == ["AAPL", "MSFT"]

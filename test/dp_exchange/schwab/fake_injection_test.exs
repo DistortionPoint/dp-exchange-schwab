@@ -212,7 +212,7 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
   describe "the fake refuses a symbol set the real feed refuses" do
     test "a pair-shaped symbol is refused by name and nothing is subscribed" do
       assert Fake.subscribe(["AAPL", "BTC-USD"], to: self()) ==
-               {:error, {:invalid_symbols, ["BTC-USD"]}}
+               {:error, {:invalid_symbols, ["AAPL", "BTC-USD"]}}
 
       assert Fake.coverage() == %{}
       refute_received {:dp_exchange, :schwab, _payload}

@@ -879,6 +879,10 @@ defmodule DpExchange.Schwab.Orders do
   defp number(value) when is_integer(value), do: Decimal.new(value)
   defp number(value) when is_float(value), do: Decimal.from_float(value)
 
+  # The venue's JSON numbers arrive as `Decimal`s (`floats: :decimals`, see `Rest`): finite
+  # ones only, as for a string.
+  defp number(%Decimal{} = value), do: if(finite_number?(value), do: value, else: nil)
+
   defp number(value) when is_binary(value) do
     case Decimal.parse(String.trim(value)) do
       {parsed, ""} -> if finite_number?(parsed), do: parsed, else: nil

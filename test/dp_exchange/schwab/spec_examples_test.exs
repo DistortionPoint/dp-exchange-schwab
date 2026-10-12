@@ -192,7 +192,10 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
         Req.Test.json(conn, body)
       end
 
-      assert {:ok, ^body} =
+      # Unnormalised, but numbers keep their digits: fractional ones arrive as Decimals.
+      expected = body |> Jason.encode!() |> Jason.decode!(floats: :decimals)
+
+      assert {:ok, ^expected} =
                Rest.get_symbol_quote("AAPL", @creds, plug: capture, retry_attempts: 0)
 
       assert_received {:request_path, "/marketdata/v1/AAPL/quotes"}
@@ -429,7 +432,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
   # ============================================================================
 
   describe "GET /accounts/{accountNumber} — account_margin_schema.json (schema-derived MarginAccount)" do
-    test "get_balances/2 reads MarginBalance.equity as balance, availableFunds (not buyingPower) as available" do
+    test "get_balances/2 reads MarginBalance.marginBalance (cash, not equity) as balance, availableFunds as available" do
       body = fixture!("accounts_and_trading/account_margin_schema.json")
 
       assert {:ok, [%Balance{} = balance]} =
@@ -440,7 +443,8 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
                )
 
       assert balance.currency == "USD"
-      assert Decimal.equal?(balance.balance, Decimal.new(45_825))
+      # The cash side, not `equity` (45825), which includes the securities' market value.
+      assert Decimal.equal?(balance.balance, Decimal.new("1250.5"))
       assert Decimal.equal?(balance.available_balance, Decimal.new(15_000))
       assert balance.provider == :schwab
 
@@ -776,10 +780,10 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
                )
 
       assert txn["type"] == "TRADE"
-      assert txn["netAmount"] == -1902.50
+      assert Decimal.equal?(txn["netAmount"], Decimal.new("-1902.50"))
       assert [item] = txn["transferItems"]
       assert item["amount"] == 10
-      assert item["price"] == 190.25
+      assert Decimal.equal?(item["price"], Decimal.new("190.25"))
 
       assert_received {:request, "GET", "/trader/v1/accounts/H/transactions", query}
       assert query =~ "types=TRADE"

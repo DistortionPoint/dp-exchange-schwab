@@ -1165,7 +1165,12 @@ defmodule DpExchange.Schwab.Fake do
     with {:ok, _hash} <- require_account(opts),
          :ok <- Rest.check_transactions(opts),
          :ok <- require_credentials(credentials: credentials) do
-      {:ok, [%{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}]}
+      # Through the cap check the real path applies, so a reply at the venue's cap is
+      # refused as `{:error, :history_truncated}` here exactly as there. This fake's one
+      # row is far below it.
+      Rest.within_transactions_cap([
+        %{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}
+      ])
     end
   end
 

@@ -1151,7 +1151,7 @@ defmodule DpExchange.Schwab.FeedTest do
       feed = start_feed(socket: fake_socket())
 
       assert Feed.subscribe(feed, ["AAPL", "BTC-USD"]) ==
-               {:error, {:invalid_symbols, ["BTC-USD"]}}
+               {:error, {:invalid_symbols, ["AAPL", "BTC-USD"]}}
 
       assert Feed.update_symbols(feed, ["BTC-USD"]) == {:error, {:invalid_symbols, ["BTC-USD"]}}
       assert Feed.wanted(feed) == []
