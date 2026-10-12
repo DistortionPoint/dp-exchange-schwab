@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.117] - 2026-10-12
+
 ### Fixed -- regression review of the trading conventions and Decimal switch (family tick R)
 
 - **BREAKING (error value): a duration the venue does not serve is the family's
