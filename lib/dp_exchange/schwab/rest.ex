@@ -1884,10 +1884,24 @@ defmodule DpExchange.Schwab.Rest do
           "maxResults" => Keyword.get(opts, :max_results)
         })
 
-      with {:ok, body} <- get(trader_url(opts) <> "/orders" <> query, credentials, opts) do
-        list_body(body)
+      with {:ok, body} <- get(trader_url(opts) <> "/orders" <> query, credentials, opts),
+           {:ok, rows} <- list_body(body) do
+        within_orders_cap(rows, opts)
       end
     end
+  end
+
+  # **A reply at the venue's default cap is refused, not returned as complete.** The spec says
+  # `maxResults` is "The max number of orders to retrieve. Default is 3000." (`GET /orders` and
+  # `GET /accounts/{accountNumber}/orders`), so with no `:max_results` of the caller's own a
+  # reply of 3000 or more rows may have been cut off, as for `get_transactions/3`. A caller who
+  # passed `:max_results` asked for that bound and gets the rows it bounded.
+  @orders_default_cap 3000
+
+  defp within_orders_cap(rows, opts) do
+    if Keyword.get(opts, :max_results) == nil and length(rows) >= @orders_default_cap,
+      do: {:error, :history_truncated},
+      else: {:ok, rows}
   end
 
   # Both ends, then a window that can mean something. The spec documents a maximum range of
@@ -2033,8 +2047,9 @@ defmodule DpExchange.Schwab.Rest do
 
   **A reply at the venue's cap is refused, not returned as complete.** The spec says "Maximum
   number of transactions in response is 3000", so a reply of 3000 or more rows may have been
-  cut off and the rest of the window is unseen. It answers `{:error, :history_truncated}`. The caller narrows the window (or the `:symbol`) and asks again;
-  this package does not walk the window in halves on its behalf.
+  cut off and the rest of the window is unseen. It answers `{:error, :history_truncated}`.
+  The caller narrows the window (or the `:symbol`) and asks again; this package does not
+  walk the window in halves on its behalf.
   """
   @spec get_transactions(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -2321,8 +2336,9 @@ defmodule DpExchange.Schwab.Rest do
   read; neither is guessed at from the other.
 
   Cash is reported as a `USD` balance. `balance` is the **cash in the account** for both
-  account types: `marginBalance` for a margin account (negative when borrowing; documented,
-  not measured) and `totalCash` for a cash account. It is never `equity`, which includes the
+  account types: `marginBalance` for a margin account (**unmeasured**: the spec types it as
+  a bare `number` with no description, so "the cash side, negative when borrowing" is a
+  reading, not a documented fact) and `totalCash` for a cash account. It is never `equity`, which includes the
   market value of securities held. `available_balance` is `availableFunds` for a margin
   account and `cashAvailableForTrading` for a cash account — the same *question* answered
   by different fields, and the venue answers only the one that applies. It is **not**
@@ -2594,8 +2610,14 @@ defmodule DpExchange.Schwab.Rest do
   def preview_outcome(%{} = body), do: {:ok, body}
   def preview_outcome(_other), do: {:error, :unexpected_response_shape}
 
+  # A `Decimal` is a map to the pattern below; it is a number the venue sent, kept as one.
+  defp bound_reject(%Decimal{} = number), do: number
+
   defp bound_reject(%{} = detail),
     do: Map.new(detail, fn {key, value} -> {key, bound_reject(value)} end)
+
+  defp bound_reject(items) when is_list(items),
+    do: items |> Enum.take(50) |> Enum.map(&bound_reject/1)
 
   defp bound_reject(text) when is_binary(text), do: Bound.text(text)
   defp bound_reject(other), do: other
@@ -2725,8 +2747,9 @@ defmodule DpExchange.Schwab.Rest do
         })
 
       with {:ok, path} <- account_path(account_hash, ["orders"]),
-           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts) do
-        if is_list(body), do: {:ok, body}, else: {:error, :unexpected_response_shape}
+           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts),
+           {:ok, rows} <- list_body(body) do
+        within_orders_cap(rows, opts)
       end
     end
   end

@@ -900,6 +900,37 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert {:ok, [_row]} = Fake.get_transactions(@creds, [account_hash: "h"] ++ opts)
     end
 
+    test "an orders reply at the default 3000 cap is truncated unless max_results is given" do
+      window = [
+        from: ~U[2026-08-01 00:00:00Z],
+        to: ~U[2026-09-01 00:00:00Z],
+        now: ~U[2026-08-15 00:00:00Z],
+        retry_attempts: 0
+      ]
+
+      full = Enum.map(1..3000, fn id -> %{"orderId" => id} end)
+      under = Enum.take(full, 2999)
+
+      assert {:error, :history_truncated} =
+               Rest.get_all_orders(@creds, [plug: responding(full)] ++ window)
+
+      assert {:error, :history_truncated} =
+               Rest.get_orders(@creds, "hash-1", [plug: responding(full)] ++ window)
+
+      assert {:ok, rows} = Rest.get_all_orders(@creds, [plug: responding(under)] ++ window)
+      assert length(rows) == 2999
+
+      # A bound the caller chose is the caller's: rows up to it are what was asked for.
+      assert {:ok, rows} =
+               Rest.get_orders(
+                 @creds,
+                 "hash-1",
+                 [plug: responding(full), max_results: 3000] ++ window
+               )
+
+      assert length(rows) == 3000
+    end
+
     test "one transaction is fetched by id" do
       me = self()
 

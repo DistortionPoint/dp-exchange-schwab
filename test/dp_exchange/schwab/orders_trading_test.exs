@@ -300,6 +300,30 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
       assert Enum.all?(kept, &(byte_size(&1["message"]) < 3_000))
     end
 
+    test "a preview body keeps fractional numbers as Decimals, rejects included" do
+      clean = ~s({"commissionAndFee":{"commission":{"value":1.10}}})
+
+      assert {:ok, %{"commissionAndFee" => %{"commission" => %{"value" => value}}}} =
+               Rest.preview_order(@creds, "H", %{},
+                 plug: fn conn -> Plug.Conn.resp(conn, 200, clean) end,
+                 retry_attempts: 0
+               )
+
+      assert value == Decimal.new("1.10")
+
+      rejected =
+        ~s({"orderValidationResult":{"rejects":[{"message":"m","limit":1.50,"tags":["a",2.5]}]}})
+
+      assert {:refused, {:preview_rejected, [reject]}} =
+               Rest.preview_order(@creds, "H", %{},
+                 plug: fn conn -> Plug.Conn.resp(conn, 200, rejected) end,
+                 retry_attempts: 0
+               )
+
+      assert reject["limit"] == Decimal.new("1.50")
+      assert reject["tags"] == ["a", Decimal.new("2.5")]
+    end
+
     test "the facade passes the refusal through" do
       plug = fn conn -> Req.Test.json(conn, @rejected) end
 

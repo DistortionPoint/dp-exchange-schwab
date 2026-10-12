@@ -31,6 +31,26 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed -- regression review of the trading conventions and Decimal switch (family tick R)
+
+- **BREAKING (error value): a duration the venue does not serve is the family's
+  `{:error, {:unsupported_order_combination, order_type, time_in_force}}`**, not
+  `{:unsupported_time_in_force, tif}` (`:gtd`, `:gfw`, a string, ...). Same on `Fake`, which
+  builds through `Orders.build/2`.
+- **An orders reply at the venue's default cap is refused, not returned as complete.** The
+  spec's `maxResults` reads "Default is 3000", so `get_all_orders/2` and `get_orders/2` with
+  no `:max_results` and a reply of 3000 or more rows answer `{:error, :history_truncated}`,
+  as `get_transactions/2` does. A caller's own `:max_results` is honoured as its bound.
+- **A preview's reject rows keep a number a `Decimal`.** `bound_reject/1` matched a `Decimal`
+  as a map and rebuilt it as `%{sign:, coef:, exp:}`; lists inside a row are now bounded too.
+- **`Fake` parity with the Decimal switch:** its canned order price, its transaction row's
+  `netAmount`, its screener metrics and the bodies it builds for placed orders hold
+  `Decimal`s where the real path holds them (they were floats).
+- Docs: the `marginBalance` reading ("cash side, negative when borrowing") is stated as
+  **unmeasured**: the spec types the field as a bare `number` with no description. Raw-body
+  calls now say their fractional numbers are `Decimal`s; the facade's order-id check
+  (`{:invalid_order_id, v}`, integers refused) is documented where `invalid_path_segment` was.
+
 ## [0.2.116] - 2026-10-12
 
 ### Changed

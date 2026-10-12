@@ -1723,9 +1723,9 @@ defmodule DpExchange.Schwab.Feed do
   `DpExchange.Schwab.Fake`.
 
   `:ok`, or `{:error, {:invalid_symbols, value}}`: `value` is always the argument itself, as
-  the caller passed it, whether it is not a proper list or holds a refused element. An element is refused when it is
-  not a string, is blank after trim, or is not an equity or option symbol (see
-  `SymbolFormat.validate/1`). Spelling is not judged: `" aapl"` is valid.
+  the caller passed it, whether it is not a proper list or holds a refused element. An
+  element is refused when it is not a string, is blank after trim, or is not an equity or
+  option symbol (see `SymbolFormat.validate/1`). Spelling is not judged: `" aapl"` is valid.
   """
   @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
   def check_symbols(symbols) do

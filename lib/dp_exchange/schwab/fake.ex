@@ -402,7 +402,7 @@ defmodule DpExchange.Schwab.Fake do
       "enteredTime" => Calendar.strftime(DateTime.utc_now(), "%Y-%m-%dT%H:%M:%S+0000")
     }
 
-    entered |> Map.merge(payload) |> Jason.encode!() |> Jason.decode!()
+    entered |> Map.merge(payload) |> Jason.encode!() |> Jason.decode!(floats: :decimals)
   end
 
   # Orders this process placed, as the venue-shaped bodies, by id.
@@ -653,7 +653,8 @@ defmodule DpExchange.Schwab.Fake do
       "duration" => "DAY",
       "quantity" => 1,
       "filledQuantity" => 1,
-      "price" => 190.25,
+      # A fractional JSON number is a `Decimal` on the real path (`Rest`'s `floats: :decimals`).
+      "price" => Decimal.new("190.25"),
       "enteredTime" => "2026-01-02T15:04:05+0000",
       "orderLegCollection" => [
         %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}}
@@ -1142,7 +1143,11 @@ defmodule DpExchange.Schwab.Fake do
            screener: name,
            # The venue's returned order, not a metric this fake ranked on.
            rank: 1,
-           metrics: %{"symbol" => "AAPL", "netPercentChange" => 0.031, "volume" => 1_000_000},
+           metrics: %{
+             "symbol" => "AAPL",
+             "netPercentChange" => Decimal.new("0.031"),
+             "volume" => 1_000_000
+           },
            venue_time: nil,
            provider: :schwab
          }
@@ -1169,7 +1174,7 @@ defmodule DpExchange.Schwab.Fake do
       # refused as `{:error, :history_truncated}` here exactly as there. This fake's one
       # row is far below it.
       Rest.within_transactions_cap([
-        %{"activityId" => 1, "type" => "TRADE", "netAmount" => -1802.5}
+        %{"activityId" => 1, "type" => "TRADE", "netAmount" => Decimal.new("-1802.5")}
       ])
     end
   end

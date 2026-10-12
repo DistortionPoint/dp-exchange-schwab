@@ -450,7 +450,10 @@ defmodule DpExchange.Schwab.Orders do
 
   # **The duration is required, never defaulted to `DAY`.** A missing time-in-force silently
   # became a day order; a caller who forgot it may have meant good-till-cancelled. `nil` is
-  # absent (a forwarded unset option); any other value is checked.
+  # absent (a forwarded unset option); any other value is checked. A duration this venue does
+  # not serve (`:gtd`, `:gfw`, a string, ...) is the family's
+  # `{:unsupported_order_combination, type, tif}` -- `type` is the order type already accepted
+  # by `fetch_order_type/1`, so the request's own atom.
   defp fetch_duration(request) do
     case Map.get(request, :time_in_force) do
       nil ->
@@ -458,8 +461,11 @@ defmodule DpExchange.Schwab.Orders do
 
       tif ->
         case Map.fetch(@durations, tif) do
-          {:ok, native} -> {:ok, native}
-          :error -> {:error, {:unsupported_time_in_force, tif}}
+          {:ok, native} ->
+            {:ok, native}
+
+          :error ->
+            {:error, {:unsupported_order_combination, Map.get(request, :order_type), tif}}
         end
     end
   end

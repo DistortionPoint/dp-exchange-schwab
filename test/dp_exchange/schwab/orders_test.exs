@@ -274,7 +274,10 @@ defmodule DpExchange.Schwab.OrdersTest do
 
     test ":gtd is refused because three fixed horizons are not an arbitrary date" do
       assert Orders.build(Map.put(@buy, :time_in_force, :gtd)) ==
-               {:error, {:unsupported_time_in_force, :gtd}}
+               {:error, {:unsupported_order_combination, :market, :gtd}}
+
+      assert Orders.build(Map.put(@buy, :time_in_force, "DAY")) ==
+               {:error, {:unsupported_order_combination, :market, "DAY"}}
     end
 
     test "a missing or nil :time_in_force is refused, never defaulted to :day" do

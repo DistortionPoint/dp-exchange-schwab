@@ -363,12 +363,17 @@ A margin account's `available_balance` is `availableFunds`, not `buyingPower`. B
 is leveraged and can exceed the balance it would sit inside.
 
 `balance` means **the cash in the account** for both account types: `totalCash` on a cash
-account, `marginBalance` on a margin account (negative when borrowing; documented, not
-measured). It is never `equity`, which includes the market value of securities held. A margin
+account, `marginBalance` on a margin account. **Unmeasured:** the spec types `marginBalance`
+as a bare `number` with no description, so that it is the cash side and that it is negative
+when borrowing is a reading, not a documented fact. It is never `equity`, which includes the market value of securities held. A margin
 reply without `marginBalance` is `{:error, :unexpected_response_shape}`.
 
 Money and quantities are decoded without float rounding (`floats: :decimals`), so every digit
-the venue sent survives.
+the venue sent survives. That includes the calls that hand back the venue's body unmapped
+(`preview_order/3`, `get_transactions/2`, `get_all_orders/2`, ...): a fractional JSON number
+in those maps is a `Decimal`, not a float; an integer stays an integer. Streamer frames are
+not covered by this: they are decoded by `Socket` and read by `StreamerDecode`, which accepts
+a float, an integer, a string or a `Decimal`.
 
 A `get_positions` row whose `longQuantity` and `shortQuantity` are both absent, or one of them
 present but unreadable, refuses the whole reply: `{:error, {:unexpected_position_quantity,
@@ -622,9 +627,17 @@ today's date"), and `:status` on both orders reads must be one of the venue's 21
 `apiOrderStatus` strings (`Rest.order_statuses/0`), else `{:invalid_order_status, value}`.
 `get_transactions/2` applies the same window rules (the spec also says "maximum date range is
 1 year" there) under the names `:transaction_window_reversed`, `:transaction_window_too_long`
-and `:transaction_window_invalid`. An order id, transaction id or account hash that is empty
-or not text/an integer is `{:error, {:invalid_path_segment, :schwab}}`, and one containing
-`/`, `?` or `#` is escaped into a single path segment rather than changing the path.
+and `:transaction_window_invalid`. A transaction id or account hash that is empty or not
+text/an integer is `{:error, {:invalid_path_segment, :schwab}}` from `Rest`, and one
+containing `/`, `?` or `#` is escaped into a single path segment rather than changing the
+path. An order id given to the facade's `get_order/3`, `cancel_order/3` or `replace_order/4`
+is checked first, as `{:error, {:invalid_order_id, value}}`: `nil`, an integer, a blank or a
+padded string.
+
+An orders reply is capped by the venue at 3000 rows unless `:max_results` is given
+("Default is 3000"). With no `:max_results`, a reply of 3000 or more rows from
+`get_all_orders/2` or `get_orders/2` is `{:error, :history_truncated}`, as for
+`get_transactions/2`: narrow the window or pass the bound you want.
 
 ## 11. What this package does not implement
 
