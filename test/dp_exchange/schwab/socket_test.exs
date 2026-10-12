@@ -1257,6 +1257,52 @@ defmodule DpExchange.Schwab.SocketTest do
       {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, state)
       assert reconnected.last_top == %{}
     end
+
+    test "an unreadable size beside a live price refuses that frame's book and says so" do
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50", "4" => "3"}),
+          state()
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{}}
+
+      {:ok, state} =
+        Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "99.60", "4" => "junk"}), state)
+
+      refute_received {:dp_exchange, :schwab, %TopOfBook{}}
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.reason =~ "top of book frame dropped"
+
+      # The last GOOD book is still the one carried.
+      assert Decimal.equal?(state.last_top["AAPL"].bid, Decimal.new("99.50"))
+    end
+
+    test "a key the venue streams past the carried-book cap is published but not carried" do
+      full = Map.new(1..5_000, fn n -> {"K#{n}", %{symbol: "K#{n}"}} end)
+
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "NEWKEY", "1" => "99.50", "2" => "100.50"}),
+          state(%{last_top: full})
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "NEWKEY"}}
+      assert map_size(state.last_top) == 5_000
+      refute is_map_key(state.last_top, "NEWKEY")
+
+      # A key already carried keeps updating at the cap.
+      known = full |> Map.delete("K1") |> Map.put("AAPL", %{symbol: "AAPL"})
+
+      {:ok, state} =
+        Socket.handle_frame(
+          data_frame(%{"key" => "AAPL", "1" => "99.50", "2" => "100.50"}),
+          state(%{last_top: known})
+        )
+
+      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "AAPL"}}
+      assert %TopOfBook{} = state.last_top["AAPL"]
+    end
   end
 
   describe "nothing wanted on a service is an UNSUBS of what the session holds" do

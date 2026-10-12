@@ -95,8 +95,8 @@ instant. Whether the venue counts `period` back from `endDate` (sent when you gi
 On `get_top_of_book/2` and the streamed `TopOfBook`, a price of `0` means no resting order on
 that side: `nil` price and `nil` size. A present side that cannot be read (non-numeric, empty
 string, NaN, negative) is `{:error, {:invalid_decimal, :bid | :ask, value}}` on REST; on the stream that frame's book is not
-delivered and the last one stands. A present size beside a price that cannot be read, or is negative, refuses
-the book the same way on both paths (`{:invalid_decimal, :bid_size | :ask_size, value}`); it
+delivered and the last one stands. A present size beside a live price that cannot be read, or is negative, refuses
+(a size beside a price of 0 is moot and ignored) the book the same way on both paths (`{:invalid_decimal, :bid_size | :ask_size, value}`); it
 is no longer published as `nil`. The quoted value is as sent when short and cut when long. `nil` is never produced for something unreadable.
 
 **A dropped streamed frame is announced, once.** A `LEVELONE_*` book, a `*_BOOK` frame or a

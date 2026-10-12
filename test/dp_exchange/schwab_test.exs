@@ -86,6 +86,11 @@ defmodule DpExchange.SchwabTest do
 
   describe "the declaration and the code agree" do
     test "every endpoint declared :unsupported actually says so" do
+      # A sweep over nothing would pass whatever the code did.
+      assert Enum.any?(Schwab.capabilities().endpoints, fn {_key, level} ->
+               level == :unsupported
+             end)
+
       for {{name, arity}, :unsupported} <- Schwab.capabilities().endpoints do
         assert apply(Schwab, name, unsupported_args(name, arity)) == {:error, :not_supported},
                "#{name}/#{arity} is declared :unsupported but did not say so"

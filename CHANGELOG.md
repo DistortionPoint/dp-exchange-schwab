@@ -31,6 +31,16 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed -- tick U (test-suite quality, regression review of tick T)
+
+- `StreamerDecode.to_top_of_book/3` judges the price before the size, as REST does: a price of
+  0 is "no resting order" and its size is moot, so an unreadable size beside it no longer
+  refuses the frame (tick T had made the streamed arm stricter than REST there). A size beside
+  a live price, or a size with no price in a delta, is still refused when unreadable or
+  negative. When both are unreadable the price is the fault reported.
+- Tests: the declared-`:unsupported` sweeps assert they sweep something; added tests for the
+  streamed unreadable size, the `last_top` cap, and the price-before-size order.
+
 ## [0.2.120] - 2026-10-12
 
 ### Fixed -- tick T (regression review of tick S, docs vs code, hot path)

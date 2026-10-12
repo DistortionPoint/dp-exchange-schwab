@@ -573,6 +573,25 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert Decimal.equal?(top.bid_size, 0)
     end
 
+    test "a size beside a price of 0 is moot, and the price is judged before the size" do
+      # A price of 0 is "no resting order" (MD6), so there is no level for the size to
+      # describe: an unreadable size next to it must not refuse the frame, as on REST.
+      assert {:ok, top} =
+               StreamerDecode.to_top_of_book(
+                 %{bid: 0, bid_size: "junk", ask: 2, ask_size: 4},
+                 "AAPL",
+                 @observed
+               )
+
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask_size, 4)
+
+      # Both unreadable: the price is the fault reported.
+      assert {:error, {:invalid_decimal, :bid, "x"}} =
+               StreamerDecode.to_top_of_book(%{bid: "x", bid_size: "junk"}, "AAPL", @observed)
+    end
+
     test "the same frame gives a top of book with no price at all" do
       fields = %{last: 10.55, bid: 10.50, ask: 10.60, bid_size: 3, ask_size: 5}
 

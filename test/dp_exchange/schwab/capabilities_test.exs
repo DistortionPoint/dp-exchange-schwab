@@ -34,6 +34,8 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
     end
 
     test "everything the venue does not serve is declared :unsupported" do
+      refute Subject.venue_does_not_serve() == []
+
       for endpoint <- Subject.venue_does_not_serve() do
         assert Subject.declaration().endpoints[endpoint] == :unsupported,
                "#{inspect(endpoint)} is listed as unserved but is not declared :unsupported"

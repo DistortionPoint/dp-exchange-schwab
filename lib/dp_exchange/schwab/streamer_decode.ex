@@ -172,15 +172,18 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # unreadable book level): `{:error, {:invalid_decimal, :bid_size, value}}`. An unreadable
   # size used to become `nil` ("not published") while the price beside it was published as
   # a live level. An absent size is `nil`; a size of 0 is a size of 0.
+  #
+  # The price is judged first, as on the REST arm: a price of 0 is "no resting order" and its
+  # size is moot, so an unreadable size beside it does not refuse the frame.
   defp book_side(fields, price_key, size_key) do
-    with {:ok, size} <- book_size(Map.get(fields, size_key), size_key) do
-      case Map.get(fields, price_key) do
-        nil ->
-          {:ok, {nil, size}}
+    size_raw = Map.get(fields, size_key)
 
-        raw ->
-          raw |> decimal() |> side_price(raw, price_key, size)
-      end
+    case Map.get(fields, price_key) do
+      nil ->
+        with {:ok, size} <- book_size(size_raw, size_key), do: {:ok, {nil, size}}
+
+      raw ->
+        raw |> decimal() |> side_price(raw, price_key, size_raw, size_key)
     end
   end
 
@@ -198,11 +201,12 @@ defmodule DpExchange.Schwab.StreamerDecode do
     end
   end
 
-  defp side_price(nil, raw, price_key, _size), do: {:error, {:invalid_decimal, price_key, raw}}
+  defp side_price(nil, raw, price_key, _size_raw, _size_key),
+    do: {:error, {:invalid_decimal, price_key, raw}}
 
-  defp side_price(price, raw, price_key, size) do
+  defp side_price(price, raw, price_key, size_raw, size_key) do
     case Decimal.compare(price, 0) do
-      :gt -> {:ok, {price, size}}
+      :gt -> with {:ok, size} <- book_size(size_raw, size_key), do: {:ok, {price, size}}
       :eq -> {:ok, {nil, nil}}
       :lt -> {:error, {:invalid_decimal, price_key, raw}}
     end
