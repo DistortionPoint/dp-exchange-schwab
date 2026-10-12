@@ -9,7 +9,7 @@ facade how data reaches the package, and must not be able to.
 
 ```elixir
 def deps do
-  [{:dp_exchange_schwab, "~> 0.2.107"}]
+  [{:dp_exchange_schwab, "~> 0.2.119"}]
 end
 ```
 

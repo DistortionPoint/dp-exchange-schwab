@@ -94,9 +94,17 @@ instant. Whether the venue counts `period` back from `endDate` (sent when you gi
 
 On `get_top_of_book/2` and the streamed `TopOfBook`, a price of `0` means no resting order on
 that side: `nil` price and `nil` size. A present side that cannot be read (non-numeric, empty
-string, NaN, negative) is `{:error, {:invalid_decimal, :bid | :ask, value}}` on REST; on the
-stream that frame's book is not delivered and the last one stands. `nil` is never produced
-for something unreadable.
+string, NaN, negative) is `{:error, {:invalid_decimal, :bid | :ask, value}}` on REST; on the stream that frame's book is not
+delivered and the last one stands. A present size beside a price that cannot be read, or is negative, refuses
+the book the same way on both paths (`{:invalid_decimal, :bid_size | :ask_size, value}`); it
+is no longer published as `nil`. The quoted value is as sent when short and cut when long. `nil` is never produced for something unreadable.
+
+**A dropped streamed frame is announced, once.** A `LEVELONE_*` book, a `*_BOOK` frame or a
+`CHART_*` bar refused for an unreadable value (a bar with a zero or negative open, high, low
+or close is refused too, on REST and on the stream) raises one `:degraded` `Core.Notice` per
+symbol and kind per Streamer session, with `details.symbol`, `details.service` and
+`details.reason`. A book that has stopped updating while that notice stands is frozen on the
+last good frame, not live. The set of announced symbols is capped and cleared on reconnect.
 
 A streamed `Quote`'s `volume` is the day's cumulative total with `volume_window:
 :running_total` (difference it), exactly as REST. It is never one print: LEVELONE is
@@ -114,7 +122,8 @@ the field to guarantee, and it has not changed.
 `to_order_book/2` guarantees it as of 0.2.30 — **bids descending, asks ascending** — and it
 is `Core.Types.OrderBook`'s contract rather than this package's convenience. You do not need
 to sort what you receive, and you should not assume the venue's own row order means anything.
-A level whose price cannot be read is dropped rather than carried with a `nil` price.
+A level that cannot be read refuses the whole book (see "A bid or ask of 0 is no order"
+above): nothing is thinned or carried with a `nil` price.
 
 ## A streamed quote with an unreadable last price is refused, not nilled
 
@@ -587,8 +596,8 @@ Two consequences worth knowing:
   from the new session's frames.
 
 `CHART_*` is **All Sequence** and `NYSE_BOOK`/`NASDAQ_BOOK`/`OPTIONS_BOOK` are **Whole** —
-both deliver complete units, so nothing is merged for those and a missing price in a candle
-is refused rather than filled in.
+both deliver complete units, so nothing is merged for those and a missing, zero or negative
+price in a candle is refused (and announced, see above) rather than filled in.
 
 **A documentation-accuracy sweep (2026-09-06) found `streamable` naming three more kinds —
 `:order_book`, `:orders`, `:fills` — that nothing here ever subscribed.** The decoders for

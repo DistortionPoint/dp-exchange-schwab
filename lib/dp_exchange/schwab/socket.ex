@@ -931,7 +931,7 @@ defmodule DpExchange.Schwab.Socket do
       case StreamerDecode.to_top_of_book(fields, symbol, observed_at) do
         {:ok, delta} ->
           top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
-          {quoted ++ [top], put_in(state.last_top[symbol], top)}
+          {quoted ++ [top], remember_top(state, symbol, top)}
 
         # An unreadable (or negative) bid/ask refuses this frame's book: publishing `nil`
         # would say "no resting order", and carrying the old level would answer a question
@@ -950,10 +950,10 @@ defmodule DpExchange.Schwab.Socket do
     end
   end
 
-  defp decode("CHART_" <> _rest, fields, symbol, _observed_at, state) do
+  defp decode("CHART_" <> _rest = service, fields, symbol, _observed_at, state) do
     case StreamerDecode.to_candle(fields, symbol, "1m") do
       {:ok, candle} -> {[candle], state}
-      {:error, _reason} -> {[], state}
+      {:error, _reason} -> {[], report_unreadable(state, service, symbol, "candle")}
     end
   end
 
@@ -985,12 +985,23 @@ defmodule DpExchange.Schwab.Socket do
           details: %{
             symbol: Bound.text(symbol),
             service: Bound.text(service),
-            reason: "#{what} frame dropped: a price or size in it could not be read"
+            reason: "#{what} frame dropped: a price, size or time in it could not be read"
           }
         )
       )
 
       Map.put(state, :unreadable_reported, MapSet.put(reported, key))
+    end
+  end
+
+  # `last_top` is keyed by the venue's own row key, and it is pruned when a symbol is
+  # unsubscribed. A venue streaming endless distinct keys it was never asked for must not
+  # grow this process without limit, so a NEW key past the cap is published but not carried.
+  defp remember_top(%{last_top: last_top} = state, symbol, top) do
+    if is_map_key(last_top, symbol) or map_size(last_top) < @max_delayed_reported do
+      %{state | last_top: Map.put(last_top, symbol, top)}
+    else
+      state
     end
   end
 

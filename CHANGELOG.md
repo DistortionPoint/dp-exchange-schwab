@@ -31,6 +31,30 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed -- tick T (regression review of tick S, docs vs code, hot path)
+
+- **BREAKING: a candle with a zero or negative open, high, low or close is refused (MD6).**
+  `Rest.get_historical_prices/4` answers `{:error, {:non_positive_price, field, value}}` for the
+  reply, and `StreamerDecode.to_candle/3` refuses the bar; neither path checked the sign
+  before, so a bar opening at 0 sat in the series like any other.
+- **BREAKING: a present book size that cannot be read, or is negative, refuses the book
+  (MD5).** `Rest.get_top_of_book/2` and `StreamerDecode.to_top_of_book/3` answer
+  `{:error, {:invalid_decimal, :bid_size | :ask_size, value}}`. It used to become `nil`
+  ("not published") beside a published price, while the tick S `:degraded` notice already
+  said "a price or size could not be read".
+- **A streamed candle dropped for an unreadable or non-positive value is announced**, once per
+  symbol per session, like a dropped book frame (`details.reason` now reads "a price, size or
+  time in it could not be read").
+- REST `{:invalid_decimal, :bid | :ask, value}` quotes `value` bounded (short strings and
+  numbers as sent, anything else cut), so a hostile reply cannot ride the error tuple.
+- `Socket` no longer lets `last_top` grow without limit for rows the venue sends under keys
+  that were never subscribed: a new key past the 5,000 cap is published but not carried.
+- Hot path: `Feed.put_kind/3` allocates nothing when the kind is already recorded for the
+  symbol (it built a `MapSet` per delivered frame).
+- Docs: `usage-rules.md` said a streamed book level that cannot be read is dropped; it refuses
+  the book (since 0.2.118). `StreamerDecode` no longer says a missing venue time "falls back to
+  `observed_at`" (it is `nil`). A stray comment block in `Feed` now sits on `@call_timeout`.
+
 ## [0.2.119] - 2026-10-12
 
 ### Fixed -- tick S regression review

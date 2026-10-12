@@ -553,6 +553,26 @@ defmodule DpExchange.Schwab.StreamerTest do
       end
     end
 
+    test "an unreadable or negative size refuses the book, it is not published as nil" do
+      for bad <- ["abc", -1, "-2.5", "NaN"] do
+        assert {:error, {:invalid_decimal, :bid_size, ^bad}} =
+                 StreamerDecode.to_top_of_book(
+                   %{bid: 1, bid_size: bad, ask: 2},
+                   "AAPL",
+                   @observed
+                 )
+
+        # Also when the price beside it is absent from the delta.
+        assert {:error, {:invalid_decimal, :ask_size, ^bad}} =
+                 StreamerDecode.to_top_of_book(%{ask_size: bad}, "AAPL", @observed)
+      end
+
+      assert {:ok, top} =
+               StreamerDecode.to_top_of_book(%{bid: 1, bid_size: 0, ask: 2}, "AAPL", @observed)
+
+      assert Decimal.equal?(top.bid_size, 0)
+    end
+
     test "the same frame gives a top of book with no price at all" do
       fields = %{last: 10.55, bid: 10.50, ask: 10.60, bid_size: 3, ask_size: 5}
 
@@ -717,6 +737,15 @@ defmodule DpExchange.Schwab.StreamerTest do
 
       assert {:error, {:invalid_decimal, :high, "NaN"}} =
                StreamerDecode.to_candle(%{base | high: "NaN"}, "AAPL", "1m")
+    end
+
+    test "a zero or negative price refuses the bar (MD6)" do
+      base = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
+
+      for field <- [:open, :high, :low, :close], bad <- [0, -1.5, "0"] do
+        assert {:error, {:non_positive_price, ^field, ^bad}} =
+                 StreamerDecode.to_candle(Map.put(base, field, bad), "AAPL", "1m")
+      end
     end
 
     test "volume is NOT required — an unstated volume is not a broken bar" do

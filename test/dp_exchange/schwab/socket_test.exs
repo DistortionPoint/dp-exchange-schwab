@@ -799,6 +799,38 @@ defmodule DpExchange.Schwab.SocketTest do
       assert candle.opened_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
+    test "a CHART frame with a zero price is dropped and announced once" do
+      data = %{
+        "data" => [
+          %{
+            "service" => "CHART_EQUITY",
+            "content" => [
+              %{
+                "key" => "AAPL",
+                "0" => "AAPL",
+                "1" => 0,
+                "2" => 11.0,
+                "3" => 9.5,
+                "4" => 10.5,
+                "5" => 1000,
+                "7" => 1_787_936_147_000
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      refute_received {:dp_exchange, :schwab, %Types.Candle{}}
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.symbol == "AAPL"
+      assert details.reason =~ "candle frame dropped"
+
+      assert {:ok, _state} = Socket.handle_frame(frame(data), state)
+      refute_received {:dp_exchange, :schwab, %Notice{}}
+    end
+
     test "a CHART_FUTURES frame decodes under its OWN numbering, not CHART_EQUITY's" do
       # Built from the vendor's "2. CHART_FUTURES" field table
       # (market-data-production.txt, after line 2439): 0 key, 1 Chart Time (ms since

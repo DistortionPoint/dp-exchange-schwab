@@ -309,10 +309,6 @@ defmodule DpExchange.Schwab.Feed do
   # fallback route.
   @interval_ms 30_000
 
-  # WebSockex's own send window, which is not configurable. One `update_symbols/2` can send
-  # an unsubscribe and a subscribe, so a call can wait out two windows; the third is
-  # headroom, because a `GenServer.call` timing out first would surface a slow socket as a
-  # caller-side exit rather than as an error the caller can retry.
   # How long the Streamer bootstrap may run before this feed stops waiting for it.
   #
   # Without a bound, a `Rest.get_user_preference/2` that never returns wedges this feed
@@ -328,6 +324,10 @@ defmodule DpExchange.Schwab.Feed do
   # stopped answering entirely, not a second, tighter deadline on a healthy one.
   @route_bootstrap_timeout_ms 95_000
 
+  # WebSockex's own send window is not configurable. One `update_symbols/2` can send an
+  # unsubscribe and a subscribe, so a call can wait out two windows; the third is headroom,
+  # because a `GenServer.call` timing out first would surface a slow socket as a caller-side
+  # exit rather than as an error the caller can retry.
   @call_timeout 15_000
 
   # How long a `subscribe/2` or `update_symbols/2` may wait on a Streamer bootstrap before
@@ -1793,11 +1793,17 @@ defmodule DpExchange.Schwab.Feed do
   # the three above.
   defp record_kind(state, _symbol, _value), do: state
 
-  defp put_kind(state, symbol, kind) do
-    %{
-      state
-      | kinds: Map.update(state.kinds, symbol, MapSet.new([kind]), &MapSet.put(&1, kind))
-    }
+  # Per frame, so the common case (the kind is already recorded) allocates nothing.
+  defp put_kind(%{kinds: kinds} = state, symbol, kind) do
+    case kinds do
+      %{^symbol => known} ->
+        if MapSet.member?(known, kind),
+          do: state,
+          else: %{state | kinds: Map.put(kinds, symbol, MapSet.put(known, kind))}
+
+      _first_for_symbol ->
+        %{state | kinds: Map.put(kinds, symbol, MapSet.new([kind]))}
+    end
   end
 
   # `Core.Config` resolves through the calling process and its `$callers` chain. A

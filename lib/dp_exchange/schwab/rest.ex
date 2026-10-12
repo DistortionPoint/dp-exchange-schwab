@@ -290,6 +290,10 @@ defmodule DpExchange.Schwab.Rest do
   # string, NaN, a negative - refuses the whole book as `{:error, {:invalid_decimal, :bid,
   # value}}`; `nil` there would say "no resting order", a statement about the market that the
   # venue did not make.
+  #
+  # A size that is PRESENT beside a positive price must be readable and not negative, as on
+  # the Streamer (`{:error, {:invalid_decimal, :bid_size, value}}`): an unreadable size used
+  # to become `nil` ("not published") next to a live price. An absent size is `nil`.
   defp book_side(row, price_key, size_key, side) do
     case row[price_key] do
       nil ->
@@ -297,17 +301,46 @@ defmodule DpExchange.Schwab.Rest do
 
       raw ->
         case decimal(raw) do
-          nil -> {:error, {:invalid_decimal, side, raw}}
-          price -> side_from_price(Decimal.compare(price, 0), price, raw, row[size_key], side)
+          nil ->
+            {:error, {:invalid_decimal, side, bounded_raw(raw)}}
+
+          price ->
+            side_from_price(Decimal.compare(price, 0), price, raw, row[size_key], side)
         end
     end
   end
 
-  defp side_from_price(:gt, price, _raw, size, _side), do: {:ok, {price, decimal(size)}}
+  defp side_from_price(:gt, price, _raw, size, side) do
+    with {:ok, size} <- book_size(size, side), do: {:ok, {price, size}}
+  end
+
   defp side_from_price(:eq, _price, _raw, _size, _side), do: {:ok, {nil, nil}}
 
   defp side_from_price(:lt, _price, raw, _size, side),
-    do: {:error, {:invalid_decimal, side, raw}}
+    do: {:error, {:invalid_decimal, side, bounded_raw(raw)}}
+
+  defp book_size(nil, _side), do: {:ok, nil}
+
+  defp book_size(raw, side) do
+    case decimal(raw) do
+      nil ->
+        {:error, {:invalid_decimal, size_field(side), bounded_raw(raw)}}
+
+      size ->
+        if Decimal.negative?(size),
+          do: {:error, {:invalid_decimal, size_field(side), bounded_raw(raw)}},
+          else: {:ok, size}
+    end
+  end
+
+  defp size_field(:bid), do: :bid_size
+  defp size_field(:ask), do: :ask_size
+
+  # The venue's value, quoted into an error tuple: a short one comes back as sent, anything
+  # long is cut so a hostile or broken reply cannot ride the error into every log.
+  defp bounded_raw(raw) when is_binary(raw) and byte_size(raw) <= 64, do: raw
+  defp bounded_raw(raw) when is_number(raw), do: raw
+  defp bounded_raw(raw), do: inspect(raw, limit: 10, printable_limit: 64)
 
   # `QuoteMutualFund` never carries `bidPrice` or `askPrice` — not null, absent from the
   # schema entirely, unlike `QuoteEquity`/`QuoteOption`/`QuoteFuture`/`QuoteForex`, which
@@ -844,10 +877,10 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, raw_high} <- required(row, "high"),
          {:ok, raw_low} <- required(row, "low"),
          {:ok, raw_close} <- required(row, "close"),
-         {:ok, open} <- required_decimal(raw_open, :open),
-         {:ok, high} <- required_decimal(raw_high, :high),
-         {:ok, low} <- required_decimal(raw_low, :low),
-         {:ok, close} <- required_decimal(raw_close, :close) do
+         {:ok, open} <- required_price(raw_open, :open),
+         {:ok, high} <- required_price(raw_high, :high),
+         {:ok, low} <- required_price(raw_low, :low),
+         {:ok, close} <- required_price(raw_close, :close) do
       {:ok,
        %Candle{
          symbol: symbol,
@@ -3130,6 +3163,16 @@ defmodule DpExchange.Schwab.Rest do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # A traded price on a bar (tick R, MD6): zero or negative refuses the reply, like an
+  # unreadable one.
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, value}}
     end
   end
 end

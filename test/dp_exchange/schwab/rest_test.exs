@@ -670,6 +670,28 @@ defmodule DpExchange.Schwab.RestTest do
                )
     end
 
+    test "a candle with a zero or negative price refuses the reply (MD6)" do
+      for bad <- [0, -1.5] do
+        body = %{
+          "candles" => [
+            %{
+              "datetime" => 1_787_936_147_000,
+              "open" => bad,
+              "high" => 2.0,
+              "low" => 0.5,
+              "close" => 1.5
+            }
+          ]
+        }
+
+        assert {:error, {:non_positive_price, :open, _bad}} =
+                 Rest.get_historical_prices("AAPL", "1d", [], @creds,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "a candle with no close is unreadable" do
       body = %{"candles" => [%{"datetime" => 1_787_936_147_000}]}
 

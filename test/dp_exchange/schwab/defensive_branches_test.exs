@@ -438,6 +438,38 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       end
     end
 
+    test "an unreadable or negative size beside a price refuses the book" do
+      for bad <- ["abc", "NaN", -3] do
+        body = %{
+          "AAPL" => %{
+            "quote" => %{
+              "lastPrice" => 1.0,
+              "bidPrice" => 1.0,
+              "bidSize" => bad,
+              "askPrice" => 1.1
+            }
+          }
+        }
+
+        assert {:error, {:invalid_decimal, :bid_size, ^bad}} =
+                 Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
+      end
+    end
+
+    test "a long unreadable price is cut before it rides the error tuple" do
+      long = String.duplicate("x", 5_000)
+
+      body = %{
+        "AAPL" => %{"quote" => %{"lastPrice" => 1.0, "bidPrice" => long, "askPrice" => 1.1}}
+      }
+
+      assert {:error, {:invalid_decimal, :bid, shown}} =
+               Rest.get_top_of_book("AAPL", @creds, opts(responding(body)))
+
+      assert is_binary(shown)
+      assert byte_size(shown) < 200
+    end
+
     test "numbers arrive as integers, floats, strings or Decimals and all become Decimal" do
       for {sent, expected} <- [
             {1, Decimal.new(1)},

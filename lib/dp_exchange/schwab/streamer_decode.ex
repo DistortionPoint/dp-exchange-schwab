@@ -30,7 +30,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
   * `LEVELONE_OPTIONS` names the pair at fields 38 and 39 and `LEVELONE_FOREX` at 8 and 9,
     "Quote Time in Long" / "Trade Time in Long" and "Quote Time" / "Trade Time" (the
     service tables in `market-data-production.txt`). A frame that does not carry them
-    still falls back as below.
+    gets `venue_time: nil`, as below.
 
   Where a service carries one, `to_quote/3` and `to_top_of_book/3` use it; where it does
   not, or the frame did not include it, `venue_time` is `nil`. It is never filled from
@@ -167,13 +167,34 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # become a statement about the market. A negative price refuses with it. An ABSENT price
   # (`nil`: this Change frame did not mention the side) is `nil` and the size is whatever the
   # frame carried; `Socket` merges that onto the last book.
+  #
+  # **A size that is present must be readable too, and not negative** (the same rule as an
+  # unreadable book level): `{:error, {:invalid_decimal, :bid_size, value}}`. An unreadable
+  # size used to become `nil` ("not published") while the price beside it was published as
+  # a live level. An absent size is `nil`; a size of 0 is a size of 0.
   defp book_side(fields, price_key, size_key) do
-    case Map.get(fields, price_key) do
-      nil ->
-        {:ok, {nil, decimal(Map.get(fields, size_key))}}
+    with {:ok, size} <- book_size(Map.get(fields, size_key), size_key) do
+      case Map.get(fields, price_key) do
+        nil ->
+          {:ok, {nil, size}}
 
-      raw ->
-        raw |> decimal() |> side_price(raw, price_key, Map.get(fields, size_key))
+        raw ->
+          raw |> decimal() |> side_price(raw, price_key, size)
+      end
+    end
+  end
+
+  defp book_size(nil, _size_key), do: {:ok, nil}
+
+  defp book_size(raw, size_key) do
+    case decimal(raw) do
+      nil ->
+        {:error, {:invalid_decimal, size_key, raw}}
+
+      size ->
+        if Decimal.negative?(size),
+          do: {:error, {:invalid_decimal, size_key, raw}},
+          else: {:ok, size}
     end
   end
 
@@ -181,7 +202,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   defp side_price(price, raw, price_key, size) do
     case Decimal.compare(price, 0) do
-      :gt -> {:ok, {price, decimal(size)}}
+      :gt -> {:ok, {price, size}}
       :eq -> {:ok, {nil, nil}}
       :lt -> {:error, {:invalid_decimal, price_key, raw}}
     end
@@ -235,10 +256,10 @@ defmodule DpExchange.Schwab.StreamerDecode do
   @spec to_candle(map(), String.t(), String.t()) :: {:ok, Candle.t()} | {:error, term()}
   def to_candle(fields, symbol, timeframe) do
     with {:ok, opened_at} <- chart_time(Map.get(fields, :chart_time)),
-         {:ok, open} <- required_decimal(Map.get(fields, :open), :open),
-         {:ok, high} <- required_decimal(Map.get(fields, :high), :high),
-         {:ok, low} <- required_decimal(Map.get(fields, :low), :low),
-         {:ok, close} <- required_decimal(Map.get(fields, :close), :close) do
+         {:ok, open} <- required_price(Map.get(fields, :open), :open),
+         {:ok, high} <- required_price(Map.get(fields, :high), :high),
+         {:ok, low} <- required_price(Map.get(fields, :low), :low),
+         {:ok, close} <- required_price(Map.get(fields, :close), :close) do
       {:ok,
        %Candle{
          symbol: symbol,
@@ -264,6 +285,16 @@ defmodule DpExchange.Schwab.StreamerDecode do
     end
   end
 
+  # A traded price on a bar (tick R, MD6): zero or negative refuses the bar, as an unreadable
+  # one does. A bar opening at 0 is a venue fault, not a market that traded at nothing.
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, value}}
+    end
+  end
+
   # Reads a `LEVELONE_*` service's own timestamp field — `:quote_time` or `:trade_time`,
   # milliseconds since epoch on the services that name them (see `to_quote/3`'s and
   # `to_top_of_book/3`'s docs) — and answers `nil` for anything that is not a usable
@@ -271,7 +302,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # not carry it this time), non-positive, or out of `DateTime.from_unix/2`'s range. `nil`
   # is not a decode fault here the way it is for `to_candle/3`'s prices or
   # `to_order_book/2`'s snapshot time — a `LEVELONE_*` quote or top of book is valid
-  # without a venue timestamp, it just falls back to `observed_at`.
+  # without a venue timestamp: `venue_time` is `nil` and `observed_at` states arrival.
   defp field_time(fields, key) do
     case Map.get(fields, key) do
       ms when is_integer(ms) and ms > 0 ->
