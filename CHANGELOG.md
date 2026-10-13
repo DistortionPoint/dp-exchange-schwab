@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.127] - 2026-10-13
+
 - **`Orders.build/2` raised for a finite quantity outside the float range.** `1E400` or `1E-400`
   made `Decimal` raise `Decimal.Error` in the caller's process; it is now refused as
   `{:invalid_quantity, quantity}` like any unusable quantity.
