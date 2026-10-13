@@ -512,7 +512,9 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+  # Only an integer or a binary reaches here: both callers (`venue_time/2`, `candle_time/2`)
+  # select the value with `positive_epoch?/1`, which is `false` for every other type, so no
+  # third clause is kept for a value that cannot arrive.
 
   @doc """
   Candles for `symbol` at `timeframe`.
@@ -1187,7 +1189,9 @@ defmodule DpExchange.Schwab.Rest do
     end)
   end
 
-  defp chain_value(%Date{} = date), do: Date.to_iso8601(date)
+  # No `%Date{}` clause: `from_date` and `to_date` are the only dates, and `chain_dates/1` has
+  # already turned both into ISO strings before this runs. A `Date` handed to any other key
+  # encodes through `String.Chars` in `URI.encode_query/1` to the same ISO text.
   defp chain_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp chain_value(value), do: value
 
@@ -1460,7 +1464,8 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp chain_expiry(_key), do: :error
+  # No clause for a key that is not a string: the map is a JSON object's, whose keys are always
+  # strings, and it was found by a string-keyed lookup (`body["callExpDateMap"]`).
 
   defp chain_strikes(%{} = strikes, underlying, expiry, right) do
     strikes
@@ -2618,7 +2623,8 @@ defmodule DpExchange.Schwab.Rest do
   # `available_balance` as part of the total, never more than it.
   defp available("MARGIN", current), do: current["availableFunds"]
   defp available("CASH", current), do: current["cashAvailableForTrading"]
-  defp available(_unknown, _current), do: nil
+  # No clause for another account type: `balance_total/2` is judged first in `balances/1` and
+  # refuses every type but these two, so nothing else arrives here.
 
   @doc """
   Place an order. Returns the venue's order id, read from the `Location` header.
@@ -2670,6 +2676,15 @@ defmodule DpExchange.Schwab.Rest do
   # This is always the FIRST and only attempt (`order_write_request_opts/1` sends exactly
   # once), so a 4xx is a definite "not acted on". 429 is the venue throttling the write: a
   # plain `{:error, _}`, safe to retry, nothing to reconcile.
+  #
+  # **This clause and the catch-all two below are deliberate defensive ones, and no test can
+  # reach them.** `Core.HttpClient` never hands back a 429 (it is always its own "Rate limited
+  # by the venue" error, whatever `:raw_status` says) nor a 5xx or other non-2xx, non-4xx status
+  # (always `{:error, "Server error ..."}`), so the `{:error, reason}` clause below sees them.
+  # They stay because of what the alternatives do if that contract ever changes: without this
+  # clause a raw 429 would fall into the 4xx clause and be reported as the venue REFUSING the
+  # order, and without the catch-all a raw 5xx would raise inside the caller's process, on a
+  # write that may have been acted on. Neither can become a refusal or a success.
   defp order_write_outcome({:ok, %{status: 429, body: response}}, _not_found?),
     do: {:error, {:exchange_error, :schwab, http_error_text(429, response)}}
 
@@ -2734,6 +2749,14 @@ defmodule DpExchange.Schwab.Rest do
 
   # Req normalises header names to lowercase and values to lists; a plain map of strings
   # is also accepted so this does not depend on one client's shape.
+  #
+  # **Everything past the list-valued map clause is deliberate and defensive, and
+  # `Core.HttpClient` with Req 0.7 cannot reach it**: it always hands over a map of lists. The
+  # binary value, the list of pairs and the `nil` fallback are for a transport that answers in
+  # another shape (a
+  # consumer's `:req_adapter`). Without them such a response would raise, or read as "no
+  # Location header" and turn a placed order into `:order_unconfirmed` for a reason that is
+  # this package's, not the venue's.
   defp header(headers, name) when is_map(headers) do
     case Map.get(headers, name) do
       [value | _rest] -> value
@@ -2886,6 +2909,10 @@ defmodule DpExchange.Schwab.Rest do
         {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
           {:refused, refusal(status, body)}
 
+        # Deliberate and defensive, not reachable through `Core.HttpClient`: it never hands back
+        # a 429, a 5xx or a 3xx (always `{:error, _}`), only 2xx and, with `raw_status`, 4xx.
+        # It stays so a change there is an error here and not a `CaseClauseError` raised in the
+        # caller's process from a delete that may have been acted on.
         {:ok, %{status: status, body: body}} ->
           {:error, {:exchange_error, :schwab, http_error_text(status, body)}}
 
@@ -3097,6 +3124,11 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # **The next two clauses are deliberate defensive ones, not clauses a test can reach.** A
+  # request here is made with `decode_body: false` and a `:plug` can only answer bytes, so the
+  # body is always a binary. They exist for a consumer's own `:req_adapter` that hands back a
+  # body already decoded (a map or list is taken as it is) or one that is neither (a `nil`
+  # is refused by name, never read as an empty object — see the note above).
   defp decoded_body(body) when is_map(body) or is_list(body), do: {:ok, body}
   defp decoded_body(_other), do: {:error, {:undecodable_response, :schwab}}
 
@@ -3112,6 +3144,8 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
+  # Deliberate defensive clauses, for the same reason as `decoded_body/1`'s: a `:plug` answers
+  # bytes, so only a consumer's own `:req_adapter` can hand over a decoded or absent body here.
   defp refusal_body(body) when is_map(body) or is_list(body), do: body
   defp refusal_body(_other), do: %{}
 
@@ -3123,6 +3157,12 @@ defmodule DpExchange.Schwab.Rest do
   # chosen, not measured: no price, size or balance has an exponent anywhere near it.
   defp decimal(%Decimal{} = value), do: finite_decimal(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
+
+  # **A deliberate defensive clause, not one a test can reach.** Every body arrives as bytes
+  # (`decode_body: false`) and is decoded with `floats: :decimals`, so a JSON number is never a
+  # float here. It is kept for a body a consumer's own `:req_adapter` hands over already
+  # decoded (see `decoded_body/1`), whose floats would otherwise raise `FunctionClauseError`
+  # in the caller's process; `Decimal.from_float/1` keeps the float's own digits.
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
   # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
@@ -3165,8 +3205,10 @@ defmodule DpExchange.Schwab.Rest do
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's field list does not check that a value is
   # non-nil, only that the key was given. Refuse the record instead.
-  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
-
+  #
+  # No `nil` clause: both callers have already refused an absent value by name
+  # (`quoted_price/1` only selects a field that is stated, and `required/2` refuses a missing
+  # or empty bar price as `:unexpected_response_shape`), so `nil` never arrives here.
   defp required_decimal(value, field) do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}

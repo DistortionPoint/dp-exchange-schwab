@@ -163,6 +163,54 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
   end
 
+  test "an upgrade answered with a Streamer description it cannot use keeps the poll" do
+    # The venue answered 200, so the bootstrap itself succeeded; what it carried names no
+    # Streamer. That is the same unreachable Streamer as a 503, and the same remedy: the
+    # running poll stays, with the reason recorded for `status/1` and the next tick.
+    {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    feed = start_feed(plug: plug, retry_attempts: 0)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+    poller = :sys.get_state(feed).poller
+    before = calls(agent)
+
+    answer(agent, %{"streamerInfo" => []}, 200)
+    send(feed, :resubscribe)
+    wait_until(fn -> :sys.get_state(feed).route_bootstrap == nil and calls(agent) > before end)
+
+    state = :sys.get_state(feed)
+    assert state.poller == poller
+    assert state.last_error == :no_streamer_info
+    assert %{route: :internal_poll} = Feed.status(feed)
+  end
+
+  test "an upgrade whose bootstrap task dies keeps the running poll and is not left in flight" do
+    # A killed task sends no reply, so only its `:DOWN` can settle the upgrade. Left alone, the
+    # feed would hold the dead ref as "in flight" and never try again.
+    {agent, plug} = switchable({%{"error" => "unavailable"}, 503})
+    feed = start_feed(plug: plug, retry_attempts: 0)
+
+    :ok = Feed.subscribe(feed, ["AAPL"])
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+    poller = :sys.get_state(feed).poller
+
+    test_pid = self()
+    Agent.update(agent, &%{&1 | answer: {:hang, test_pid}})
+    send(feed, :resubscribe)
+    assert_receive {:hanging, _request}, 5_000
+
+    %{pid: task} = :sys.get_state(feed).route_bootstrap
+    Process.exit(task, :kill)
+    wait_until(fn -> :sys.get_state(feed).route_bootstrap == nil end)
+
+    state = :sys.get_state(feed)
+    assert state.poller == poller
+    assert Process.alive?(poller)
+    assert {:bootstrap_task_down, :killed} = state.last_error
+    assert %{route: :internal_poll} = Feed.status(feed)
+  end
+
   test "a poller that crashes during an upgrade is replaced, not lost with it" do
     # The crash asks for a route and joins the in-flight upgrade. Left an upgrade, its
     # failure "stayed on" a poll that no longer existed, leaving no route and nothing to
@@ -190,6 +238,28 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
       is_pid(replacement) and replacement != poller and Process.alive?(replacement)
     end)
 
+    assert %{route: :internal_poll} = Feed.status(feed)
+  end
+
+  test "credentials with no token swapped in mid-bootstrap cannot open the stream" do
+    # The bootstrap request went out signed with the old token and succeeded. By the time it
+    # settles, the credentials the socket's LOGIN would use are the new ones, and they hold no
+    # token: the stream is refused by name and the feed falls back to the poll.
+    {_agent, plug} = switchable({:hang, self()})
+    url = websocket_endpoint()
+    feed = start_feed(plug: plug, retry_attempts: 0, url: url, allow_insecure_socket: true)
+
+    subscribing = Task.async(fn -> Feed.subscribe(feed, ["AAPL"]) end)
+    assert_receive {:hanging, request}, 5_000
+
+    :ok = Feed.update_credentials(feed, %{})
+    send(request, {:release, user_preference(url), 200})
+
+    assert Task.await(subscribing, 15_000)
+
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+    assert details.reason =~ "missing_credentials"
+    assert details.fallback == :internal_poll
     assert %{route: :internal_poll} = Feed.status(feed)
   end
 

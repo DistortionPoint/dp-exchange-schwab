@@ -1227,8 +1227,22 @@ defmodule DpExchange.Schwab.Socket do
   # login is not reported, because what `Feed` asked for before it is held and released by
   # `release_held/1`. A private message rather than a `Core.Notice`, because it carries this
   # socket's pid, which a consumer has no use for.
-  defp report_relogged_in(%{subscriber: subscriber}) when is_pid(subscriber) do
-    send(subscriber, {:dp_exchange, :schwab, :relogged_in, self()})
+  #
+  # Resolved like any subscriber (`Core.Fanout.resolve/1`). It was sent to a pid only, so a
+  # subscriber registered by name got the `:link_up` notice for the re-login but never this
+  # message, and waited out the 60s re-assert; the same defect the Coinbase and Gemini sockets
+  # had. A name nobody holds, or a dead pid, is skipped rather than raised on.
+  defp report_relogged_in(%{subscriber: nil}), do: :ok
+
+  # `Fanout.resolve/1` takes a pid or a registered name; any other `send/2` destination (a
+  # `{name, node}` pair) is skipped below, as it always was.
+  defp report_relogged_in(%{subscriber: subscriber})
+       when is_pid(subscriber) or is_atom(subscriber) do
+    case DpExchange.Core.Fanout.resolve(subscriber) do
+      pid when is_pid(pid) -> send(pid, {:dp_exchange, :schwab, :relogged_in, self()})
+      nil -> :ok
+    end
+
     :ok
   end
 

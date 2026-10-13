@@ -1903,6 +1903,12 @@ defmodule DpExchange.Schwab.Feed do
       {:ok, native} -> native
       # A symbol this package will not send to REST is not sent to the socket either. It
       # reaches the venue unchanged and is refused there rather than silently dropped here.
+      #
+      # **A deliberate defensive clause, not a reachable one.** Every door into `wanted`
+      # (`init/1`'s `:symbols`, `subscribe/2`, `update_symbols/2`) judges each symbol with
+      # `SymbolFormat.validate/1` first, so nothing here fails it. It stays, rather than a
+      # `CaseClauseError`, so a symbol that somehow got in is refused by the venue by name and
+      # not dropped, and the rest of the SUBS frame is still sent.
       {:error, _reason} -> symbol
     end
   end

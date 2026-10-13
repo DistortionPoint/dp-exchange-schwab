@@ -118,6 +118,13 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerInfo.from_user_preference(%{"streamerInfo" => [info]})
     end
 
+    test "a streamerInfo entry that is not an object names no Streamer" do
+      for entry <- ["wss://x", 42, nil] do
+        assert {:error, :no_streamer_info} =
+                 StreamerInfo.from_user_preference(%{"streamerInfo" => [entry]})
+      end
+    end
+
     test "a response with no streamerInfo is an error" do
       assert {:error, :no_streamer_info} = StreamerInfo.from_user_preference(%{})
     end
@@ -233,6 +240,14 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL))
 
       refute Map.has_key?(without["parameters"], "fields")
+
+      # An empty list is "none given", not a `"fields": ""` the venue does not document.
+      assert {:ok, empty} =
+               StreamerProtocol.subscribe(@info, "LEVELONE_EQUITIES", "SUBS", ~w(AAPL),
+                 fields: []
+               )
+
+      refute Map.has_key?(empty["parameters"], "fields")
     end
 
     test "ADD, UNSUBS and VIEW of no keys are refused; SUBS of none is passed to Socket" do
@@ -617,8 +632,9 @@ defmodule DpExchange.Schwab.StreamerTest do
       assert top.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
-    test "a non-positive or unreadable trade_time/quote_time is nil, not a raise or 1970" do
-      for bad <- [0, -1, "not a number"] do
+    test "a non-positive, unreadable or out-of-range trade/quote time is nil, not a raise" do
+      # The last is a positive integer past the calendar `DateTime.from_unix/2` can express.
+      for bad <- [0, -1, "not a number", 1_787_936_147_000_000_000] do
         assert {:ok, quote_} =
                  StreamerDecode.to_quote(%{last: 1, trade_time: bad}, "AAPL", @observed)
 
@@ -832,6 +848,34 @@ defmodule DpExchange.Schwab.StreamerTest do
 
       assert book.bids == []
       assert book.asks == []
+    end
+
+    test "a level in the object form is read, and one that is neither array nor object refuses" do
+      fields = %{
+        snapshot_time: 1_787_936_147_000,
+        bids: [%{"price" => 10.5, "aggregateSize" => 300}],
+        asks: [%{"0" => 10.6, "1" => 200}]
+      }
+
+      assert {:ok, book} = StreamerDecode.to_order_book(fields, "AAPL")
+      assert [{bid, bid_size}] = book.bids
+      assert [{ask, ask_size}] = book.asks
+      assert Decimal.equal?(bid, Decimal.new("10.5"))
+      assert Decimal.equal?(bid_size, 300)
+      assert Decimal.equal?(ask, Decimal.new("10.6"))
+      assert Decimal.equal?(ask_size, 200)
+
+      assert {:error, {:unreadable_level, :bids, "10.5@300"}} =
+               StreamerDecode.to_order_book(%{fields | bids: ["10.5@300"]}, "AAPL")
+    end
+
+    test "a level price or size that is not a number at all refuses the book" do
+      base = %{snapshot_time: 1_787_936_147_000, asks: []}
+
+      for bad <- [[true, 100], [10.5, %{}], [:ten, 100]] do
+        assert {:error, {:unreadable_level, :bids, ^bad}} =
+                 StreamerDecode.to_order_book(Map.put(base, :bids, [bad]), "AAPL")
+      end
     end
 
     test "bids come back highest first and asks lowest first, whatever the venue sent" do

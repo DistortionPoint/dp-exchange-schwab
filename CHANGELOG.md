@@ -31,6 +31,15 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **`Orders.build/2` raised for a finite quantity outside the float range.** `1E400` or `1E-400`
+  made `Decimal` raise `Decimal.Error` in the caller's process; it is now refused as
+  `{:invalid_quantity, quantity}` like any unusable quantity.
+- **A `Socket` subscriber registered by name never heard `:relogged_in`.** It was sent to a pid
+  only, so a named subscriber got the `:link_up` notice but waited out the 60s re-assert.
+- **Tests:** every line the suite never executed was read and either tested, proven dead and
+  removed (`Orders.timestamp_compact/1` and several `Rest`, `Fake` and facade fallbacks), or
+  kept as a commented defensive clause.
+
 ## [0.2.126] - 2026-10-12
 
 - **Security: no credential is sent to a non-https override.** A `:token_url`, `:trader_url`

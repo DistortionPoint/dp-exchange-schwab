@@ -37,9 +37,59 @@ defmodule DpExchange.Schwab.OrderDecodeTest do
   end
 
   test "enteredTime's colon-less offset still parses" do
-    # Schwab writes `+0000`, which `DateTime.from_iso8601/1` alone refuses.
+    # Schwab writes `+0000`. `DateTime.from_iso8601/1` reads it (Elixir 1.18 accepts the basic
+    # offset), so no second parser is kept.
     assert {:ok, %Order{created_at: %DateTime{} = at}} = Orders.from_venue(@limit_buy)
     assert at == ~U[2026-01-02 15:04:05Z]
+  end
+
+  test "an enteredTime that is not a time is no time, never a guess" do
+    for unreadable <- ["yesterday", "2026-01-02T15:04:05+9999", "2026-13-45T00:00:00+0000", 12] do
+      assert {:ok, %Order{created_at: nil}} =
+               Orders.from_venue(%{@limit_buy | "enteredTime" => unreadable})
+    end
+  end
+
+  test "the terminal and in-flight statuses each read back as their own atom" do
+    for {wire, atom} <- [
+          {"REJECTED", :rejected},
+          {"EXPIRED", :expired},
+          {"PENDING_CANCEL", :open},
+          {"PENDING_REPLACE", :open},
+          {"PENDING_RECALL", :open},
+          {"QUEUED", :pending}
+        ] do
+      assert {:ok, %Order{status: ^atom}} = Orders.from_venue(%{@limit_buy | "status" => wire})
+    end
+  end
+
+  test "a leg that names no readable instrument has no symbol" do
+    for leg <- [
+          %{"instruction" => "BUY", "quantity" => 1},
+          %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => 5}}
+        ] do
+      assert {:ok, %Order{symbol: nil, side: :buy}} =
+               Orders.from_venue(%{@limit_buy | "orderLegCollection" => [leg]})
+    end
+  end
+
+  test "a spread leg's closing effect and equity type read back, and unknown ones are nil" do
+    leg = fn symbol, effect, type ->
+      %{
+        "instruction" => "SELL_TO_CLOSE",
+        "quantity" => 1,
+        "positionEffect" => effect,
+        "orderLegType" => type,
+        "instrument" => %{"symbol" => symbol}
+      }
+    end
+
+    legs = [leg.("AAPL", "CLOSING", "EQUITY"), leg.("MSFT", "AUTOMATIC", "FUTURE")]
+    spread = %{@limit_buy | "orderLegCollection" => legs}
+
+    assert {:ok, %Order{legs: [first, second]}} = Orders.from_venue(spread)
+    assert %OrderLeg{position_effect: :close, instrument_type: :equity} = first
+    assert %OrderLeg{position_effect: nil, instrument_type: nil} = second
   end
 
   test "WORKING is :partially_filled only when the venue's filledQuantity says so" do

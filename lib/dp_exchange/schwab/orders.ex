@@ -336,7 +336,11 @@ defmodule DpExchange.Schwab.Orders do
       if float > 0, do: {:ok, float}, else: {:error, {:invalid_quantity, original}}
     end
   rescue
-    _out_of_range in [ArgumentError, ArithmeticError] ->
+    # `Decimal.Error` is what the pinned Decimal raises for a finite value past the float range
+    # (`number bigger than DBL_MAX`, `number smaller than DBL_MIN`). It was not in this list, so
+    # `1E400` raised out of `build/2` in the caller's process instead of being refused by name.
+    # The other two are what an older Decimal raised for the same input.
+    _out_of_range in [ArgumentError, ArithmeticError, Decimal.Error] ->
       {:error, {:invalid_quantity, original}}
   end
 
@@ -919,27 +923,17 @@ defmodule DpExchange.Schwab.Orders do
 
   defp whole(_other), do: nil
 
+  # Schwab writes `enteredTime` as `2024-03-29T14:05:31+0000` — an offset with no colon.
+  # Elixir's `DateTime.from_iso8601/1` reads that form itself (`parse_offset/1` in Elixir 1.18's
+  # `Calendar.ISO`, which this package requires), so there is no second, colon-inserting parser:
+  # one existed and never ran, because anything it could read this already had. A time neither
+  # reads is `nil`, not a guess.
   defp timestamp(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
       {:ok, at, _offset} -> at
-      _unreadable -> timestamp_compact(value)
+      _unreadable -> nil
     end
   end
 
   defp timestamp(_absent), do: nil
-
-  # Schwab writes `enteredTime` as `2024-03-29T14:05:31+0000` — an offset with no colon, which
-  # `DateTime.from_iso8601/1` does not accept.
-  defp timestamp_compact(value) do
-    case Regex.run(~r/^(.*)([+-])(\d{2})(\d{2})$/, value) do
-      [_all, head, sign, hours, minutes] ->
-        case DateTime.from_iso8601("#{head}#{sign}#{hours}:#{minutes}") do
-          {:ok, at, _offset} -> at
-          _unreadable -> nil
-        end
-
-      _no_offset ->
-        nil
-    end
-  end
 end

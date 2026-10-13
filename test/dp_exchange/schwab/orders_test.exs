@@ -512,6 +512,33 @@ defmodule DpExchange.Schwab.OrdersTest do
 
       assert strategy["price"] == built["price"]
     end
+
+    test "a leg that never had an instrument object is passed through untouched" do
+      # `build/2` always nests one, so this is the defensive clause of a public function: it
+      # must not invent an `assetType` or `finalSymbol` for a leg that names no instrument.
+      leg = %{"instruction" => "BUY", "quantity" => 1}
+
+      assert %{"orderStrategy" => %{"orderLegs" => [^leg]}} =
+               Orders.to_preview(%{"orderLegCollection" => [leg]})
+    end
+  end
+
+  describe "a quantity or offset the venue could never read" do
+    test "a finite quantity outside the float range is refused by name, not raised" do
+      # The exponent is within the +-1000 bound, so it is expanded, and `Decimal.to_float/1`
+      # raises `Decimal.Error` on the result (too big, or too small to be anything but 0.0).
+      # That raise must not escape into the caller's process. It did, before the rescue named
+      # `Decimal.Error`.
+      for bad <- [Decimal.new("1E400"), "1E400", Decimal.new("1E-400"), "1E-400"] do
+        assert Orders.build(%{@buy | quantity: bad}) == {:error, {:invalid_quantity, bad}}
+      end
+    end
+
+    test "a stop-price offset that is text but not a number is refused by name" do
+      request = Map.merge(@buy, %{order_type: :trailing_stop, stop_price_offset: "abc"})
+
+      assert Orders.build(request) == {:error, {:invalid_order_field, :stop_price_offset, "abc"}}
+    end
   end
 
   describe "fields the caller must state" do

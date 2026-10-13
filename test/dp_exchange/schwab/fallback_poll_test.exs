@@ -345,5 +345,25 @@ defmodule DpExchange.Schwab.FallbackPollTest do
       wait_for_failed_poll(feed, 3)
       refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
     end
+
+    test "a 401 whose body states a reason is the credential too, not a refused symbol" do
+      # The venue's reason rides in the refusal (`{:venue_error, 401, detail}`), a different
+      # shape from the bare `{:venue_error, 401}` above; both are the credential.
+      plug = fn conn ->
+        Req.Test.json(%{conn | status: 401}, %{"errors" => [%{"detail" => "token expired"}]})
+      end
+
+      feed =
+        start_feed(plug: plug, retry_attempts: 0, interval_ms: 50, start_delay_ms: 0)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :coverage_change, severity: :warning}},
+                     5_000
+
+      wait_for_failed_poll(feed, 3)
+      refute_received {:dp_exchange, :schwab, {:refused, _symbol, _reason}}
+    end
   end
 end

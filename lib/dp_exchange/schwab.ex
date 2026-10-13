@@ -948,10 +948,10 @@ defmodule DpExchange.Schwab do
   # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
   # Case is the one difference normalised here. Anything else that is not canonical is the
   # caller's to fix.
-  defp canonical_case(symbols) when is_list(symbols),
-    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
-
-  defp canonical_case(other), do: other
+  #
+  # Only ever called on a list `Feed.check_symbols/1` has already passed, so every element is a
+  # string: a non-list, or a non-string element, is refused there and cannot reach this.
+  defp canonical_case(symbols), do: Enum.map(symbols, &String.upcase/1)
 
   # --- Declared but not yet implemented -----------------------------------
   #

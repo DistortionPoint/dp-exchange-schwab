@@ -387,6 +387,67 @@ defmodule DpExchange.Schwab.AuthTest do
       assert Auth.refresh(@creds, plug: plug, retry_attempts: 0) ==
                {:error, :unexpected_response_shape}
     end
+
+    test "a success whose JSON arrives as undecoded text is still read as a token response" do
+      # Req decodes by content type. A venue (or a proxy) that labels JSON `text/plain` hands
+      # the bytes over whole, and this module decodes them rather than calling them garbage.
+      body = Jason.encode!(%{"access_token" => "at-2", "refresh_token" => "rt-2"})
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.resp(200, body)
+      end
+
+      assert {:ok, renewed} = Auth.refresh(@creds, plug: plug, retry_attempts: 0)
+      assert renewed.access_token == "at-2"
+      assert renewed.refresh_token == "rt-2"
+    end
+
+    test "a success that decodes to a list is not a token response" do
+      plug = fn conn -> Req.Test.json(conn, [%{"access_token" => "at-2"}]) end
+
+      assert Auth.refresh(@creds, plug: plug, retry_attempts: 0) ==
+               {:error, {:undecodable_response, :schwab}}
+    end
+
+    test "a refusal that decodes to a list still names the status, with no detail" do
+      plug = fn conn -> Req.Test.json(%{conn | status: 401}, ["unexpected"]) end
+
+      assert {:refused, {:reauthorization_required, 401, nil}} =
+               Auth.refresh(@creds, plug: plug, retry_attempts: 0)
+    end
+
+    test "a refusal whose JSON arrives as undecoded text still carries its detail" do
+      body = Jason.encode!(%{"error" => "invalid_client", "error_description" => "bad pair"})
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.resp(401, body)
+      end
+
+      assert {:refused, {:client_credentials_rejected, 401, "bad pair"}} =
+               Auth.refresh(@creds, plug: plug, retry_attempts: 0)
+    end
+
+    test "a Credentials struct keeps its shape and loses the old expiry when none is claimed" do
+      stale = %DpExchange.Schwab.Credentials{
+        access_token: "at-1",
+        refresh_token: "rt-1",
+        client_id: "cid",
+        client_secret: "csec",
+        expires_at: ~U[2020-01-01 00:00:00Z]
+      }
+
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2"}
+
+      assert {:ok, %DpExchange.Schwab.Credentials{} = renewed} =
+               Auth.refresh(stale, plug: responding(body), retry_attempts: 0)
+
+      assert renewed.access_token == "at-2"
+      assert renewed.expires_at == nil
+    end
   end
 
   describe "credential_failure?/1" do

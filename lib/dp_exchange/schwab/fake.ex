@@ -814,13 +814,14 @@ defmodule DpExchange.Schwab.Fake do
   defp entered_within?(body, from, to) do
     # Read by the facade's own decode (`created_at`), which also copes with the venue's
     # colon-less `+0000` offset, rather than a second parser here.
-    case Orders.from_venue(body) do
-      {:ok, %{created_at: %DateTime{} = entered}} ->
-        DateTime.compare(entered, from) != :lt and DateTime.compare(entered, to) != :gt
-
-      _unreadable ->
-        false
-    end
+    #
+    # Matched, not branched: every body that reaches here is the canned one or one
+    # `working_body/2` built, each with a numeric id and an `enteredTime` it wrote itself, so
+    # all of them decode. An order that did not would be dropped from the list by a quiet
+    # `false`, and a list with an order silently missing reads as complete. A broken fake
+    # should be loud.
+    {:ok, %{created_at: %DateTime{} = entered}} = Orders.from_venue(body)
+    DateTime.compare(entered, from) != :lt and DateTime.compare(entered, to) != :gt
   end
 
   defp status_wanted?(_body, nil), do: true
@@ -850,14 +851,11 @@ defmodule DpExchange.Schwab.Fake do
   # The venue sends `orderId` as an int64 (`"type": "integer"` in
   # `accounts-and-trading-production.openapi.json`), and `Orders.from_venue/1` turns it into
   # the string `Types.Order` carries. A numeric id goes through the decoder as the integer
-  # the wire has, so the fake exercises the same path; an id that is not the canonical
-  # decimal form of an integer (`"007"`, a caller's own string) is left exactly as given.
-  defp wire_order_id(order_id) when is_binary(order_id) do
-    case Integer.parse(order_id) do
-      {number, ""} -> if Integer.to_string(number) == order_id, do: number, else: order_id
-      _not_numeric -> order_id
-    end
-  end
+  # the wire has, so the fake exercises the same path. Only ever called with an id this fake
+  # issued (`next_order_id/0`) or its canned `@order_id`, both canonical decimal integers; a
+  # caller's own string never reaches a body (an unissued id is `{:refused, :not_found}`), so
+  # there is no non-numeric case to carry.
+  defp wire_order_id(order_id) when is_binary(order_id), do: String.to_integer(order_id)
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. See
@@ -931,6 +929,11 @@ defmodule DpExchange.Schwab.Fake do
 
   # The one place this fake sends. A registered name resolves to its pid; an atom naming no
   # process is skipped, as `Core.Fanout` skips it, instead of raising `ArgumentError`.
+  #
+  # The `nil` clause is a deliberate defensive one, not a reachable one in a test: `subscribe/2`
+  # only delivers to a target `Fanout.resolve/1` already found, so it is taken only when that
+  # process exits between the two lookups. A timing window cannot be made to happen without a
+  # sleep deciding the race, which this suite does not do.
   defp deliver(target, value) do
     case Fanout.resolve(target) do
       nil -> :ok
@@ -1648,14 +1651,10 @@ defmodule DpExchange.Schwab.Fake do
   #
   # `SymbolFormat.to_canonical_symbol/1`, which also trims, as `Feed` does: `" aapl "` is a
   # valid symbol the real feed holds as `AAPL`, and upper-casing alone left it unlisted here.
-  defp canonical_case(symbols) when is_list(symbols) do
-    Enum.map(symbols, fn
-      s when is_binary(s) -> SymbolFormat.to_canonical_symbol(s)
-      other -> other
-    end)
-  end
-
-  defp canonical_case(other), do: other
+  #
+  # Only ever called on a list `Feed.check_symbols/1` has passed, so every element is a valid
+  # string: a non-list or a non-binary element is refused there and cannot reach this.
+  defp canonical_case(symbols), do: Enum.map(symbols, &SymbolFormat.to_canonical_symbol/1)
 
   # The real `Feed`'s question, in its order: canonical spelling, then the judgement REST
   # makes. A non-list is refused as the real feed now refuses it.

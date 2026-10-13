@@ -24,8 +24,29 @@ defmodule DpExchange.Schwab.FeedTest do
 
   use DpExchange.Schwab.FeedCase, async: true
 
-  alias DpExchange.Core.{Notice, Types}
+  alias DpExchange.Core.{Config, Notice, Types}
   alias DpExchange.Schwab.Feed
+
+  defmodule ExitOnceLimiter do
+    @moduledoc false
+    # Exits on the first `acquire/3` and permits every later one. The `:limiter` option each
+    # request carries is an Agent holding whether the exit is still owed, so the first
+    # request (the bootstrap) fails the way a dead limiter process fails a caller, and the
+    # fallback poll that follows is left able to run.
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, _weight, opts) do
+      if Agent.get_and_update(Keyword.fetch!(opts, :limiter), &{&1, false}),
+        do: exit(:limiter_gone),
+        else: :ok
+    end
+
+    @impl true
+    def check(_provider, _weight, _opts), do: :ok
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+  end
 
   @user_preference %{
     "streamerInfo" => [
@@ -63,6 +84,20 @@ defmodule DpExchange.Schwab.FeedTest do
     test "an absent or explicitly nil interval takes the default" do
       assert {:ok, _state} = Feed.init([])
       assert {:ok, _state2} = Feed.init(interval_ms: nil)
+    end
+
+    # The boot-time `:symbols` get the judgement `subscribe/2` makes, so the door that never
+    # ran it cannot put a pair-shaped or non-string symbol into the wanted set.
+    test "boot symbols this venue would refuse are refused at start, by name" do
+      for bad <- [[:aapl], [42], ["AAPL", nil], ["BTC-USD"]] do
+        assert_raise ArgumentError, ~r/symbols must be equity or option tickers/, fn ->
+          Feed.init(symbols: bad)
+        end
+      end
+
+      assert_raise ArgumentError, ~r/symbols must be a list of ticker strings/, fn ->
+        Feed.init(symbols: "AAPL")
+      end
     end
   end
 
@@ -122,6 +157,69 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.reason =~ "missing_credentials"
+    end
+
+    test "a bootstrap that raises falls back to the poll with the reason, never a crash" do
+      feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+
+      # Not a URL, so building the request raises before anything is sent. The task converts
+      # the raise into an error result; unconverted, its linked exit would reach the feed with
+      # no clause and the caller parked on the bootstrap would never be answered.
+      :sys.replace_state(feed, fn state ->
+        %{state | request_opts: Keyword.put(state.request_opts, :trader_url, 5)}
+      end)
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.reason =~ ":exception"
+      assert %{route: :internal_poll} = Feed.status(feed)
+    end
+
+    test "a bootstrap that exits falls back to the poll with the reason, never a crash" do
+      # An exit is not a raise and `rescue` does not see it: a limiter process that is gone
+      # leaves the caller with `exit/1`.
+      {:ok, gate} = Agent.start_link(fn -> true end)
+      Config.put_override(:rate_limit_module, ExitOnceLimiter)
+
+      feed = start_feed(plug: responding(quote_body()), retry_attempts: 0, limiter: gate)
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert details.reason =~ ":exit"
+      assert details.reason =~ "limiter_gone"
+      assert %{route: :internal_poll} = Feed.status(feed)
+    end
+
+    test "a poll that cannot start leaves no route, and the reason is kept" do
+      # `PollingFeed` refuses a negative `:start_delay_ms` at its own start. The fallback then
+      # has nothing to poll with, and says so rather than claiming a route it does not have.
+      feed =
+        start_feed(
+          plug: responding(%{"error" => "unauthorized"}, 401),
+          retry_attempts: 0,
+          start_delay_ms: -1
+        )
+
+      assert Feed.subscribe(feed, ["AAPL"]) == {:error, :no_route}
+
+      state = :sys.get_state(feed)
+      assert state.route == nil
+      assert state.poller == nil
+      assert state.last_error == {:invalid_option, :start_delay_ms, -1}
+    end
+
+    test "a notice for a subscriber name nothing holds is skipped, and the others still get it" do
+      feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+
+      # An atom naming no process: valid to register (the process may start later), and
+      # skipped at send time, as `Core.Fanout` skips it, rather than raising.
+      :ok = Feed.subscribe_notices(feed, to: :schwab_feed_test_name_nobody_holds)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+      assert Process.alive?(feed)
     end
   end
 
@@ -447,6 +545,48 @@ defmodule DpExchange.Schwab.FeedTest do
              "the replacement route must not be the process that just died"
     end
 
+    test "a crash cancels a redial still pending from an earlier one" do
+      feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     5_000
+
+      # A redial armed far beyond the test, so it is still pending whatever the load. Two
+      # live redial timers would dial two routes against a venue that allows one connection.
+      timer = Process.send_after(self(), :stale_redial, 600_000)
+      :sys.replace_state(feed, &Map.put(&1, :redial_timer, {make_ref(), timer}))
+
+      Process.exit(:sys.get_state(feed).poller, :kill)
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
+
+      assert Process.read_timer(timer) == false
+      refute_received :stale_redial
+    end
+
+    test "a redial that fires after another path already dialled a route does nothing" do
+      feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+      :ok = Feed.subscribe(feed, ["AAPL"])
+
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :degraded, details: %{fallback: :internal_poll}}},
+                     5_000
+
+      poller = :sys.get_state(feed).poller
+      ref = make_ref()
+      :sys.replace_state(feed, &Map.put(&1, :redial_timer, {ref, make_ref()}))
+
+      # The timer's own message, delivered by hand: a route already stands, so dialling again
+      # would open a second connection beside it.
+      send(feed, {:redial_after_crash, ref})
+
+      state = :sys.get_state(feed)
+      assert state.poller == poller
+      assert state.route_bootstrap == nil
+      refute Map.has_key?(state, :redial_timer)
+    end
+
     test "a TRANSPORT drop clears coverage too, not only a route crash" do
       # The test above kills the socket process. This one is the case that was missed:
       # `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so a transport drop leaves
@@ -766,6 +906,31 @@ defmodule DpExchange.Schwab.FeedTest do
       assert_receive {:relayed_to_socket,
                       {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
                      5_000
+    end
+
+    test "a blank or padded token is kept out of the socket's LOGIN" do
+      # `Auth.headers/2` refuses such a token, so a `LOGIN` carrying it would be a refused
+      # credential nobody could name. The feed still accepts the credentials themselves.
+      socket = relaying_fake_socket(self())
+      feed = start_feed(socket: socket)
+      Feed.subscribe(feed, ["AAPL"])
+
+      for unusable <- ["  ", " padded-token "] do
+        assert Feed.update_credentials(feed, Map.put(credentials(), :access_token, unusable)) ==
+                 :ok
+      end
+
+      # The socket is written to in order, so once the later, usable token has arrived an
+      # earlier unusable one would have arrived before it.
+      assert Feed.update_credentials(feed, Map.put(credentials(), :access_token, "fresh")) == :ok
+
+      assert_receive {:relayed_to_socket, {:"$websockex_cast", {:update_access_token, "fresh"}}},
+                     5_000
+
+      refute_received {:relayed_to_socket, {:"$websockex_cast", {:update_access_token, "  "}}}
+
+      refute_received {:relayed_to_socket,
+                       {:"$websockex_cast", {:update_access_token, " padded-token "}}}
     end
 
     test "a route with no live socket (the poll route) is not sent anything, and does not crash" do
@@ -1152,6 +1317,30 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert by_kind == %{quotes: %{"AAPL" => :stream}, candles: %{"MSFT" => :stream}}
 
+      assert_union_matches_coverage(feed, by_kind)
+      assert_declared_streamable(by_kind)
+    end
+
+    test "one symbol delivering several kinds keeps each, and a repeated kind adds nothing" do
+      feed = start_feed(socket: fake_socket())
+      Feed.subscribe(feed, ["AAPL"])
+
+      top =
+        Types.TopOfBook.new(symbol: "AAPL", observed_at: DateTime.utc_now(), provider: :schwab)
+
+      send(feed, {:dp_exchange, :schwab, top})
+      assert_receive {:dp_exchange, :schwab, %Types.TopOfBook{}}, 5_000
+      assert Feed.coverage_by_kind(feed) == %{top_of_book: %{"AAPL" => :stream}}
+
+      # A second kind for the same symbol joins the first; the same kind again changes nothing.
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      send(feed, {:dp_exchange, :schwab, quote_for("AAPL")})
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind == %{top_of_book: %{"AAPL" => :stream}, quotes: %{"AAPL" => :stream}}
       assert_union_matches_coverage(feed, by_kind)
       assert_declared_streamable(by_kind)
     end
