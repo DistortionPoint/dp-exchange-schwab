@@ -45,6 +45,11 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
   alias WebSockex.{Utils}
   @handshake_guid "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+  # VENDORED FIX (4 of 4): the most one message, or one frame still arriving, may hold. See the
+  # moduledoc. A Streamer frame is a few kilobytes; a depth book is tens. 8 MiB is chosen, not
+  # measured, and is far above anything the venue documents.
+  @max_message_bytes 8_388_608
+
   @moduledoc ~S"""
   A **vendored, patched fork of `websockex` 0.5.1**, private to this package — never
   `alias`ed or referenced as `WebSockex` from outside `DpExchange.Schwab`, and not part
@@ -94,7 +99,8 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly three things**, each marked `## VENDORED FIX` at its call site below:
+  **Exactly four things** (the fourth, added 2026-10-14, is item 4 below), each marked
+  `## VENDORED FIX` at its call site below:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -119,6 +125,15 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
      task is killed and the attempt ends as `%WebSockex.ConnError{original: :timeout}`, the
      error a timed-out `recv` already produces, so the existing start and reconnect paths
      handle it unchanged. Added 2026-09-27.
+  4. **A message is bounded.** Upstream grows `state.buffer` for as long as a frame stays
+     incomplete (a header that declares a 2^40-byte payload is never complete) and grows a
+     fragmented message by one `<<part, next>>` per continuation frame with no ceiling, so a
+     peer that never finishes either held this process's memory without limit. A frame still
+     incomplete past `@max_message_bytes`, or a fragmented message that would pass it, is
+     answered with this side's own close frame, code 1009 (RFC 6455 "message too big"),
+     through the same `handle_close({:local, ...})` path the two 1002 protocol violations
+     already use, so `handle_disconnect/2` runs and the reconnect is the ordinary one. Added
+     2026-10-14.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -177,7 +192,7 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex` calls in `DpExchange.Schwab.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own three marked changes.
+  diffed here for anything beyond this file's own four marked changes.
 
   ---
 
@@ -940,6 +955,13 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
       {:error, %WebSockex.FrameError{} = frame_error} ->
         handle_close({:error, frame_error}, parent, debug, state)
 
+      # ## VENDORED FIX (4 of 4) — see the moduledoc. Only here, on a buffer that does not yet
+      # hold even one whole frame: a buffer of many small complete frames is parsed one at a
+      # time and never reaches this clause, so a burst of valid frames is not mistaken for one
+      # oversized one.
+      :incomplete when byte_size(state.buffer) > @max_message_bytes ->
+        handle_close({:local, 1009, "message too big"}, parent, debug, state)
+
       :incomplete ->
         transport = state.conn.transport
         socket = state.conn.socket
@@ -1093,6 +1115,14 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
       debug,
       state
     )
+  end
+
+  # ## VENDORED FIX (4 of 4) — see the moduledoc. The assembled message may not pass
+  # `@max_message_bytes`, whichever frame of it would carry it past.
+  defp handle_fragment({kind, next}, parent, debug, %{fragment: {_type, part}} = state)
+       when kind in [:continuation, :finish] and
+              byte_size(part) + byte_size(next) > @max_message_bytes do
+    handle_close({:local, 1009, "message too big"}, parent, debug, %{state | fragment: nil})
   end
 
   defp handle_fragment({:continuation, next}, parent, debug, %{fragment: {type, part}} = state) do

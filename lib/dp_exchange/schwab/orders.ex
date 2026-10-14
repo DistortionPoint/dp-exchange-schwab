@@ -153,7 +153,12 @@ defmodule DpExchange.Schwab.Orders do
 
   # A keyword list or any other non-map used to raise `BadMapError` from `Map.get/2` in the
   # caller's process, after a throttled-write gate had been passed.
-  def build(request, _opts) when not is_map(request),
+  #
+  # **A struct is not a request map either.** `is_map/1` is true for one, and `check_keys/1`
+  # then enumerates it: structs implement no `Enumerable`, so `build(%URI{})` raised
+  # `Protocol.UndefinedError` in the caller's process, and `request[:price]` would have raised
+  # in `Access`. Its fields are not this builder's vocabulary, so it is refused by name.
+  def build(request, _opts) when not is_map(request) or is_struct(request),
     do: {:error, {:invalid_order_request, request}}
 
   def build(request, opts) do

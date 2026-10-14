@@ -31,6 +31,42 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+Tick AC: decoder robustness against hostile or malformed venue payloads.
+
+- **A Streamer response code of `0.0` read as success.** `StreamerProtocol.succeeded?/1` tested
+  `code == 0`, which is numeric equality, so `0.0` and `-0.0` passed. Only the integer codes the
+  vendor lists (0, 26, 27, 28, 29) are success now.
+- **A negative volume was carried as a volume.** A negative `total_volume` / `totalVolume` on a
+  `Quote` and a negative `volume` on a `Candle`, from the Streamer or REST, are now `nil` ("not
+  stated", with `volume_window` `nil` too) and the price beside it stands.
+- **`Rest.place_order/4` and `replace_order/5` returned any last `Location` segment as the order
+  id.** `portal`, `1005?next=/login` or `1005#x` came back as `{:ok, id}` and, when the read-back
+  failed, were wrapped in a `%Order{}`. The venue's `orderId` is an integer, so a segment that is
+  not 1 to 19 digits is `{:error, {:order_unconfirmed, nil, :order_id_not_returned}}`, like no
+  `Location` at all.
+- **An error body with `"detail": null` answered `{:venue_error, status, nil}`.** It is
+  `{:venue_error, status}` now, as for a body with no detail.
+- **`get_option_chain/3` carried non-text and impossible values.** A chain `symbol` that is
+  present and not text is `{:error, :unexpected_response_shape}` (it became `underlying: 5`); a
+  strike key of zero or below is `{:unreadable_chain_strike, key}`; a contract `symbol`,
+  `settlementType` or `expirationType` that is not text, a zero or negative `multiplier`, and a
+  zero or negative `underlyingPrice` read as `nil` ("not stated").
+- **`get_balances/3` read an unreadable available figure as "not stated".** A present
+  `availableFunds` / `cashAvailableForTrading` that is `"abc"`, `""`, NaN, an infinity or an
+  absurd exponent is `{:error, :unexpected_response_shape}`, as the total beside it already was;
+  an absent or `null` one is still `nil`.
+- **The four list reads passed non-object rows through.** `get_account_summaries/2`,
+  `get_all_orders/2`, `get_orders/3` and `get_transactions/3` answered `[1, "x", nil]` as sent, and
+  callers read `row["orderId"]` and raised. A list with any non-object row is
+  `{:error, :unexpected_response_shape}`.
+- **`Orders.build/2` raised on a struct.** `is_map/1` is true for one, `check_keys/1` then
+  enumerated it, and `Protocol.UndefinedError` came out in the caller's process. A struct is
+  `{:error, {:invalid_order_request, struct}}`, as the fake answers too.
+- **The vendored WebSocket client had no ceiling on a message.** A frame that stayed incomplete
+  (a header declaring 2^40 bytes) or a fragmented message with no final frame grew the socket
+  process's memory for as long as the peer sent. Past 8 MiB the socket now closes with code 1009
+  and reconnects in the ordinary way (fourth marked change to `DpExchange.Schwab.Vendor.WebSockex`).
+
 ## [0.2.128] - 2026-10-14
 
 - **A feed could be left with no route.** If the fallback poller crashed a second time within a

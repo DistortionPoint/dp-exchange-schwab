@@ -407,7 +407,7 @@ defmodule DpExchange.Schwab.Rest do
       # difference, never one print to sum — dp-exchange-core issue #42. The Streamer's
       # `Quote` now carries the same cumulative figure under the same label (LEVELONE is
       # conflated, so `last_size` as `:print` was a claim the stream cannot keep).
-      volume = decimal(row["totalVolume"])
+      volume = volume_decimal(row["totalVolume"])
 
       {:ok,
        %Quote{
@@ -892,9 +892,20 @@ defmodule DpExchange.Schwab.Rest do
          high: high,
          low: low,
          close: close,
-         volume: decimal(row["volume"]),
+         volume: volume_decimal(row["volume"]),
          provider: :schwab
        }}
+    end
+  end
+
+  # A traded volume is never below zero: a negative figure is a venue fault, and carrying it
+  # would hand a consumer differencing a cumulative total a volume that runs backwards.
+  # Volume is optional on `Quote` and `Candle`, so an unreadable or negative one is `nil`
+  # ("not stated") and the price beside it stands.
+  defp volume_decimal(value) do
+    case decimal(value) do
+      %Decimal{} = volume -> if Decimal.negative?(volume), do: nil, else: volume
+      nil -> nil
     end
   end
 
@@ -1409,20 +1420,32 @@ defmodule DpExchange.Schwab.Rest do
 
   def get_option_chain(underlying, credentials, opts) do
     with {:ok, body} <- get_chains(credentials, Keyword.put(opts, :symbol, underlying)) do
-      with {:ok, calls} <- chain_side(body["callExpDateMap"], underlying, :call),
+      with {:ok, named} <- chain_underlying(body["symbol"], underlying),
+           {:ok, calls} <- chain_side(body["callExpDateMap"], underlying, :call),
            {:ok, puts} <- chain_side(body["putExpDateMap"], underlying, :put),
            {:ok, expiries} <- merge_chain(calls ++ puts) do
         {:ok,
          %OptionChain{
-           underlying: body["symbol"] || underlying,
+           underlying: named,
            expiries: expiries,
-           underlying_price: decimal(body["underlyingPrice"]),
+           underlying_price: positive_decimal(body["underlyingPrice"]),
            venue_time: nil,
            provider: :schwab
          }}
       end
     end
   end
+
+  # The chain's own name for its underlying: the venue's `symbol` when it is text, the caller's
+  # when the venue stated none. A `symbol` that is present and not text (a number, an object)
+  # used to ride into `OptionChain.underlying` as it came, where every consumer keying chains by
+  # underlying expects a string; it is an unreadable reply instead.
+  defp chain_underlying(nil, underlying), do: {:ok, underlying}
+
+  defp chain_underlying(symbol, _underlying) when is_binary(symbol) and symbol != "",
+    do: {:ok, symbol}
+
+  defp chain_underlying(_unreadable, _underlying), do: {:error, :unexpected_response_shape}
 
   defp chain_side(nil, _underlying, _right), do: {:ok, []}
 
@@ -1499,7 +1522,10 @@ defmodule DpExchange.Schwab.Rest do
 
   # `Decimal.new/1` raises on a string that is not a number, and a raise inside a chain read
   # would take the whole grid down over one key. This refuses that key by name instead.
-  defp chain_strike(key), do: decimal(key)
+  #
+  # A strike is a positive price: a key of `"0"` or `"-5"` addresses no contract, and is
+  # unreadable like a key that is not a number.
+  defp chain_strike(key), do: positive_decimal(key)
 
   # **The venue does name these three on a chain row** — the comment that used to sit here
   # said it did not, which was false: `OptionContract` (MD:5315,
@@ -1517,10 +1543,10 @@ defmodule DpExchange.Schwab.Rest do
       expiry: expiry,
       strike: strike,
       right: right,
-      venue_symbol: row["symbol"],
-      multiplier: decimal(row["multiplier"]),
-      settlement_type: row["settlementType"],
-      expiration_type: row["expirationType"],
+      venue_symbol: text_or_nil(row["symbol"]),
+      multiplier: positive_decimal(row["multiplier"]),
+      settlement_type: text_or_nil(row["settlementType"]),
+      expiration_type: text_or_nil(row["expirationType"]),
       last_trading_day: chain_last_trading_day(row["lastTradingDay"]),
       index_option: boolean_or_nil(row["isIndexOption"]),
       mini: boolean_or_nil(row["isMini"]),
@@ -1531,6 +1557,21 @@ defmodule DpExchange.Schwab.Rest do
 
   defp boolean_or_nil(value) when is_boolean(value), do: value
   defp boolean_or_nil(_other), do: nil
+
+  # `OptionContract` types these three descriptive fields `String.t() | nil`. A number, an
+  # object or a list in one of them is not text and is not carried as if it were: it is "not
+  # stated", the same reading `boolean_or_nil/1` gives a flag that is not a boolean.
+  defp text_or_nil(value) when is_binary(value) and value != "", do: value
+  defp text_or_nil(_other), do: nil
+
+  # A multiplier, an underlying price: a positive finite number or "not stated". Zero or a
+  # negative one is a venue fault, not a contract that multiplies by nothing.
+  defp positive_decimal(value) do
+    case decimal(value) do
+      %Decimal{} = number -> if Decimal.positive?(number), do: number, else: nil
+      nil -> nil
+    end
+  end
 
   # The venue sends this as epoch milliseconds on a chain row, unlike the expiry key.
   #
@@ -2148,7 +2189,17 @@ defmodule DpExchange.Schwab.Rest do
   # a map body turned one error-shaped or summary-shaped object into a one-row list, a
   # phantom account, order or transaction. `get_orders/3` already refused this; the other
   # three list reads now do too.
-  defp list_body(body) when is_list(body), do: {:ok, body}
+  #
+  # **And every row is an object.** The four list reads promise `[map()]`, and answered
+  # `[1, "x", null]` as sent: `get_all_orders/2` and `get_transactions/3` hand their rows
+  # straight to the caller, who reads them with `row["orderId"]` and raises in `Access` on a
+  # row that is not a map. A list with one unreadable row is refused whole, the rule
+  # `Orders.list_from_venue/1` already applies to the decoded orders: a list with an entry
+  # silently dropped or kept as noise reads as complete.
+  defp list_body(body) when is_list(body) do
+    if Enum.all?(body, &is_map/1), do: {:ok, body}, else: {:error, :unexpected_response_shape}
+  end
+
   defp list_body(_other), do: {:error, :unexpected_response_shape}
 
   # Both ends or neither. A window with one end is a window this package would have to
@@ -2543,7 +2594,8 @@ defmodule DpExchange.Schwab.Rest do
 
   defp balances(%{"securitiesAccount" => account}) when is_map(account) do
     with {:ok, current} <- current_balances(account["currentBalances"]),
-         {:ok, total} <- balance_total(account["type"], current) do
+         {:ok, total} <- balance_total(account["type"], current),
+         {:ok, available} <- fetch_available(account["type"], current) do
       {:ok,
        [
          %DpExchange.Core.Types.Balance{
@@ -2568,7 +2620,7 @@ defmodule DpExchange.Schwab.Rest do
            # up as a schema change rather than as silently wrong balances.
            currency: "USD",
            balance: decimal(total),
-           available_balance: decimal(available(account["type"], current)),
+           available_balance: available,
            hold: nil,
            # The venue does not date a balance response. Rather than stamp it with the
            # local clock and call it the venue's, the timestamp is the read time and the
@@ -2611,6 +2663,25 @@ defmodule DpExchange.Schwab.Rest do
     case decimal(value) do
       nil -> {:error, :unexpected_response_shape}
       _readable -> {:ok, value}
+    end
+  end
+
+  # **Absent is `nil` ("not stated"); present and unreadable is a refusal.** `"abc"`, `""`,
+  # NaN or an absurd exponent in `availableFunds` used to read as `nil` too, so an account whose
+  # available figure the venue garbled looked like one whose venue simply does not state it, and
+  # `Balance` says exactly that about a `nil` here. The total beside it is refused the same way
+  # (`fetch_balance/2`); the available figure is held to the same standard.
+  defp fetch_available(type, current) do
+    case available(type, current) do
+      nil -> {:ok, nil}
+      raw -> available_decimal(raw)
+    end
+  end
+
+  defp available_decimal(raw) do
+    case decimal(raw) do
+      nil -> {:error, :unexpected_response_shape}
+      parsed -> {:ok, parsed}
     end
   end
 
@@ -2740,12 +2811,23 @@ defmodule DpExchange.Schwab.Rest do
     # said 2xx, so the order (or the replacement) exists and this package cannot name it:
     # `:order_unconfirmed`, not a plain error a caller would retry into a duplicate.
     with value when is_binary(value) <- location,
-         id when id != "" <- value |> String.split("/") |> List.last() do
+         id when id != "" <- value |> String.split("/") |> List.last(),
+         true <- order_id?(id) do
       {:ok, id}
     else
       _no_id -> unconfirmed(:order_id_not_returned)
     end
   end
+
+  # **The venue's order id is an int64 (`orderId` is `"type": "integer"` in the Trader
+  # OpenAPI document), so a Location whose last segment is anything else names no order.**
+  # `"1005?x=1"`, `"portal"` or a path ending in `..` is a redirect, an interstitial or a
+  # hostile header, not an order: returned as the id it was read back by `get_order/3` and,
+  # when that read failed, `Orders.accepted/2` built a `%Order{}` carrying it. The order may
+  # well be live (the venue said 2xx), so this is the same unconfirmed answer as no Location
+  # at all, never a plain error a caller would retry into a duplicate. Read from the
+  # document, not probed: this repository holds no Schwab credential.
+  defp order_id?(id), do: String.match?(id, ~r/\A[0-9]{1,19}\z/)
 
   # Req normalises header names to lowercase and values to lists; a plain map of strings
   # is also accepted so this does not depend on one client's shape.
@@ -3079,7 +3161,10 @@ defmodule DpExchange.Schwab.Rest do
 
   defp refusal(status, body) do
     case refusal_body(body) do
-      %{"errors" => [%{"detail" => detail} | _rest]} ->
+      # A `null` detail says nothing: `Bound.text(nil)` is `nil`, which made the answer
+      # `{:venue_error, status, nil}` - a three-tuple claiming a detail it does not carry.
+      # It falls through to the shapes below and, with none, to `{:venue_error, status}`.
+      %{"errors" => [%{"detail" => detail} | _rest]} when detail != nil ->
         {:venue_error, status, Bound.text(detail)}
 
       %{"error_description" => detail} when is_binary(detail) ->

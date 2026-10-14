@@ -68,8 +68,9 @@ defmodule DpExchange.Schwab.StreamerDecode do
       # MD8; it did, until then). `total_volume` is the venue's cumulative figure and is
       # what a consumer differences. Read rather than required: `:volume` is not enforced on
       # `Core.Types.Quote`, so an absent or unreadable total is `nil`, the window with it,
-      # and the quote still stands.
-      volume = decimal(Map.get(fields, :total_volume))
+      # and the quote still stands. A NEGATIVE total is not a volume either: it is unreadable
+      # and reads as `nil` (see `volume_decimal/1`), never as a cumulative figure below zero.
+      volume = volume_decimal(Map.get(fields, :total_volume))
 
       {:ok,
        %Quote{
@@ -254,8 +255,9 @@ defmodule DpExchange.Schwab.StreamerDecode do
   `Rest`'s own candle decode — the REST arm of the same type — already guarded all four.
   This was the copy that did not.
 
-  `volume` stays unguarded: it is not an enforced key on `Candle`, and a frame that did not
-  state a volume has not stated one.
+  `volume` is not required: it is not an enforced key on `Candle`, and a frame that did not
+  state a volume has not stated one. An unreadable or **negative** one is `nil` as well, and the
+  bar stands.
   """
   @spec to_candle(map(), String.t(), String.t()) :: {:ok, Candle.t()} | {:error, term()}
   def to_candle(fields, symbol, timeframe) do
@@ -273,9 +275,20 @@ defmodule DpExchange.Schwab.StreamerDecode do
          high: high,
          low: low,
          close: close,
-         volume: decimal(Map.get(fields, :volume)),
+         volume: volume_decimal(Map.get(fields, :volume)),
          provider: :schwab
        }}
+    end
+  end
+
+  # A traded volume is never below zero. A negative figure from the venue is a fault, not a
+  # statement, and carrying it would hand a consumer differencing the cumulative total a
+  # volume that runs backwards. Volume is not an enforced key on `Quote` or `Candle`, so an
+  # unreadable one is `nil` ("not stated") and the price beside it stands.
+  defp volume_decimal(value) do
+    case decimal(value) do
+      %Decimal{} = volume -> if Decimal.negative?(volume), do: nil, else: volume
+      nil -> nil
     end
   end
 

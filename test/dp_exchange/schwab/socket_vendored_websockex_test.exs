@@ -82,6 +82,39 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     assert Process.alive?(socket_pid)
   end
 
+  test "a fragmented message that never ends is cut off at the size ceiling" do
+    # Upstream joined every continuation onto the message with no ceiling, so a peer that
+    # never sent the final frame grew this process's memory for as long as it kept sending.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_endless_fragments/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    # The close is this side's own, code 1009, and `handle_disconnect/2` ran.
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}},
+                   30_000
+
+    assert details.reason =~ "1009"
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a frame that declares a huge payload and never completes is cut off at the ceiling" do
+    # Upstream kept appending to `state.buffer` while a frame stayed incomplete, and a header
+    # declaring 2^40 bytes is never complete.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_unfinished_frame/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}},
+                   30_000
+
+    assert details.reason =~ "1009"
+    assert Process.alive?(socket_pid)
+  end
+
   test "a wss peer whose certificate nothing trusts is refused" do
     # websockex's own default is `verify: :verify_none`. Against this server, the TLS
     # handshake used to complete and the upgrade request went out.
@@ -185,6 +218,33 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     # Waits for the client to tear down, so the close cannot race the frame.
     # This socket sends LOGIN on connect, so a read can return that frame first. Read until
     # the client has actually closed.
+    read_until_closed(socket)
+    :gen_tcp.close(socket)
+  end
+
+  # A text message started with FIN clear, then 140 continuation frames of 65_535 bytes with
+  # no final frame: 9 MiB, past the 8 MiB ceiling. A send that fails is the client closing on
+  # us, which is the outcome under test.
+  defp upgrade_then_send_endless_fragments(socket) do
+    upgrade(socket)
+    chunk = :binary.copy("a", 65_535)
+    :gen_tcp.send(socket, <<0::1, 0::3, 1::4, 0::1, 126::7, 65_535::16, chunk::binary>>)
+
+    Enum.each(1..140, fn _n ->
+      :gen_tcp.send(socket, <<0::1, 0::3, 0::4, 0::1, 126::7, 65_535::16, chunk::binary>>)
+    end)
+
+    read_until_closed(socket)
+    :gen_tcp.close(socket)
+  end
+
+  # A FIN text frame whose header declares 2^40 bytes, of which 9 MiB ever arrive.
+  defp upgrade_then_send_unfinished_frame(socket) do
+    upgrade(socket)
+    :gen_tcp.send(socket, <<1::1, 0::3, 1::4, 0::1, 127::7, 1_099_511_627_776::64>>)
+    chunk = :binary.copy("a", 65_536)
+    Enum.each(1..144, fn _n -> :gen_tcp.send(socket, chunk) end)
+
     read_until_closed(socket)
     :gen_tcp.close(socket)
   end

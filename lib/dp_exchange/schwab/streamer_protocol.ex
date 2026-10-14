@@ -184,8 +184,11 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   that never comes.
   """
   @spec succeeded?(map()) :: boolean()
+  # `in` is exact (`===`) in a guard where `code == 0` was numeric: a venue code of `0.0` (or
+  # `-0.0`) compared equal to `0` and read as success. Only the integer codes the vendor's
+  # table lists are success; a float, a string or a boolean is not a code this package knows.
   def succeeded?(%{"content" => %{"code" => code}})
-      when code == 0 or code in [26, 27, 28, 29],
+      when code in [0, 26, 27, 28, 29],
       do: true
 
   def succeeded?(_response), do: false
