@@ -31,6 +31,56 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+Tick AD: facade consistency (design `2026-10-14_design-facade-consistency`) and performance.
+
+### Changed — BREAKING (returned reasons and notice details)
+
+- **`{:error, {:not_an_equity_symbol, s}}` is now `{:refused, {:not_an_equity_symbol, s}}`**,
+  from every read and order build that judges a symbol (`get_price/2`, `get_prices/2` per
+  symbol, `get_top_of_book/2`, `get_historical_prices/4`, `place_order/3` and the other
+  order calls), real and Fake. The venue lists equities only, so the same symbol never
+  succeeds on retry. Match `{:refused, {:not_an_equity_symbol, _}}`.
+- **`get_top_of_book/2` for an instrument with no book answers `{:refused, :no_quote}`**, not
+  `{:error, :no_top_of_book}`. The Fake lists only quoting equities and never answers it.
+- **`{:error, {:lookback_exceeds_venue, tf, days, max}}` is now `{:error, {:range_unavailable,
+  tf, earliest: DateTime.t(), requested: DateTime.t()}}`**, the family shape. `earliest` is
+  `max` days before now (the documented minute-candle retention, not probed); `requested` is
+  the range's `:start`. Real and Fake.
+- **`Core.Notice` `details.reason` is an atom; the free text moved to `details.message`.** The
+  sites: `:link_down` from the Streamer (`:connection_lost`), a crashed route
+  (`:route_crashed`), an unanswered poll read (`:poller_unresponsive`), the Streamer
+  unreachable (`:streamer_unreachable`), a refused login (`:login_rejected`), a rejected
+  command (`:command_rejected`), a subscription not sent (`:subscription_not_sent`), a full
+  held-command queue (`:held_commands_full`), withheld delayed quotes
+  (`:delayed_quotes_withheld`) and a dropped unreadable frame (`:frame_unreadable`). Code that
+  read the string from `details.reason` reads `details.message`.
+
+### Fixed
+
+- **A `:link_down` from the feed (an unanswered poll read, a crashed route) was never
+  closed.** Core describes `:link_down` and `:link_up` as a pair, and a consumer waiting for
+  recovery on the poll route waited forever. The first good poll after one now sends a
+  single `:link_up` (latched; the Streamer's own `:link_up` closes it when the redial reaches
+  the Streamer). Tests: `feed_test.exs`, "the poll route".
+- **Checked, no change: the vendored WebSocket client does not re-parse a large frame per
+  chunk.** `parse_frame/1` on an incomplete frame reads only the header and the declared
+  length (constant work), and the buffer join is an append the VM does in place, so a frame
+  in N chunks is linear. Reasoned from the code; not timed.
+
+Tick AD: performance and hot paths.
+
+- **Every streamed symbol kept its whole Streamer frame alive.** `Jason.decode/1` returns strings
+  as sub-binaries that point into the raw frame, so the four-byte `AAPL` taken from a row held
+  the entire frame (kilobytes for a `*_BOOK` or a many-row `LEVELONE_*` frame) for as long as
+  anything held the symbol, and something always did: `Socket`'s `last_top` key and reported
+  sets, `Feed`'s `delivering` and `kinds` keys, and every `Quote`, `TopOfBook` and `Candle` a
+  consumer cached as its last price. One retained frame per streaming symbol, for the life of
+  the session. `Socket` now copies the symbol out of the frame once per row
+  (`:binary.copy/1`, a few bytes). Proven by `:binary.referenced_byte_size/1` on each place the
+  symbol lands.
+- `Fake.unsubscribe/2` removed `m` symbols from `n` held with `n * m` list walks; it now builds a
+  set once. No change in behaviour.
+
 ## [0.2.129] - 2026-10-14
 
 Tick AC: decoder robustness against hostile or malformed venue payloads.

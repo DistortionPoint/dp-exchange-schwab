@@ -76,7 +76,7 @@ defmodule DpExchange.Schwab.SymbolFormatTest do
   describe "validate/1 refuses a crypto pair, because a plausible wrong answer exists" do
     test "pair-shaped input is refused on every separator" do
       for pair <- ~w(BTC-USD ETH-USD BTC/USD BTC_USD BTC:USD) do
-        assert {:error, {:not_an_equity_symbol, ^pair}} = SymbolFormat.validate(pair)
+        assert {:refused, {:not_an_equity_symbol, ^pair}} = SymbolFormat.validate(pair)
       end
     end
 
@@ -84,7 +84,7 @@ defmodule DpExchange.Schwab.SymbolFormatTest do
       # `BTC` alone is legitimate — it is a real equity symbol. `BTC-USD` is not, and
       # nothing here may turn the second into the first.
       assert SymbolFormat.validate("BTC") == {:ok, "BTC"}
-      assert {:error, _reason} = SymbolFormat.validate("BTC-USD")
+      assert {:refused, _reason} = SymbolFormat.validate("BTC-USD")
     end
   end
 
@@ -96,13 +96,13 @@ defmodule DpExchange.Schwab.SymbolFormatTest do
 
     test "too long, digits and punctuation" do
       for bad <- ~w(TOOLONG AAPL1 123 A..B AAPL.BBB) do
-        assert {:error, {:not_an_equity_symbol, ^bad}} = SymbolFormat.validate(bad)
+        assert {:refused, {:not_an_equity_symbol, ^bad}} = SymbolFormat.validate(bad)
       end
     end
 
     test "a non-string is refused rather than crashing" do
-      assert {:error, {:not_an_equity_symbol, nil}} = SymbolFormat.validate(nil)
-      assert {:error, {:not_an_equity_symbol, :aapl}} = SymbolFormat.validate(:aapl)
+      assert {:refused, {:not_an_equity_symbol, nil}} = SymbolFormat.validate(nil)
+      assert {:refused, {:not_an_equity_symbol, :aapl}} = SymbolFormat.validate(:aapl)
     end
   end
 

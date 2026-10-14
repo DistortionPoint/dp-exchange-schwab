@@ -164,7 +164,7 @@ defmodule DpExchange.Schwab.RestTest do
     test "a crypto pair never reaches the venue" do
       exploding = fn _conn -> raise "a request was sent for a pair-shaped symbol" end
 
-      assert {:error, {:not_an_equity_symbol, "BTC-USD"}} =
+      assert {:refused, {:not_an_equity_symbol, "BTC-USD"}} =
                Rest.get_price("BTC-USD", @creds, plug: exploding)
     end
 
@@ -244,7 +244,7 @@ defmodule DpExchange.Schwab.RestTest do
       # prices once a day at NAV, it does not quote a spread. Before this fix there was no
       # such refusal: the fields would all read as nil and the caller would get back a
       # TopOfBook indistinguishable from a real book that just happened to be empty.
-      assert {:error, :no_top_of_book} =
+      assert {:refused, :no_quote} =
                Rest.get_top_of_book("SWPPX", @creds,
                  plug: responding(mutual_fund_body()),
                  retry_attempts: 0
@@ -333,10 +333,12 @@ defmodule DpExchange.Schwab.RestTest do
 
       range = [start: ~U[2025-08-31 00:00:00Z], end: ~U[2026-08-31 00:00:00Z]]
 
-      assert {:error, {:lookback_exceeds_venue, "1m", requested, 10}} =
+      assert {:error, {:range_unavailable, "1m", earliest: earliest, requested: requested}} =
                Rest.get_historical_prices("AAPL", "1m", range, @creds, plug: exploding)
 
-      assert requested > 300
+      assert requested == ~U[2025-08-31 00:00:00Z]
+      # Ten days back from now: the venue's documented minute-candle retention.
+      assert DateTime.diff(DateTime.utc_now(), earliest, :day) in 9..10
     end
 
     test "a width the venue does not serve is named, not approximated" do

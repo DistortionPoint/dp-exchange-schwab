@@ -754,15 +754,18 @@ defmodule DpExchange.SchwabTest do
     test "an unlisted symbol is refused and a pair never validates" do
       assert Fake.get_price("ZZZZ", credentials: @creds) == {:refused, :not_listed}
 
-      assert {:error, {:not_an_equity_symbol, "BTC-USD"}} =
+      assert {:refused, {:not_an_equity_symbol, "BTC-USD"}} =
                Fake.get_price("BTC-USD", credentials: @creds)
     end
 
     test "the ten-day cap is reproduced, because that is the refusal that matters" do
       range = [start: DateTime.add(Fake.as_of(), -365, :day)]
 
-      assert {:error, {:lookback_exceeds_venue, "1m", _days, 10}} =
+      assert {:error, {:range_unavailable, "1m", earliest: earliest, requested: requested}} =
                Fake.get_historical_prices("AAPL", "1m", range, credentials: @creds)
+
+      assert requested == DateTime.add(Fake.as_of(), -365, :day)
+      assert earliest == DateTime.add(Fake.as_of(), -10, :day)
     end
 
     test "an unsupported width is refused" do
@@ -938,7 +941,7 @@ defmodule DpExchange.SchwabTest do
       end
 
       assert Fake.get_price("BTC-USD", credentials: @creds) ==
-               {:error, {:not_an_equity_symbol, "BTC-USD"}}
+               {:refused, {:not_an_equity_symbol, "BTC-USD"}}
     end
 
     test "coverage_by_kind reports :quotes only, and its union matches coverage/1" do

@@ -258,7 +258,8 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     assert Task.await(subscribing, 15_000)
 
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-    assert details.reason =~ "missing_credentials"
+    assert details.reason == :streamer_unreachable
+    assert details.message =~ "missing_credentials"
     assert details.fallback == :internal_poll
     assert %{route: :internal_poll} = Feed.status(feed)
   end

@@ -191,7 +191,7 @@ defmodule DpExchange.Schwab do
   Best bid and ask for `symbol`, read from the `/quotes` endpoint (REST publishes no deeper book).
 
   Requires `opts[:credentials]`. An instrument whose quote carries no book, such as a mutual fund,
-  answers `{:error, :no_top_of_book}`. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  answers `{:refused, :no_quote}`. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
   """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
@@ -721,6 +721,7 @@ defmodule DpExchange.Schwab do
   own empty-map answer for the same case.
   """
   @spec wanted(keyword()) :: [String.t()]
+  @impl true
   def wanted(opts \\ []) do
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []

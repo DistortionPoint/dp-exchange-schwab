@@ -270,7 +270,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
     test "an open-ended range measured from a start is still bounded" do
       exploding = fn _conn -> raise "a request was sent for an unreachable range" end
 
-      assert {:error, {:lookback_exceeds_venue, "1m", _days, 10}} =
+      assert {:error, {:range_unavailable, "1m", earliest: %DateTime{}, requested: %DateTime{}}} =
                Rest.get_historical_prices(
                  "AAPL",
                  "1m",

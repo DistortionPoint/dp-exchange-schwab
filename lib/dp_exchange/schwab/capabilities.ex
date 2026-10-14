@@ -289,7 +289,7 @@ defmodule DpExchange.Schwab.Capabilities do
       # **`:future`, `:future_option`, `:index`, `:forex` — measured refused.**
       # `SymbolFormat.validate/1`, which every `Rest` and `Orders` function gates on
       # before a request is built, refuses `/ESZ25`, `EUR/USD` and `$SPX` outright as
-      # `{:error, {:not_an_equity_symbol, symbol}}`. Those are the venue's own documented
+      # `{:refused, {:not_an_equity_symbol, symbol}}`. Those are the venue's own documented
       # spellings for a future, a forex pair and an index (`market-data-production.txt`'s
       # CHART_FUTURES parameters and the Level One services). It also contradicted this
       # package's own `Schwab.asset_classes/0`, which has always said `[:equity]`.

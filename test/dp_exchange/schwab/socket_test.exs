@@ -227,14 +227,18 @@ defmodule DpExchange.Schwab.SocketTest do
 
       {_action, _answered} = Socket.handle_frame(refused, sent)
 
-      assert_received {:dp_exchange, :schwab, %Notice{details: %{reason: msg}}}
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{details: %{reason: :login_rejected, message: msg}}}
 
       assert byte_size(msg) < 2_100
 
       huge = {:remote, String.duplicate("r", 100_000)}
       assert {:reconnect, _dropped} = Socket.handle_disconnect(%{reason: huge}, sent)
 
-      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down, details: %{reason: r}}}
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}}
+
+      assert details.reason == :connection_lost
+      r = details.message
 
       assert byte_size(r) < 1_200
     end
@@ -520,7 +524,8 @@ defmodule DpExchange.Schwab.SocketTest do
       assert_received {:dp_exchange, :schwab,
                        %Notice{kind: :credentials_rejected, details: details}}
 
-      assert details.reason == "credential rejected"
+      assert details.reason == :login_rejected
+      assert details.message == "credential rejected"
     end
 
     test "a login that fails for a NON-credential reason stays :degraded" do
@@ -543,7 +548,8 @@ defmodule DpExchange.Schwab.SocketTest do
 
         refute new_state.logged_in?
         assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}
-        assert details.reason == "not a credential problem"
+        assert details.reason == :login_rejected
+        assert details.message == "not a credential problem"
       end
     end
 
@@ -841,7 +847,8 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.symbol == "AAPL"
-      assert details.reason =~ "candle frame dropped"
+      assert details.reason == :frame_unreadable
+      assert details.message =~ "candle frame dropped"
 
       assert {:ok, _state} = Socket.handle_frame(frame(data), state)
       refute_received {:dp_exchange, :schwab, %Notice{}}
@@ -939,7 +946,8 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.symbol == "AAPL"
-      assert details.reason =~ "order book frame dropped"
+      assert details.reason == :frame_unreadable
+      assert details.message =~ "order book frame dropped"
 
       assert {:ok, _state} = Socket.handle_frame(frame(data), state)
       refute_received {:dp_exchange, :schwab, %Notice{}}
@@ -1265,7 +1273,8 @@ defmodule DpExchange.Schwab.SocketTest do
       # The dropped frame is TOLD, not silent: a degraded notice naming the symbol.
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
       assert details.symbol == "AAPL"
-      assert details.reason =~ "top of book frame dropped"
+      assert details.reason == :frame_unreadable
+      assert details.message =~ "top of book frame dropped"
 
       # Announced once per symbol per session, however many bad frames follow.
       {:ok, state} = Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "garbage"}), state)
@@ -1307,7 +1316,8 @@ defmodule DpExchange.Schwab.SocketTest do
 
       refute_received {:dp_exchange, :schwab, %TopOfBook{}}
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-      assert details.reason =~ "top of book frame dropped"
+      assert details.reason == :frame_unreadable
+      assert details.message =~ "top of book frame dropped"
 
       # The last GOOD book is still the one carried.
       assert Decimal.equal?(state.last_top["AAPL"].bid, Decimal.new("99.50"))

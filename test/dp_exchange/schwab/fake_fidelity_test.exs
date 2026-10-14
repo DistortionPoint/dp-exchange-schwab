@@ -248,10 +248,13 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
     test "an open-ended range is still measured back from now" do
       range = [start: DateTime.add(Fake.as_of(), -30, :day)]
 
-      assert {:error, {:lookback_exceeds_venue, "1m", 30, 10}} =
-               Rest.check_history("1m", range, Fake.as_of())
+      earliest = DateTime.add(Fake.as_of(), -10, :day)
+      requested = DateTime.add(Fake.as_of(), -30, :day)
+      expected = {:error, {:range_unavailable, "1m", earliest: earliest, requested: requested}}
 
-      assert {:error, {:lookback_exceeds_venue, "1m", 30, 10}} =
+      assert expected == Rest.check_history("1m", range, Fake.as_of())
+
+      assert expected ==
                Fake.get_historical_prices("AAPL", "1m", range, credentials: @creds)
     end
 

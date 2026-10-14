@@ -101,6 +101,24 @@ delivered and the last one stands. A present size beside a live price that canno
 (a size beside a price of 0 is moot and ignored) the book the same way on both paths (`{:invalid_decimal, :bid_size | :ask_size, value}`); it
 is no longer published as `nil`. The quoted value is as sent when short and cut when long. `nil` is never produced for something unreadable.
 
+**An instrument whose quote carries no book answers `{:refused, :no_quote}`** from
+`get_top_of_book/2` (a mutual fund prices once a day at NAV and publishes no bid or ask). It
+used to be `{:error, :no_top_of_book}`: a **breaking change of a returned reason**. The Fake
+lists only equities that quote a book, so it never answers it.
+
+**`Core.Notice` `details.reason` is an atom, never free text.** Venue or exception text is in
+`details.message`, bounded. Schwab's reasons: `:connection_lost` (`:link_down` from the
+Streamer), `:route_crashed`, `:poller_unresponsive`, `:streamer_unreachable` (`:degraded`,
+with `fallback: :internal_poll`), `:login_rejected`, `:command_rejected`,
+`:subscription_not_sent`, `:held_commands_full`, `:delayed_quotes_withheld`,
+`:frame_unreadable`, `:login_unanswered` and `:silent_connection`. Code that matched the
+old free-text `details.reason` string must read `details.message`.
+
+**A `:link_down` from this package's feed is closed by a `:link_up`.** When the poll route's
+read does not answer, or a crashed route falls back to the poll, the first good poll after it
+sends one `:link_up` (latched: once per `:link_down`, no `details`, like the Streamer's). If
+the redial reaches the Streamer instead, the Streamer's own `:link_up` closes it.
+
 **A dropped streamed frame is announced, once.** A `LEVELONE_*` book, a `*_BOOK` frame or a
 `CHART_*` bar refused for an unreadable value (a bar with a zero or negative open, high, low
 or close is refused too, on REST and on the stream) raises one `:degraded` `Core.Notice` per
@@ -211,7 +229,10 @@ and the refresh read it untrimmed. Blank is still `{:missing_credentials, :schwa
 for `nil`, a non-string or a blank string, with or without credentials and before any
 request. (Formerly `{:not_an_equity_symbol, value}` for the first two, after the
 credential check, and `{:empty_symbol, ""}` for blank.) A well-formed string that is not an
-equity keeps `{:not_an_equity_symbol, value}`. `get_historical_prices/4` answers
+equity (a crypto pair, a future, an index) answers `{:refused, {:not_an_equity_symbol, value}}`:
+a refusal, because the same symbol never succeeds on retry. (Formerly `{:error, ...}`: a
+**breaking change of a returned reason**; match `{:refused, {:not_an_equity_symbol, _}}`, in
+`get_prices/2` per symbol as well.) `get_historical_prices/4` answers
 `{:error, {:invalid_range, range}}` for a `range` that is not a keyword list or whose
 `:start`/`:end` is not a `DateTime` (formerly a raise, and `{:invalid_range_bound, key,
 value}`), before any request.
@@ -384,8 +405,11 @@ part of the format; do not trim it.
 `1m 5m 10m 15m 30m 1d 1w 1M`.
 
 **Minute widths reach at most ten days back.** A longer range returns
-`{:error, {:lookback_exceeds_venue, timeframe, requested_days, max_days}}`. It is not
-truncated and not downgraded to a coarser width — handle the error; do not assume a series.
+`{:error, {:range_unavailable, timeframe, earliest: earliest, requested: start}}`, where
+`earliest` is ten days before now (the venue's documented minute-candle retention, not probed)
+and `start` is your range's `:start`. It is not truncated and not downgraded to a coarser
+width — handle the error; do not assume a series. (Formerly `{:lookback_exceeds_venue,
+timeframe, requested_days, max_days}`: a **breaking change of a returned reason**.)
 
 An unsupported width returns `{:error, {:unsupported_timeframe, width}}`.
 

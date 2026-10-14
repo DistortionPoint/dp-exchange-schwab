@@ -348,7 +348,7 @@ defmodule DpExchange.Schwab.OrdersTest do
     end
 
     test "a pair-shaped symbol is refused here too" do
-      assert {:error, {:not_an_equity_symbol, "BTC-USD"}} =
+      assert {:refused, {:not_an_equity_symbol, "BTC-USD"}} =
                Orders.build(%{@buy | symbol: "BTC-USD"})
     end
   end

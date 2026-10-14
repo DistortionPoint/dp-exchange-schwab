@@ -78,7 +78,8 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}},
                    10_000
 
-    assert details.reason =~ "invalid_close_code"
+    assert details.reason == :connection_lost
+    assert details.message =~ "invalid_close_code"
     assert Process.alive?(socket_pid)
   end
 
@@ -95,7 +96,8 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}},
                    30_000
 
-    assert details.reason =~ "1009"
+    assert details.reason == :connection_lost
+    assert details.message =~ "1009"
     assert Process.alive?(socket_pid)
   end
 
@@ -111,7 +113,8 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down, details: details}},
                    30_000
 
-    assert details.reason =~ "1009"
+    assert details.reason == :connection_lost
+    assert details.message =~ "1009"
     assert Process.alive?(socket_pid)
   end
 

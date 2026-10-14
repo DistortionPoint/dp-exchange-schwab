@@ -166,7 +166,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       # QuoteMutualFund has no bidPrice/askPrice at all in the vendor's own schema — the
       # vendor's own MultiCriteriaSearch example agrees, and get_top_of_book/2 must refuse
       # rather than build a book of four nils that reads as a quiet market.
-      assert {:error, :no_top_of_book} =
+      assert {:refused, :no_quote} =
                Schwab.get_top_of_book("AAAIX",
                  credentials: @creds,
                  plug: responding(body),

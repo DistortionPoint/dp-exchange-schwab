@@ -113,14 +113,16 @@ defmodule DpExchange.Schwab.SymbolFormat do
   @doc """
   Whether `symbol` is something this venue can be asked about, and the native form if so.
 
-  Returns `{:error, {:not_an_equity_symbol, symbol}}` for anything pair-shaped rather than
-  letting it through. See the module doc: `BTC` is a listed ETF, so a crypto pair arriving
-  here has a plausible wrong answer available, and a `404` would be the *lucky* outcome.
+  Returns `{:refused, {:not_an_equity_symbol, symbol}}` for anything pair-shaped rather than
+  letting it through. It is a refusal, not an error: the venue lists equities only, so the
+  same symbol never succeeds on retry. See the module doc: `BTC` is a listed ETF, so a
+  crypto pair arriving here has a plausible wrong answer available, and a `404` would be the
+  *lucky* outcome.
 
   This is what `Rest` and `Orders` call. `to_exchange_symbol/1` is the contract's total
   translation and does not refuse anything.
   """
-  @spec validate(canonical()) :: {:ok, native()} | {:error, term()}
+  @spec validate(canonical()) :: {:ok, native()} | {:error, term()} | {:refused, term()}
   def validate(symbol) when is_binary(symbol) do
     trimmed = String.trim(symbol)
 
@@ -134,24 +136,25 @@ defmodule DpExchange.Schwab.SymbolFormat do
       # A separator means the caller thinks this is a pair. It is not, and the venue has
       # equity tickers that would match the base leg.
       String.contains?(trimmed, ["-", "/", "_", ":"]) ->
-        {:error, {:not_an_equity_symbol, symbol}}
+        {:refused, {:not_an_equity_symbol, symbol}}
 
       equity?(trimmed) ->
         {:ok, String.upcase(trimmed)}
 
       true ->
-        {:error, {:not_an_equity_symbol, symbol}}
+        {:refused, {:not_an_equity_symbol, symbol}}
     end
   end
 
-  def validate(other), do: {:error, {:not_an_equity_symbol, other}}
+  def validate(other), do: {:refused, {:not_an_equity_symbol, other}}
 
   @doc """
   Whether `symbol` is a string with something in it, decided locally and before credentials.
 
   `{:error, {:invalid_symbol, value}}` for `nil`, a non-binary or a blank string (the
   family convention for a single-symbol read). It judges nothing else: whether a well-formed
-  string is an equity is `validate/1`'s question, and stays `{:not_an_equity_symbol, v}`.
+  string is an equity is `validate/1`'s question, and stays
+  `{:refused, {:not_an_equity_symbol, v}}`.
   """
   @spec check_present(term()) :: :ok | {:error, {:invalid_symbol, term()}}
   def check_present(symbol) when is_binary(symbol) do
@@ -164,9 +167,9 @@ defmodule DpExchange.Schwab.SymbolFormat do
   `check_present/1` then `validate/1` — what every single-symbol read asks.
 
   A nil, non-binary or blank symbol is `{:error, {:invalid_symbol, value}}`; a well-formed
-  string that is not an equity keeps `{:error, {:not_an_equity_symbol, value}}`.
+  string that is not an equity keeps `{:refused, {:not_an_equity_symbol, value}}`.
   """
-  @spec validate_read(term()) :: {:ok, native()} | {:error, term()}
+  @spec validate_read(term()) :: {:ok, native()} | {:error, term()} | {:refused, term()}
   def validate_read(symbol) do
     with :ok <- check_present(symbol), do: validate(symbol)
   end

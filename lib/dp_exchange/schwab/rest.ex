@@ -250,7 +250,7 @@ defmodule DpExchange.Schwab.Rest do
   once a day at NAV. Building a `TopOfBook` from four keys that are simply not in the
   response would hand back a struct that *looks* like a quiet market rather than one that
   says "this instrument has none": every field would be `nil`, indistinguishable from an
-  equity's book momentarily empty. `{:error, :no_top_of_book}` names the difference.
+  equity's book momentarily empty. `{:refused, :no_quote}` names the difference.
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
@@ -280,7 +280,7 @@ defmodule DpExchange.Schwab.Rest do
          }}
       end
     else
-      {:error, :no_top_of_book}
+      {:refused, :no_quote}
     end
   end
 
@@ -523,10 +523,13 @@ defmodule DpExchange.Schwab.Rest do
 
   - `{:error, {:unsupported_timeframe, timeframe}}` — the venue does not serve this width
     at all.
-  - `{:error, {:lookback_exceeds_venue, timeframe, requested_days, max_days}}` — the
-    width exists but cannot reach that far back. Minute candles cap at ten days. This is
-    the refusal that matters: answering with ten days, or with daily candles, would be a
-    plausible wrong answer.
+  - `{:error, {:range_unavailable, timeframe, earliest: earliest, requested: start}}` — the
+    width exists but cannot reach that far back. Minute candles cap at ten days, so
+    `earliest` is `max_lookback_days/1` before now (the venue's documented retention, not
+    probed; `nil` would mean the retention is unknown) and `requested` is the range's
+    `:start`. This is the refusal that matters: answering with ten days, or with daily
+    candles, would be a plausible wrong answer. (Formerly `{:lookback_exceeds_venue,
+    timeframe, requested_days, max_days}`.)
   - `{:error, {:invalid_range, range}}` — a `range` that is not a keyword list, or a `:start`
     or `:end` that is not a `DateTime`. A non-list used to raise, and a bad bound answered
     `{:invalid_range_bound, key, value}` (and before that was ignored, answering the most
@@ -790,7 +793,9 @@ defmodule DpExchange.Schwab.Rest do
         {:ok, max_days} = max_lookback_days(timeframe)
 
         if days > max_days do
-          {:error, {:lookback_exceeds_venue, timeframe, days, max_days}}
+          earliest = DateTime.add(now, -max_days, :day)
+          requested = Keyword.fetch!(range, :start)
+          {:error, {:range_unavailable, timeframe, earliest: earliest, requested: requested}}
         else
           {:ok, smallest_covering(legal, days, period_type)}
         end

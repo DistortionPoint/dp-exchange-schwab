@@ -226,11 +226,13 @@ defmodule DpExchange.Schwab.MarketDataReviewTest do
     test "a minute lookback a fraction past ten days is eleven days, and refused" do
       range = [start: ~U[2026-06-01 00:00:00Z], end: ~U[2026-06-11 01:00:00Z]]
 
-      assert {:error, {:lookback_exceeds_venue, "1m", 11, 10}} =
+      assert {:error, {:range_unavailable, "1m", earliest: %DateTime{}, requested: requested}} =
                Rest.get_historical_prices("AAPL", "1m", range, @creds,
                  plug: exploding("ten days and an hour"),
                  retry_attempts: 0
                )
+
+      assert requested == ~U[2026-06-01 00:00:00Z]
     end
 
     test "exactly ten days of minutes is still served" do

@@ -585,7 +585,12 @@ defmodule DpExchange.Schwab.Socket do
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
     bounded = Bound.reason(reason)
-    notify(state, Notice.new(:link_down, :schwab, details: %{reason: bounded}))
+
+    notify(
+      state,
+      Notice.new(:link_down, :schwab, details: %{reason: :connection_lost, message: bounded})
+    )
+
     Telemetry.link_down(:schwab, bounded)
 
     # See the moduledoc's "A rejected LOGIN is not a network blip" section. `websockex`
@@ -710,7 +715,7 @@ defmodule DpExchange.Schwab.Socket do
         {:ok, hold(state, {service, command, keys, opts})}
 
       {:error, reason} ->
-        notify(state, Notice.new(:degraded, :schwab, details: %{reason: Bound.reason(reason)}))
+        notify_subscribe_refused(state, reason)
         {:ok, state}
     end
   end
@@ -778,9 +783,19 @@ defmodule DpExchange.Schwab.Socket do
          }}
 
       {:error, reason} ->
-        notify(state, Notice.new(:degraded, :schwab, details: %{reason: Bound.reason(reason)}))
+        notify_subscribe_refused(state, reason)
         {:none, state}
     end
+  end
+
+  # `details.reason` is an atom; the builder's own term, bounded, is `details.message`.
+  defp notify_subscribe_refused(state, reason) do
+    notify(
+      state,
+      Notice.new(:degraded, :schwab,
+        details: %{reason: :subscription_not_sent, message: Bound.reason(reason)}
+      )
+    )
   end
 
   @impl true
@@ -893,7 +908,10 @@ defmodule DpExchange.Schwab.Socket do
     notify(
       state,
       Notice.new(:degraded, :schwab,
-        details: %{reason: "#{@max_held} commands already held awaiting LOGIN; this one refused"}
+        details: %{
+          reason: :held_commands_full,
+          message: "#{@max_held} commands already held awaiting LOGIN; this one refused"
+        }
       )
     )
 
@@ -978,7 +996,10 @@ defmodule DpExchange.Schwab.Socket do
       notify(
         state,
         Notice.new(kind, :schwab,
-          details: %{reason: StreamerProtocol.failure_message(response) || "login rejected"}
+          details: %{
+            reason: :login_rejected,
+            message: Bound.text(StreamerProtocol.failure_message(response) || "login rejected")
+          }
         )
       )
 
@@ -996,7 +1017,8 @@ defmodule DpExchange.Schwab.Socket do
         Notice.new(:degraded, :schwab,
           details: %{
             service: Bound.text(response["service"]),
-            reason: StreamerProtocol.failure_message(response) || "command rejected"
+            reason: :command_rejected,
+            message: Bound.text(StreamerProtocol.failure_message(response) || "command rejected")
           }
         )
       )
@@ -1036,6 +1058,16 @@ defmodule DpExchange.Schwab.Socket do
     # the `Quote`/`Candle` that came out carried `symbol: nil` to every subscriber.
     case Map.get(fields, :symbol) || row["key"] do
       symbol when is_binary(symbol) and symbol != "" ->
+        # **Copied out of the frame.** `Jason.decode/1` hands back strings as sub-binaries
+        # that point into the raw frame, so a symbol of four bytes keeps the WHOLE frame (a
+        # `*_BOOK` or a many-row `LEVELONE_*` frame is kilobytes) alive for as long as
+        # anything holds the symbol. Something always does, and for the life of the session:
+        # this socket's `last_top` key and reported-sets, `Feed`'s `delivering` and `kinds`
+        # keys, and every `Quote`/`TopOfBook`/`Candle` a consumer caches for its last price.
+        # One retained frame per symbol, never freed while the symbol streams. A copy of a few
+        # bytes per row is what lets each frame be collected as soon as it is handled.
+        symbol = :binary.copy(symbol)
+
         if row["delayed"] == true and not String.starts_with?(service, "CHART_") do
           withhold_delayed(state, service, symbol)
         else
@@ -1068,7 +1100,8 @@ defmodule DpExchange.Schwab.Socket do
           details: %{
             symbol: Bound.text(symbol),
             service: Bound.text(service),
-            reason: "delayed quotes withheld: the account has no real-time entitlement"
+            reason: :delayed_quotes_withheld,
+            message: "delayed quotes withheld: the account has no real-time entitlement"
           }
         )
       )
@@ -1145,7 +1178,8 @@ defmodule DpExchange.Schwab.Socket do
           details: %{
             symbol: Bound.text(symbol),
             service: Bound.text(service),
-            reason: "#{what} frame dropped: a price, size or time in it could not be read"
+            reason: :frame_unreadable,
+            message: "#{what} frame dropped: a price, size or time in it could not be read"
           }
         )
       )

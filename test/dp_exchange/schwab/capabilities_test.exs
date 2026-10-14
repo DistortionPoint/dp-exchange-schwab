@@ -231,9 +231,9 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       # Verified against the actual gate, not just the declaration: these are the venue's
       # own documented spellings (`/ESZ25` for a future, `EUR/USD` for forex, `$SPX` for
       # an index) and every one is refused before a request is ever built.
-      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("/ESZ25")
-      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("EUR/USD")
-      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("$SPX")
+      assert {:refused, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("/ESZ25")
+      assert {:refused, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("EUR/USD")
+      assert {:refused, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("$SPX")
 
       # And an option — a real 21-character Schwab option symbol — IS routed, which is
       # why `:option` stays declared.
@@ -244,7 +244,7 @@ defmodule DpExchange.Schwab.CapabilitiesTest do
       types = Subject.declaration().supported_instrument_types
       refute :bond in types
 
-      assert {:error, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("912828YY0")
+      assert {:refused, {:not_an_equity_symbol, _symbol}} = SymbolFormat.validate("912828YY0")
     end
 
     test "mutual_fund and cash_equivalent are declared, now that both are measured routable" do

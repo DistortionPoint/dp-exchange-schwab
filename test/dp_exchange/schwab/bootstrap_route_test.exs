@@ -90,7 +90,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       assert :sys.get_state(feed).route_bootstrap == nil
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded} = notice}, 5_000
-      assert notice.details.reason =~ "bootstrap_timeout"
+      assert notice.details.reason == :streamer_unreachable
+      assert notice.details.message =~ "bootstrap_timeout"
       assert notice.details.fallback == :internal_poll
 
       # The timed-out task is actually gone, not left running behind the feed's back.
@@ -156,7 +157,8 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
 
       # The budget is named, not merely applied — a consumer reading the notice has to be
       # able to tell a timeout at 50 ms from one at the 95-second default.
-      assert notice.details.reason == "{:bootstrap_timeout, 50}"
+      assert notice.details.reason == :streamer_unreachable
+      assert notice.details.message == "{:bootstrap_timeout, 50}"
       assert :sys.get_state(feed).route_bootstrap == nil
       assert Process.alive?(feed)
     end

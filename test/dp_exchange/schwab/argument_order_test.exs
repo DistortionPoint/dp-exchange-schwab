@@ -127,7 +127,7 @@ defmodule DpExchange.Schwab.ArgumentOrderTest do
       assert Schwab.get_price("AAPL") == {:error, {:missing_credentials, :schwab}}
 
       assert Schwab.get_price("BTC-USD", credentials: @creds) ==
-               {:error, {:not_an_equity_symbol, "BTC-USD"}}
+               {:refused, {:not_an_equity_symbol, "BTC-USD"}}
     end
 
     test "a range that is not a keyword list is refused, not raised on" do

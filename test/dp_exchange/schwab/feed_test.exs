@@ -141,7 +141,8 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-      assert details.reason =~ "no_streamer_info"
+      assert details.reason == :streamer_unreachable
+      assert details.message =~ "no_streamer_info"
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
@@ -156,7 +157,8 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-      assert details.reason =~ "missing_credentials"
+      assert details.reason == :streamer_unreachable
+      assert details.message =~ "missing_credentials"
     end
 
     test "a bootstrap that raises falls back to the poll with the reason, never a crash" do
@@ -172,7 +174,8 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-      assert details.reason =~ ":exception"
+      assert details.reason == :streamer_unreachable
+      assert details.message =~ ":exception"
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
@@ -187,8 +190,9 @@ defmodule DpExchange.Schwab.FeedTest do
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
-      assert details.reason =~ ":exit"
-      assert details.reason =~ "limiter_gone"
+      assert details.reason == :streamer_unreachable
+      assert details.message =~ ":exit"
+      assert details.message =~ "limiter_gone"
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
@@ -334,7 +338,11 @@ defmodule DpExchange.Schwab.FeedTest do
       link_socket_into_feed(feed, socket)
       Process.exit(socket, :kill)
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
+      assert_receive {:dp_exchange, :schwab,
+                      %Notice{kind: :link_down, details: %{reason: :route_crashed} = details}},
+                     5_000
+
+      assert is_binary(details.message)
       assert Process.alive?(feed)
 
       # Cleared immediately — not "eventually, once something else overwrites it" — the
@@ -1036,6 +1044,63 @@ defmodule DpExchange.Schwab.FeedTest do
       assert_receive {:dp_exchange, :schwab, %{kind: :link_down} = notice}, 5_000
       assert notice.severity == :warning
       assert notice.message =~ "did not answer a read"
+      # `details.reason` is an atom; the exit it caught is bounded text in `details.message`.
+      assert notice.details.reason == :poller_unresponsive
+      assert is_binary(notice.details.message)
+    end
+
+    test "the poll route's :link_down is closed by one :link_up on the first good poll" do
+      feed =
+        start_feed(
+          plug: fn conn ->
+            if String.contains?(conn.request_path, "userPreference") do
+              Plug.Conn.resp(conn, 401, "no")
+            else
+              Req.Test.json(conn, quote_body())
+            end
+          end,
+          retry_attempts: 0,
+          interval_ms: 50,
+          start_delay_ms: 0,
+          symbols: ["AAPL"]
+        )
+
+      :ok = Feed.subscribe(feed, ["AAPL"])
+      assert_receive {:dp_exchange, :schwab, %Types.Quote{symbol: "AAPL"}}, 5_000
+      :ok = Feed.subscribe_notices(feed, to: self())
+      refute :sys.get_state(feed).link_down_open
+
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
+      :sys.replace_state(feed, fn state -> %{state | poller: dead} end)
+
+      # One unanswered read: the `:link_down`. The real poller is still ticking, so its next
+      # good poll must close it. (No further read of `coverage/1` or `status/1` here: each
+      # would be unanswered again and open a new `:link_down`.)
+      assert Feed.coverage(feed) == %{}
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_down}}, 5_000
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_up, provider: :schwab}}, 5_000
+      refute :sys.get_state(feed).link_down_open
+
+      # Latched: a later good poll says nothing more.
+      tag = :sys.get_state(feed).poll_tag
+      send(feed, {:dp_exchange, :schwab, {:polled, tag, quote_for("AAPL")}})
+      _state = :sys.get_state(feed)
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
+    end
+
+    test "a Socket :link_up closes the open :link_down, so the poll clause does not repeat it" do
+      # Nothing subscribed, so no route is dialled: the latch is the only thing in play.
+      feed = start_feed(retry_attempts: 0)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :sys.replace_state(feed, fn state -> %{state | link_down_open: true} end)
+
+      send(feed, {:dp_exchange, :schwab, Notice.new(:link_up, :schwab)})
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :link_up}}, 5_000
+      refute :sys.get_state(feed).link_down_open
     end
 
     test "coverage_by_kind on the poll route reports only :quotes, never :order_book" do

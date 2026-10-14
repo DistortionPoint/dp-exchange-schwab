@@ -953,8 +953,10 @@ defmodule DpExchange.Schwab.Fake do
   def unsubscribe(symbols, _opts) do
     # Every element is judged, as the real feed judges it.
     with {:ok, symbols} <- checked_symbols(symbols) do
-      Process.put(@wanted_key, Enum.reject(wanted_symbols(), &(&1 in symbols)))
-      Process.put(__MODULE__, Enum.reject(subscribed(), &(&1 in symbols)))
+      # A set, so removing `m` symbols from `n` held is `n` lookups and not `n * m` list walks.
+      dropped = MapSet.new(symbols)
+      Process.put(@wanted_key, Enum.reject(wanted_symbols(), &MapSet.member?(dropped, &1)))
+      Process.put(__MODULE__, Enum.reject(subscribed(), &MapSet.member?(dropped, &1)))
       :ok
     end
   end
@@ -993,6 +995,7 @@ defmodule DpExchange.Schwab.Fake do
   can deliver appear there.
   """
   @spec wanted(keyword()) :: [String.t()]
+  @impl true
   def wanted(_opts \\ []), do: wanted_symbols()
 
   @doc """

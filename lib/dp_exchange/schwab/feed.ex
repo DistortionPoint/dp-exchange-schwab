@@ -688,6 +688,9 @@ defmodule DpExchange.Schwab.Feed do
       poller: nil,
       # The current poller's delivery tag — see `start_poller/1`.
       poll_tag: nil,
+      # A `:link_down` this feed sent itself (a crashed route, an unresponsive poller) that no
+      # `:link_up` has closed yet. Latched so the first good poll says so once.
+      link_down_open: false,
       route: nil,
       delivering: %{},
       # `symbol => MapSet.t(Core.Capabilities.data_kind())`, populated only from the
@@ -783,7 +786,8 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(:coverage, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply, poller_read(state, fn -> PollingFeed.coverage(poller) end, %{}), state}
+    {reply, state} = poller_read(state, fn -> PollingFeed.coverage(poller) end, %{})
+    {:reply, reply, state}
   end
 
   def handle_call(:coverage, _from, state) do
@@ -798,8 +802,10 @@ defmodule DpExchange.Schwab.Feed do
   # No `:candles` key is invented here; candles cannot arrive on this route at all.
   def handle_call(:coverage_by_kind, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply,
-     poller_read(state, fn -> %{quotes: PollingFeed.coverage(poller)} end, %{quotes: %{}}), state}
+    {reply, state} =
+      poller_read(state, fn -> %{quotes: PollingFeed.coverage(poller)} end, %{quotes: %{}})
+
+    {:reply, reply, state}
   end
 
   def handle_call(:coverage_by_kind, _from, state) do
@@ -815,12 +821,14 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_call(:status, _from, %{route: :poll, poller: poller} = state)
       when is_pid(poller) or is_atom(poller) do
-    {:reply,
-     poller_read(
-       state,
-       fn -> poller |> PollingFeed.status() |> Map.put(:route, :internal_poll) end,
-       unresponsive_status(state)
-     ), state}
+    {reply, state} =
+      poller_read(
+        state,
+        fn -> poller |> PollingFeed.status() |> Map.put(:route, :internal_poll) end,
+        unresponsive_status(state)
+      )
+
+    {:reply, reply, state}
   end
 
   def handle_call(:status, _from, state) do
@@ -999,6 +1007,13 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, %{state | delivering: %{}, kinds: %{}}}
   end
 
+  # The Socket's `:link_up` closes whatever `:link_down` this feed had open, so the poll
+  # clause does not announce a second recovery for the same outage.
+  def handle_info({:dp_exchange, :schwab, %Notice{kind: :link_up} = notice}, state) do
+    fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
+    {:noreply, %{state | link_down_open: false}}
+  end
+
   def handle_info({:dp_exchange, :schwab, %Notice{} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
     {:noreply, state}
@@ -1037,7 +1052,7 @@ defmodule DpExchange.Schwab.Feed do
         {:dp_exchange, :schwab, {:polled, tag, value}},
         %{poll_tag: tag, route: :poll} = state
       ),
-      do: handle_info({:dp_exchange, :schwab, value}, state)
+      do: handle_info({:dp_exchange, :schwab, value}, maybe_poll_link_up(state, value))
 
   def handle_info({:dp_exchange, :schwab, {:polled, _stale_tag, _value}}, state),
     do: {:noreply, state}
@@ -1510,7 +1525,11 @@ defmodule DpExchange.Schwab.Feed do
     notify(
       state,
       Notice.new(:degraded, :schwab,
-        details: %{reason: Bound.reason(reason), fallback: :internal_poll}
+        details: %{
+          reason: :streamer_unreachable,
+          message: Bound.reason(reason),
+          fallback: :internal_poll
+        }
       )
     )
 
@@ -1552,9 +1571,13 @@ defmodule DpExchange.Schwab.Feed do
       Notice.new(:link_down, :schwab,
         severity: :warning,
         message: "route crashed (#{Bound.reason(reason)}) — #{redial_text(delay)}",
-        details: %{reason: Bound.reason(reason)}
+        details: %{reason: :route_crashed, message: Bound.reason(reason)}
       )
     )
+
+    # A `:link_down` is closed by a `:link_up`: from the Socket when the redial reaches the
+    # Streamer, from `handle_info/2`'s poll clause on the first good poll otherwise.
+    state = %{state | link_down_open: true}
 
     # Tries the Streamer first and falls back to the poll on failure, exactly like a
     # first-ever bootstrap — a poller crash is not assumed to mean "restart the same
@@ -2076,11 +2099,10 @@ defmodule DpExchange.Schwab.Feed do
   # The notice carries what an empty map cannot: **"we could not ask" is not "nothing
   # arrived"**, and only the notice distinguishes them.
   defp poller_read(state, read, fallback) do
-    read.()
+    {read.(), state}
   catch
     :exit, reason ->
-      notify_poller_unresponsive(state, reason)
-      fallback
+      {fallback, notify_poller_unresponsive(state, reason)}
   end
 
   # `status/1`'s fallback needs a shape, and every field in it is chosen to avoid claiming
@@ -2102,6 +2124,10 @@ defmodule DpExchange.Schwab.Feed do
   # The counterpart to this module's crashed-link notice: that one reports a poller that
   # died, this one a poller that is alive and did not answer. Both would otherwise be the
   # same silent gap in `coverage/1` with nothing explaining it.
+  #
+  # **It is closed by a `:link_up`.** `Core.Notice` describes the two as a pair, and a consumer
+  # that waits for recovery waited forever: the poll route never said it was back. The latch
+  # (`link_down_open`) is what `maybe_poll_link_up/2` reads on the first good poll.
   defp notify_poller_unresponsive(state, reason) do
     notice =
       Notice.new(:link_down, :schwab,
@@ -2109,11 +2135,21 @@ defmodule DpExchange.Schwab.Feed do
         message:
           "poll did not answer a read (#{Bound.reason(reason)}) — reporting no coverage for " <>
             "this read only; the feed is still running",
-        details: %{reason: Bound.reason(reason)}
+        details: %{reason: :poller_unresponsive, message: Bound.reason(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
+    %{state | link_down_open: true}
   end
+
+  # The first good poll after a `:link_down` this feed sent itself says so, once. A poll that
+  # delivered a quote is the evidence; a refusal or a notice is not.
+  defp maybe_poll_link_up(%{link_down_open: true} = state, %Quote{}) do
+    notify(state, Notice.new(:link_up, :schwab))
+    %{state | link_down_open: false}
+  end
+
+  defp maybe_poll_link_up(state, _value), do: state
 
   # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
   # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
