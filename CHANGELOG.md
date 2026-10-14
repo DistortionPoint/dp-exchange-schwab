@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.130] - 2026-10-14
+
 Tick AD: facade consistency (design `2026-10-14_design-facade-consistency`) and performance.
 
 ### Changed — BREAKING (returned reasons and notice details)
