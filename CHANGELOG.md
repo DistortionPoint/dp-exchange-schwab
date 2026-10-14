@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.129] - 2026-10-14
+
 Tick AC: decoder robustness against hostile or malformed venue payloads.
 
 - **A Streamer response code of `0.0` read as success.** `StreamerProtocol.succeeded?/1` tested
