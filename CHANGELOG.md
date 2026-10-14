@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.128] - 2026-10-14
+
 - **A feed could be left with no route.** If the fallback poller crashed a second time within a
   minute while a Streamer upgrade was in flight, its redial was delayed; the redial found the
   upgrade still running and did nothing, and when the upgrade then failed the feed stayed on no
