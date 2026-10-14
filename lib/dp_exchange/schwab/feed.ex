@@ -1004,8 +1004,18 @@ defmodule DpExchange.Schwab.Feed do
     {:noreply, state}
   end
 
-  def handle_info({:dp_exchange, :schwab, {:refused, _symbol, _reason}} = message, state) do
-    {:noreply, deliver(state, message)}
+  # **A refusal for a symbol no longer wanted is dropped, like a payload for one.** The poll
+  # cycle that produced it started before the consumer unsubscribed: cycle fetching [A, B] is
+  # in flight, the consumer unsubscribes B, the cycle completes and refuses B, and the
+  # subscribers who had just stopped asking were told the venue refuses a symbol they no
+  # longer hold. Payloads already had this guard; refusals (a tuple, not a `%{symbol: _}`
+  # value) slipped past it.
+  def handle_info({:dp_exchange, :schwab, {:refused, symbol, _reason}} = message, state) do
+    if MapSet.member?(state.wanted, symbol) do
+      {:noreply, deliver(state, message)}
+    else
+      {:noreply, state}
+    end
   end
 
   # `record_delivery/2` runs whether or not the payload reached anybody. `coverage/1`
@@ -1458,11 +1468,30 @@ defmodule DpExchange.Schwab.Feed do
         state
 
       other ->
-        stay_on_poll(state, failure_reason(other))
+        upgrade_failed(state, failure_reason(other))
     end
   end
 
-  defp complete_upgrade(state, other), do: stay_on_poll(state, failure_reason(other))
+  defp complete_upgrade(state, other), do: upgrade_failed(state, failure_reason(other))
+
+  # **An upgrade that fails after the poll it was replacing is gone must still leave a
+  # route.** Interleaving: the feed is on `:poll` and a tick starts an upgrade bootstrap
+  # (`upgrade?: true`, nobody waiting). The poller then crashes for the SECOND time inside
+  # `@crash_run_ms`, so `isolate_crashed_route/2` clears `route` and, because the delay is
+  # not 0, only schedules a redial instead of joining the in-flight bootstrap (joining is
+  # what strips `upgrade?`). The redial timer fires while the bootstrap is still running,
+  # and `redial_after_crash/1` correctly does nothing. The bootstrap then fails and
+  # `stay_on_poll/2` "stayed on" a poll that no longer existed: `route` nil, no poller, no
+  # timer, and `maybe_upgrade/2` only acts from `:poll`, so wanted symbols delivered nothing
+  # until some consumer happened to call `subscribe/2` again. With no route the failure is an
+  # ordinary bootstrap failure, and takes the ordinary path: fall back to the poll.
+  defp upgrade_failed(%{route: nil} = state, reason) do
+    if MapSet.size(state.wanted) == 0,
+      do: stay_on_poll(state, reason),
+      else: fall_back_to_poll(state, reason)
+  end
+
+  defp upgrade_failed(state, reason), do: stay_on_poll(state, reason)
 
   # Still unreachable. The poll that is already running keeps running. No second poller is
   # started, and no second `:degraded` notice is raised, because the one from the first

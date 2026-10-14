@@ -31,6 +31,16 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **A feed could be left with no route.** If the fallback poller crashed a second time within a
+  minute while a Streamer upgrade was in flight, its redial was delayed; the redial found the
+  upgrade still running and did nothing, and when the upgrade then failed the feed stayed on no
+  route, delivering nothing until a consumer subscribed again. A failed upgrade with no route now
+  falls back to the poll, or opens nothing when nothing is wanted.
+- **A poll refusal for a symbol unsubscribed while the cycle was in flight was still delivered.**
+  It is now dropped, as a late quote for that symbol already was.
+- **Docs:** `{:error, :feed_timeout}` is documented as "no answer", not "not applied": the request
+  is still applied, and the streaming calls are idempotent.
+
 ## [0.2.127] - 2026-10-13
 
 - **`Orders.build/2` raised for a finite quantity outside the float range.** `1E400` or `1E-400`

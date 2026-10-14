@@ -1140,6 +1140,11 @@ when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an em
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
 
+**`:feed_timeout` means "no answer", not "not applied".** The request is already in the
+feed's mailbox and is applied when the feed reaches it. Retrying is safe because each of
+these calls is idempotent (add, remove or replace a symbol set, applied in order), and
+`wanted/1` reads back what the feed holds once it answers.
+
 **A symbol set must be a list.** Anything else answers `{:error, {:invalid_symbols, value}}`
 from all three, as a list holding a symbol this venue refuses already did, and the feed is
 left as it was. It used to raise inside the feed, which restarted from its boot-time
