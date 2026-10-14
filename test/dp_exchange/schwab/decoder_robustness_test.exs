@@ -32,7 +32,7 @@ defmodule DpExchange.Schwab.DecoderRobustnessTest do
   @creds %{access_token: "at-1"}
   @observed ~U[2026-08-28 14:53:02Z]
 
-  defp responding(body, status \\ 200) do
+  defp responding(body, status) do
     fn conn -> Req.Test.json(%{conn | status: status}, body) end
   end
 
