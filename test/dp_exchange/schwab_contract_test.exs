@@ -8,6 +8,10 @@ defmodule DpExchange.SchwabContractTest do
     fake: DpExchange.Schwab.Fake,
     symbol_format: DpExchange.Schwab.SymbolFormat,
     sample_pairs: ~w(AAPL MSFT GOOGL),
+    # Conformance group 41 (family reasons, 2026-10-14): a well-formed symbol the fake does
+    # not list, and a credentials map whose first value carries a trailing newline.
+    unlisted_symbol: "NOPEQ",
+    padded_credentials: %{access_token: "test-token\n"},
     # `lib/vendor/` is third-party code, a patched websockex fork (see
     # `DpExchange.Schwab.Vendor.WebSockex`). The scanning assertions are written for this
     # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.

@@ -31,6 +31,13 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- The conformance suite runs Core's group 41 (family reasons) with `unlisted_symbol:` and
+  `padded_credentials:`, so an unlisted symbol answering anything but `{:refused, :not_listed}`
+  or a padded credential answering anything but `{:error, {:invalid_credentials, venue}}` fails
+  this package's own suite. `dp_exchange_core` 0.3.94.
+
 ## [0.2.130] - 2026-10-14
 
 Tick AD: facade consistency (design `2026-10-14_design-facade-consistency`) and performance.
