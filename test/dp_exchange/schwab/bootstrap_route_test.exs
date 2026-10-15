@@ -163,6 +163,41 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
       assert Process.alive?(feed)
     end
 
+    test "settling a bootstrap cancels every timer it armed, leaving nothing in the mailbox" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:bootstrapping, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          plug: plug,
+          limiter: permissive_limiter(),
+          route_bootstrap_timeout_ms: 60_000,
+          bootstrap_reply_ms: 60_000
+        )
+
+      spawn(fn -> send(test_pid, {:first, Feed.subscribe(feed, ["AAPL"])}) end)
+      assert_receive {:bootstrapping, _task_pid}, 5_000
+      spawn(fn -> send(test_pid, {:second, Feed.subscribe(feed, ["MSFT"])}) end)
+      wait_for_waiting(feed, 2)
+
+      %{ref: ref, timers: timers} = :sys.get_state(feed).route_bootstrap
+      # The timeout timer plus one reply deadline per joined caller.
+      assert length(timers) == 3
+      assert Enum.all?(timers, &is_integer(Process.read_timer(&1)))
+
+      send(feed, {:route_bootstrap_timeout, ref})
+      assert_receive {:first, :ok}, 5_000
+      assert_receive {:second, :ok}, 5_000
+
+      assert :sys.get_state(feed).route_bootstrap == nil
+      assert Enum.all?(timers, &(Process.read_timer(&1) == false))
+    end
+
     test "a SECOND subscriber parked on a wedged bootstrap is answered too" do
       # The one that made this the worst wedge in the package: the waiting list is what every
       # later caller joins, so stranding it strands all of them, not just the first.

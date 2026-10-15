@@ -1,0 +1,37 @@
+Cover compiling modules ...
+Running ExUnit with seed: 540952, max_cases: 20
+Excluding tags: [:tier2]
+
+..........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+Finished in 20.2 seconds (20.0s async, 0.1s sync)
+1210 tests, 0 failures
+
+Generating cover results ...
+
+Percentage | Module
+-----------|--------------------------
+    33.33% | DpExchange.Schwab.FeedCase.PermissiveLimiter
+    98.10% | DpExchange.Schwab.Rest
+    98.63% | DpExchange.Schwab.Socket
+    98.67% | DpExchange.Schwab.Feed
+    99.67% | DpExchange.Schwab.Fake
+   100.00% | DpExchange.Schwab
+   100.00% | DpExchange.Schwab.Auth
+   100.00% | DpExchange.Schwab.Bound
+   100.00% | DpExchange.Schwab.Capabilities
+   100.00% | DpExchange.Schwab.Credentials
+   100.00% | DpExchange.Schwab.FeedCase
+   100.00% | DpExchange.Schwab.OrderLimit
+   100.00% | DpExchange.Schwab.Orders
+   100.00% | DpExchange.Schwab.StreamerDecode
+   100.00% | DpExchange.Schwab.StreamerFields
+   100.00% | DpExchange.Schwab.StreamerInfo
+   100.00% | DpExchange.Schwab.StreamerProtocol
+   100.00% | DpExchange.Schwab.Supervisor
+   100.00% | DpExchange.Schwab.SymbolFormat
+   100.00% | Inspect.DpExchange.Schwab.Credentials
+   100.00% | Inspect.DpExchange.Schwab.StreamerInfo
+-----------|--------------------------
+    98.96% | Total
+
+Generated HTML coverage results in "cover" directory

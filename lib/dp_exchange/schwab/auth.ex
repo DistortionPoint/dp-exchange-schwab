@@ -267,6 +267,9 @@ defmodule DpExchange.Schwab.Auth do
     an access token but no replacement refresh token. Treated as a failure rather than a
     success, because the old token is already spent and reporting success would hand back
     a credential guaranteed to die at the next refresh.
+  - `{:error, :unexpected_response_shape}` — a `2xx` JSON body with no `access_token`, or one
+    that is blank, padded or contains control characters. Nothing is stored or signed with it;
+    the refresh token sent is spent, so treat it like any failed refresh and do not retry.
   - `{:error, {:exchange_error, :schwab, message}}` — a 5xx, or a 4xx that is not a
     rejection of the credential. The grant is probably intact; the caller may try again
     with the credential it still holds.
@@ -372,8 +375,24 @@ defmodule DpExchange.Schwab.Auth do
   # The venue's own `expires_in` is used rather than a constant of ours. The
   # documentation says 1800 seconds; if that ever changes, the response is right and a
   # hardcoded 30 minutes would be silently wrong in the direction that fails.
+  #
+  # **A usable access token is part of a token response.** `is_binary/1` alone accepted `""`
+  # and `"   "`, so a `200` carrying a good rotated refresh token and a blank access token
+  # was stored: the one-time refresh token was spent and the credential persisted as if the
+  # refresh had worked, then every request failed locally in `headers/2`. The same
+  # `check_token/1` every other credential path uses judges it here; a token that fails it
+  # is a malformed response, not a grant to keep.
   defp merge_tokens(credentials, %{"access_token" => access} = response, opts)
        when is_binary(access) do
+    case check_token(access) do
+      {:ok, access} -> merge_checked_tokens(credentials, access, response, opts)
+      {:error, _unusable} -> {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
+
+  defp merge_checked_tokens(credentials, access, response, opts) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
     renewed =
@@ -387,8 +406,6 @@ defmodule DpExchange.Schwab.Auth do
     with {:ok, renewed} <- renewed,
          do: {:ok, credentials |> forget_expiry() |> Map.merge(renewed)}
   end
-
-  defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
 
   # A `Credentials` struct keeps its key and loses the value; deleting a struct key would
   # leave a map that is no longer the struct.

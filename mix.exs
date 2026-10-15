@@ -80,7 +80,13 @@ defmodule DpExchangeSchwab.MixProject do
       # before they reach the behaviour under test, and skipping. Green, and proving nothing.
       # That is the exact false pass the option was added to remove, so the floor is what
       # keeps it removed. Resolved and compiled against before this line was written.
-      {:dp_exchange_core, "~> 0.3.74"},
+      #
+      # `0.3.95` (tick AE, 2026-10-15): this package marks `wanted/1` `@impl true`, a callback
+      # only from Core 0.3.93 (older Core warns, and CI compiles with --warnings-as-errors); its
+      # contract test opts into group 41 (`unlisted_symbol:`, `padded_credentials:`, Core 0.3.94),
+      # which an older Core ignores - a silent pass; and 0.3.95 makes groups 7, 37 and 39 fail
+      # instead of passing having examined nothing. Resolved and compiled against in this change.
+      {:dp_exchange_core, "~> 0.3.95"},
 
       # Core ships no venue-specific dependency: a venue that speaks WebSocket ships what
       # it needs to speak it.

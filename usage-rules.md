@@ -17,7 +17,7 @@ the top and carries its `legs`. An order with no `orderId` is refused rather tha
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.74`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.95`.
 
 ```elixir
 # before
@@ -328,6 +328,9 @@ one. So:
 
 - **Persist the returned credential before using it.** Refreshing and then crashing before
   storing costs the grant, and only a person at a browser can restore it.
+- **A `200` whose access token is missing, blank or unsendable is `{:error,
+  :unexpected_response_shape}`**, never a credential to store: the rotated refresh token in
+  that body is not returned to you either, so treat it as a failed refresh.
 - **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
   token may already have been spent; try again with the credential you still hold, not the
   one you just sent.

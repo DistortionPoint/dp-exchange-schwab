@@ -336,6 +336,15 @@ defmodule DpExchange.Schwab.AuthTest do
                )
     end
 
+    test "a success with a blank or unsendable access token is refused despite a good refresh" do
+      for access <- ["", "   ", " at-2", "at\n2"] do
+        body = %{"access_token" => access, "refresh_token" => "rt-2", "expires_in" => 1_800}
+
+        assert Auth.refresh(@creds, plug: responding(body), retry_attempts: 0) ==
+                 {:error, :unexpected_response_shape}
+      end
+    end
+
     test "missing pieces refuse locally, and nothing is sent" do
       # A plug that would crash if called proves no request went out.
       exploding = fn _conn -> raise "a request was sent when it should not have been" end

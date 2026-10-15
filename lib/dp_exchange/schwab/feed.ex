@@ -1142,7 +1142,7 @@ defmodule DpExchange.Schwab.Feed do
     Process.demonitor(ref, [:flush])
     bootstrap = state.route_bootstrap
     previous_route = state.route
-    state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    state = complete_upgrade(clear_bootstrap(state), result)
     state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
@@ -1152,7 +1152,7 @@ defmodule DpExchange.Schwab.Feed do
 
     bootstrap = state.route_bootstrap
     previous_route = state.route
-    state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
+    state = complete_route_bootstrap(clear_bootstrap(state), result)
     applied = apply_symbols(state)
 
     # Every caller parked on this one bootstrap gets the same answer. Replying to a caller
@@ -1199,7 +1199,7 @@ defmodule DpExchange.Schwab.Feed do
          result
        ) do
     previous_route = state.route
-    state = complete_upgrade(%{state | route_bootstrap: nil}, result)
+    state = complete_upgrade(clear_bootstrap(state), result)
     state = discard_unwanted_route(state, previous_route)
     {:noreply, retry_if_credentials_changed(state, bootstrap)}
   end
@@ -1209,7 +1209,7 @@ defmodule DpExchange.Schwab.Feed do
          result
        ) do
     previous_route = state.route
-    state = complete_route_bootstrap(%{state | route_bootstrap: nil}, result)
+    state = complete_route_bootstrap(clear_bootstrap(state), result)
     applied = apply_symbols(state)
 
     Enum.each(waiting, &GenServer.reply(&1, applied))
@@ -1321,8 +1321,8 @@ defmodule DpExchange.Schwab.Feed do
   # leave this feed with no route and nothing to start one. See the moduledoc's "The
   # fallback is not permanent".
   defp start_route_bootstrap(%{route_bootstrap: %{waiting: waiting} = bootstrap} = state, more) do
-    arm_bootstrap_reply(state, bootstrap.ref, more)
-    joined = %{bootstrap | waiting: waiting ++ more} |> Map.delete(:upgrade?)
+    timers = arm_bootstrap_reply(state, bootstrap.ref, more) ++ bootstrap.timers
+    joined = %{bootstrap | waiting: waiting ++ more, timers: timers} |> Map.delete(:upgrade?)
     %{state | route_bootstrap: joined}
   end
 
@@ -1332,13 +1332,14 @@ defmodule DpExchange.Schwab.Feed do
 
     task = Task.async(fn -> fetch_user_preference(credentials, request_opts) end)
 
-    Process.send_after(
-      self(),
-      {:route_bootstrap_timeout, task.ref},
-      state.route_bootstrap_timeout_ms
-    )
+    timeout_timer =
+      Process.send_after(
+        self(),
+        {:route_bootstrap_timeout, task.ref},
+        state.route_bootstrap_timeout_ms
+      )
 
-    arm_bootstrap_reply(state, task.ref, waiting)
+    timers = [timeout_timer | arm_bootstrap_reply(state, task.ref, waiting)]
 
     %{
       state
@@ -1346,9 +1347,32 @@ defmodule DpExchange.Schwab.Feed do
           ref: task.ref,
           pid: task.pid,
           waiting: waiting,
+          timers: timers,
           generation: state.credentials_generation
         }
     }
+  end
+
+  # Settles a bootstrap's bookkeeping: cancels every timer it armed (the timeout, and one
+  # reply deadline per joined caller) and flushes any that already fired, so no stale
+  # `:route_bootstrap_timeout` / `:bootstrap_reply_due` message outlives the bootstrap in the
+  # mailbox. The `ref` check in those clauses stays as defence, but a settled bootstrap no
+  # longer leaves anything behind for it to catch.
+  defp clear_bootstrap(%{route_bootstrap: %{ref: ref, timers: timers}} = state) do
+    Enum.each(timers, &Process.cancel_timer/1)
+    flush_bootstrap_timer_messages(ref)
+    %{state | route_bootstrap: nil}
+  end
+
+  defp clear_bootstrap(state), do: %{state | route_bootstrap: nil}
+
+  defp flush_bootstrap_timer_messages(ref) do
+    receive do
+      {:route_bootstrap_timeout, ^ref} -> flush_bootstrap_timer_messages(ref)
+      {:bootstrap_reply_due, ^ref} -> flush_bootstrap_timer_messages(ref)
+    after
+      0 -> :ok
+    end
   end
 
   # A bootstrap that started under older credentials and settled on the poll route would
@@ -1364,11 +1388,10 @@ defmodule DpExchange.Schwab.Feed do
 
   # Armed once per caller that joins, so the last to arrive is covered too. Nothing to arm
   # for an upgrade, which nobody waits on.
-  defp arm_bootstrap_reply(_state, _ref, []), do: :ok
+  defp arm_bootstrap_reply(_state, _ref, []), do: []
 
   defp arm_bootstrap_reply(state, ref, _joining) do
-    Process.send_after(self(), {:bootstrap_reply_due, ref}, state.bootstrap_reply_ms)
-    :ok
+    [Process.send_after(self(), {:bootstrap_reply_due, ref}, state.bootstrap_reply_ms)]
   end
 
   # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
@@ -1624,8 +1647,15 @@ defmodule DpExchange.Schwab.Feed do
 
   defp cancel_redial(state) do
     case Map.pop(state, :redial_timer) do
-      {{_ref, timer}, rest} ->
+      {{ref, timer}, rest} ->
         Process.cancel_timer(timer)
+
+        receive do
+          {:redial_after_crash, ^ref} -> :ok
+        after
+          0 -> :ok
+        end
+
         rest
 
       {nil, rest} ->

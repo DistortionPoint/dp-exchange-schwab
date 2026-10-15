@@ -31,6 +31,25 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+- **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`
+  (0.3.93), the conformance group 41 options this package's contract test passes (0.3.94,
+  ignored by an older Core: a silent pass) and the groups that no longer pass vacuously
+  (0.3.95).
+
+Tick AE: stability and documentation accuracy.
+
+### Fixed
+
+- **`Auth.refresh/2` refuses a token response whose `access_token` is blank or unsendable.**
+  `merge_tokens/3` accepted `""` or `"  "` (any binary) beside a good rotated refresh token and
+  returned it as the renewed credential. It now judges the access token with `check_token/1`
+  and answers `{:error, :unexpected_response_shape}`, the tag a missing one already had.
+- **`Feed` cancels a route bootstrap's timers when it settles.** The `:route_bootstrap_timeout`
+  and per-caller `:bootstrap_reply_due` timers were only ref-checked, so a settled bootstrap
+  left up to 95 s of stale messages to arrive later. The timer refs are kept in the bootstrap,
+  cancelled on every settle path and any already-fired message is flushed; the ref check stays
+  as defence. The crash-redial timer's message is flushed on cancel the same way.
+
 ## [0.2.131] - 2026-10-14
 
 ### Added
