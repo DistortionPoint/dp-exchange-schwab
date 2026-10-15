@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.133] - 2026-10-15
+
 ### Fixed
 
 - **An incoherent or duplicated candle is refused (tick AF).** A REST or streamed bar whose
