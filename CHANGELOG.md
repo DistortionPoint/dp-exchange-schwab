@@ -31,6 +31,24 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An incoherent or duplicated candle is refused (tick AF).** A REST or streamed bar whose
+  high is below its low, open or close (`Candle.coherent?/1`) now answers
+  `{:error, :incoherent_candle}` instead of a plausible bar that corrupts any range built on
+  it (a dropped streamed bar is reported as unreadable). A REST series holding two bars at
+  the same instant (or two daily bars on one session date) answers
+  `{:error, :unexpected_response_shape}` rather than counting a session twice. Out-of-order
+  rows were already sorted.
+- **`Socket` cancels its login-deadline and liveness timers (tick AF).** Both were only
+  ref-checked: the `:login_deadline` timer stayed alive after the LOGIN response arrived
+  (and after a disconnect or stop) until it fired. The timer refs are now kept
+  (`login_timer`, `liveness_timer`) and cancelled on LOGIN success or refusal, on the
+  deadline close, on disconnect, on reconnect and in `terminate/2`; the ref check stays.
+  Audit of every other `Process.send_after` in `lib/dp_exchange`: `Feed`'s `:resubscribe`
+  chain lives and dies with the Feed process, and its bootstrap and redial timers were
+  already kept and cancelled. Tests assert no live login timer remains after LOGIN.
+
 ## [0.2.132] - 2026-10-15
 
 - **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`

@@ -855,7 +855,7 @@ defmodule DpExchange.Schwab.Rest do
       # vendor's document does not state an order for `candles`, and a series a consumer
       # reads out of order still gives plausible returns and indicators, just wrong ones.
       # The other venues in this family sort the same way.
-      {:ok, built} -> {:ok, Enum.sort_by(built, & &1.opened_at, DateTime)}
+      {:ok, built} -> ordered_series(built)
       error -> error
     end
   end
@@ -864,6 +864,17 @@ defmodule DpExchange.Schwab.Rest do
   # flag and is carried as a refusal, not as zero candles — a caller must be able to tell
   # "no data" from "no such symbol". See the first clauses.
   defp candles(_other, _native, _timeframe), do: {:error, :unexpected_response_shape}
+
+  # Oldest first, and one bar per instant. Two rows stamped the same instant (or two daily
+  # rows that fall on the same session date) are a venue fault: keeping both hands a
+  # consumer a series that counts one session twice, and keeping one is a guess about which.
+  defp ordered_series(built) do
+    sorted = Enum.sort_by(built, & &1.opened_at, DateTime)
+
+    if length(Enum.uniq_by(sorted, & &1.opened_at)) == length(sorted),
+      do: {:ok, sorted},
+      else: {:error, :unexpected_response_shape}
+  end
 
   # A bar is a `Core.Types.Candle`, not a `Quote`.
   #
@@ -888,18 +899,21 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, high} <- required_price(raw_high, :high),
          {:ok, low} <- required_price(raw_low, :low),
          {:ok, close} <- required_price(raw_close, :close) do
-      {:ok,
-       %Candle{
-         symbol: symbol,
-         timeframe: timeframe,
-         opened_at: timestamp,
-         open: open,
-         high: high,
-         low: low,
-         close: close,
-         volume: volume_decimal(row["volume"]),
-         provider: :schwab
-       }}
+      bar = %Candle{
+        symbol: symbol,
+        timeframe: timeframe,
+        opened_at: timestamp,
+        open: open,
+        high: high,
+        low: low,
+        close: close,
+        volume: volume_decimal(row["volume"]),
+        provider: :schwab
+      }
+
+      # A high below the low or below the open/close is malformed at the venue and would
+      # silently corrupt any range or volatility built on the series. Refused, not repaired.
+      if Candle.coherent?(bar), do: {:ok, bar}, else: {:error, :incoherent_candle}
     end
   end
 

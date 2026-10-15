@@ -283,6 +283,11 @@ defmodule DpExchange.Schwab.Socket do
       liveness: nil,
       # The pending LOGIN's deadline, cleared by any LOGIN response. See `@login_timeout_ms`.
       login_deadline: nil,
+      # The timer behind `login_deadline` and the one behind `liveness`, kept so they are
+      # CANCELLED when their subject goes away (the ref check alone only ignores a stale
+      # message; it leaves the timer alive until it fires).
+      login_timer: nil,
+      liveness_timer: nil,
       # The last book this socket published per symbol, because `LEVELONE_*` is Change
       # delivery — see `merge_top_of_book/3`. Bounded by the symbols subscribed on THIS
       # connection, and dropped wholesale on reconnect.
@@ -510,13 +515,20 @@ defmodule DpExchange.Schwab.Socket do
     # ignoring every command.
     send(self(), :login)
 
+    state = cancel_timers(state)
     liveness = make_ref()
-    schedule_liveness(liveness)
+    timer = schedule_liveness(liveness)
     now = now_ms()
 
     # `connected_at` is what `handle_disconnect/2` measures the session's life against. A
     # `Map.merge/2`, not `%{state | ...}`, because the key is new to a state built before it.
-    {:ok, Map.merge(state, %{last_heard_at: now, liveness: liveness, connected_at: now})}
+    {:ok,
+     Map.merge(state, %{
+       last_heard_at: now,
+       liveness: liveness,
+       liveness_timer: timer,
+       connected_at: now
+     })}
   end
 
   @impl true
@@ -524,11 +536,17 @@ defmodule DpExchange.Schwab.Socket do
     login = StreamerProtocol.login(state.info, state.credentials.access_token, state.request_id)
     frame = Jason.encode!(StreamerProtocol.envelope([login]))
 
+    # A LOGIN re-sent on the same state replaces the earlier deadline; cancel its timer.
+    state = cancel_login_timer(state)
     deadline = make_ref()
-    Process.send_after(self(), {:login_deadline, deadline}, @login_timeout_ms)
+    timer = Process.send_after(self(), {:login_deadline, deadline}, @login_timeout_ms)
 
     {:reply, {:text, frame},
-     Map.merge(state, %{request_id: state.request_id + 1, login_deadline: deadline})}
+     Map.merge(state, %{
+       request_id: state.request_id + 1,
+       login_deadline: deadline,
+       login_timer: timer
+     })}
   end
 
   # See `@login_timeout_ms`. Any LOGIN response, accepted or refused, clears the deadline,
@@ -546,7 +564,7 @@ defmodule DpExchange.Schwab.Socket do
       )
     )
 
-    {:close, %{state | login_deadline: nil}}
+    {:close, state |> cancel_login_timer() |> Map.put(:login_deadline, nil)}
   end
 
   # See the moduledoc's "A dead connection is found by pinging it". A check whose ref is not
@@ -565,10 +583,10 @@ defmodule DpExchange.Schwab.Socket do
         )
       )
 
-      {:close, %{state | liveness: nil}}
+      {:close, state |> cancel_liveness_timer() |> Map.put(:liveness, nil)}
     else
-      schedule_liveness(liveness)
-      {:reply, :ping, state}
+      timer = schedule_liveness(liveness)
+      {:reply, :ping, Map.put(state, :liveness_timer, timer)}
     end
   end
 
@@ -577,8 +595,28 @@ defmodule DpExchange.Schwab.Socket do
   @impl true
   def handle_pong(_frame, state), do: {:ok, %{state | last_heard_at: now_ms()}}
 
+  @impl true
+  def terminate(_reason, state) do
+    cancel_timers(state)
+    :ok
+  end
+
   defp schedule_liveness(liveness),
     do: Process.send_after(self(), {:liveness, liveness}, @ping_every_ms)
+
+  defp cancel_timers(state), do: state |> cancel_login_timer() |> cancel_liveness_timer()
+
+  defp cancel_login_timer(state), do: cancel_timer(state, :login_timer)
+  defp cancel_liveness_timer(state), do: cancel_timer(state, :liveness_timer)
+
+  defp cancel_timer(state, key) do
+    case Map.get(state, key) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _none -> :ok
+    end
+
+    Map.put(state, key, nil)
+  end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 
@@ -648,6 +686,7 @@ defmodule DpExchange.Schwab.Socket do
     # the dead one. Cleared, no stale ref matches any clause but the ignoring catch-all.
     {:reconnect,
      state
+     |> cancel_timers()
      |> Map.merge(%{
        logged_in?: false,
        last_top: %{},
@@ -946,7 +985,7 @@ defmodule DpExchange.Schwab.Socket do
 
   defp handle_response(%{"service" => "ADMIN", "command" => "LOGIN"} = response, state) do
     # Answered, whatever the answer — see `@login_timeout_ms`.
-    state = Map.put(state, :login_deadline, nil)
+    state = state |> cancel_login_timer() |> Map.put(:login_deadline, nil)
 
     if StreamerProtocol.succeeded?(response) do
       notify(state, Notice.new(:link_up, :schwab))

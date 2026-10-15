@@ -266,18 +266,20 @@ defmodule DpExchange.Schwab.StreamerDecode do
          {:ok, high} <- required_price(Map.get(fields, :high), :high),
          {:ok, low} <- required_price(Map.get(fields, :low), :low),
          {:ok, close} <- required_price(Map.get(fields, :close), :close) do
-      {:ok,
-       %Candle{
-         symbol: symbol,
-         timeframe: timeframe,
-         opened_at: opened_at,
-         open: open,
-         high: high,
-         low: low,
-         close: close,
-         volume: volume_decimal(Map.get(fields, :volume)),
-         provider: :schwab
-       }}
+      bar = %Candle{
+        symbol: symbol,
+        timeframe: timeframe,
+        opened_at: opened_at,
+        open: open,
+        high: high,
+        low: low,
+        close: close,
+        volume: volume_decimal(Map.get(fields, :volume)),
+        provider: :schwab
+      }
+
+      # As `Rest`'s copy: an incoherent bar (high below low, open or close) is refused.
+      if Candle.coherent?(bar), do: {:ok, bar}, else: {:error, :incoherent_candle}
     end
   end
 

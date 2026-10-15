@@ -203,6 +203,42 @@ defmodule DpExchange.Schwab.SocketTest do
       refute_received {:dp_exchange, :schwab, %Notice{details: %{reason: :login_unanswered}}}
     end
 
+    test "no live login timer remains after the LOGIN is answered, either way" do
+      for code <- [0, 3] do
+        sent = logging_in()
+        timer = sent.login_timer
+        assert is_reference(timer)
+        assert is_integer(Process.read_timer(timer))
+
+        {_action, answered} = Socket.handle_frame(login_answer(code), sent)
+
+        assert answered.login_timer == nil
+        assert Process.read_timer(timer) == false
+      end
+    end
+
+    test "a reconnect, a close at the deadline and terminate cancel the timers too" do
+      sent = logging_in()
+      login_timer = sent.login_timer
+      liveness_timer = Process.send_after(self(), :never_read, 600_000)
+      armed = Map.put(sent, :liveness_timer, liveness_timer)
+
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, armed)
+      assert dropped.login_timer == nil and dropped.liveness_timer == nil
+      assert Process.read_timer(login_timer) == false
+      assert Process.read_timer(liveness_timer) == false
+
+      second = logging_in()
+      deadline = second.login_deadline
+      assert {:close, closed} = Socket.handle_info({:login_deadline, deadline}, second)
+      assert closed.login_timer == nil
+      assert Process.read_timer(second.login_timer) == false
+
+      third = logging_in()
+      assert :ok = Socket.terminate(:normal, third)
+      assert Process.read_timer(third.login_timer) == false
+    end
+
     test "a refused LOGIN is an answer too, reported as the refusal it is" do
       sent = logging_in()
       {_action, answered} = Socket.handle_frame(login_answer(3), sent)
@@ -287,7 +323,10 @@ defmodule DpExchange.Schwab.SocketTest do
     test "heard recently: ping, and look again later" do
       {check, live} = checked(0)
 
-      assert {:reply, :ping, ^live} = Socket.handle_info({:liveness, check}, live)
+      assert {:reply, :ping, pinged} = Socket.handle_info({:liveness, check}, live)
+      assert Map.delete(pinged, :liveness_timer) == live
+      assert is_reference(pinged.liveness_timer)
+      assert is_integer(Process.cancel_timer(pinged.liveness_timer))
       refute_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
     end
 

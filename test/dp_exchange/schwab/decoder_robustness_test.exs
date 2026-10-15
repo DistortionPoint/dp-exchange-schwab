@@ -326,4 +326,52 @@ defmodule DpExchange.Schwab.DecoderRobustnessTest do
       assert {:ok, []} = Rest.get_account_summaries(@creds, opts([]))
     end
   end
+
+  describe "a candle series is coherent and has one bar per instant (tick AF)" do
+    defp bar(overrides, datetime \\ 1_787_936_147_000) do
+      Map.merge(
+        %{"datetime" => datetime, "open" => 10, "high" => 11, "low" => 9, "close" => 10},
+        overrides
+      )
+    end
+
+    defp history(rows) do
+      body = %{"symbol" => "AAPL", "empty" => false, "candles" => rows}
+      Rest.get_historical_prices("AAPL", "5m", [], @creds, opts(body))
+    end
+
+    test "a REST bar whose high is below its low, open or close is refused" do
+      for overrides <- [
+            %{"high" => 8},
+            %{"low" => 12},
+            %{"high" => 9.5},
+            %{"close" => 12},
+            %{"open" => 8}
+          ] do
+        assert {:error, :incoherent_candle} = history([bar(overrides)])
+      end
+    end
+
+    test "two REST bars stamped the same instant are refused, not both kept" do
+      assert {:error, :unexpected_response_shape} = history([bar(%{}), bar(%{"close" => 10.5})])
+    end
+
+    test "distinct instants, out of order, are returned oldest first" do
+      assert {:ok, [first, second]} =
+               history([bar(%{}, 1_787_936_447_000), bar(%{}, 1_787_936_147_000)])
+
+      assert DateTime.compare(first.opened_at, second.opened_at) == :lt
+    end
+
+    test "a streamed bar that is incoherent is refused" do
+      base = %{open: 10.0, high: 11.0, low: 9.5, close: 10.5, chart_time: 1_787_936_147_000}
+
+      for bad <- [%{high: 9.0}, %{low: 12.0}, %{close: 12.0}] do
+        assert {:error, :incoherent_candle} =
+                 StreamerDecode.to_candle(Map.merge(base, bad), "AAPL", "1m")
+      end
+
+      assert {:ok, %Candle{}} = StreamerDecode.to_candle(base, "AAPL", "1m")
+    end
+  end
 end
