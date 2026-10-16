@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.134] - 2026-10-16
+
 ### Fixed
 
 - **The last data subscriber dying releases the feed's symbols (tick AG).** A dead pid was
