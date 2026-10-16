@@ -422,11 +422,11 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
       assert Enum.sort(Fake.wanted()) == ["AAPL", "TSLA"]
       assert Map.keys(Fake.coverage()) == ["AAPL"]
-      assert %{route: :stream, symbols: 2, covered: 1, delivering: true} = Fake.status()
+      assert Fake.status() == %{route: :stream, wanted: 2, delivering: 1, last_error: nil}
 
       :ok = Fake.unsubscribe(["AAPL"])
       assert Fake.wanted() == ["TSLA"]
-      assert %{delivering: false, covered: 0} = Fake.status()
+      assert Fake.status() == %{route: :stream, wanted: 1, delivering: 0, last_error: nil}
 
       :ok = Fake.update_symbols(["MSFT"], to: self())
       assert Fake.wanted() == ["MSFT"]

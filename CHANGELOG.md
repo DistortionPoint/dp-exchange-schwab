@@ -31,6 +31,42 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The last data subscriber dying releases the feed's symbols (tick AG).** A dead pid was
+  dropped from delivery but its symbols stayed wanted, so a crashed consumer left them
+  streaming and the user's single Streamer connection held open. `Feed` now releases every
+  wanted symbol except the boot-time `:symbols` through the path `unsubscribe/2` takes (empty
+  `SUBS` to the socket, the poller's set on the poll route, a bootstrap in flight torn down
+  on settling) when the last data subscriber dies. Any remaining data subscriber keeps the
+  set, registered names (never monitored) and the boot `:subscriber` included; a notice-only
+  subscriber dying releases nothing. **Behaviour change:** a consumer that restarts must
+  `subscribe/2` again.
+- **`Fake.status/1` answers the real feed's Streamer-route shape (tick AG).** It returned a
+  hybrid that matched neither real shape: `delivering` a boolean, plus the poll route's
+  `symbols`, `covered` and `failures_since_ok`. The real feed on `route: :stream` answers
+  `%{route: :stream, delivering: count, wanted: count, last_error: nil}`, so a consumer
+  reading `status.delivering > 0` or `status.wanted` passed against the real package and broke
+  on the fake. **Breaking for a suite that matched the old keys** (`symbols`, `covered`,
+  `failures_since_ok`, a boolean `delivering`).
+- **`Socket` does not send LOGIN twice on a reconnect (tick AG).** `handle_connect/2` queues
+  `:login` to itself, and nothing reads the mailbox while the socket reconnects, so a
+  connection that dropped before handling its `:login` left it queued beside the next
+  connection's own: two LOGIN frames on one session. The venue answers the second with a
+  failure, which counted toward `login_failures`, closed a healthy session and backed the
+  reconnect off. A queued `:login` is discarded before the new one is sent.
+
+### Documented
+
+- **`usage-rules.md`: the feed's symbol set is feed-wide, a refresh must have one author, and
+  the `status/1` shapes (tick AG).** `subscribe/2`, `unsubscribe/2` and `update_symbols/2`
+  edit one set shared by every subscriber (a symbol a consumer unsubscribes is gone for all of
+  them).
+  Two processes refreshing the same credential at once spend its one-time refresh token
+  twice; the loser is answered `{:refused, {:reauthorization_required, _, _}}` although the
+  grant is fine, so serialise refreshes behind one process and read your store again before
+  treating that answer as terminal. `status/1` is documented per route.
+
 ## [0.2.133] - 2026-10-15
 
 ### Fixed

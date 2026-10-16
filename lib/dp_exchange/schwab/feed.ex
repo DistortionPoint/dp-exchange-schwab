@@ -678,6 +678,8 @@ defmodule DpExchange.Schwab.Feed do
       dropping: MapSet.new(),
       max_queue_len: Fanout.max_queue_len!(opts, :schwab),
       wanted: MapSet.new(boot_symbols),
+      # The `:symbols` the feed was started with: never released by a subscriber dying.
+      boot_symbols: MapSet.new(boot_symbols),
       # An already-established socket. Ordinary use leaves this nil and the feed dials its
       # own; it is set by tests that need the socket-bearing branches without a venue.
       socket: Keyword.get(opts, :socket),
@@ -754,20 +756,7 @@ defmodule DpExchange.Schwab.Feed do
   def handle_call({:unsubscribe, symbols}, _from, state) do
     case check_symbols(symbols) do
       :ok ->
-        symbols = canonical_symbols(symbols)
-
-        state = %{
-          state
-          | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
-            delivering: Map.drop(state.delivering, symbols),
-            kinds: Map.drop(state.kinds, symbols)
-        }
-
-        # No route yet: the set is recorded and `settle_route/2` applies it when one is
-        # dialled, so there is nothing to send and nothing that failed. `{:error, :no_route}`
-        # here told a consumer that unsubscribed before ever subscribing that its call had
-        # been refused.
-        reply = if state.route == nil, do: :ok, else: apply_symbols(state)
+        {reply, state} = drop_symbols(state, canonical_symbols(symbols))
         {:reply, reply, state}
 
       {:error, _reason} = error ->
@@ -976,7 +965,18 @@ defmodule DpExchange.Schwab.Feed do
   # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
   # its holder's death would silently unsubscribe a consumer its supervisor is about to
   # restart under the same name.
+  #
+  # **When the LAST data subscriber dies, the symbols it (and any other dead subscriber) asked
+  # for are released**, through the path `unsubscribe/2` takes: the venue is told (an empty
+  # `SUBS` on the stream route, the poller's set on the poll route) and a bootstrap still in
+  # flight is torn down when it settles. Otherwise a crashed consumer left its symbols
+  # streaming, and on this venue the one Streamer connection per user held open, for the life
+  # of the feed. What keeps the set alive: any remaining data subscriber, which includes a
+  # registered-name one (never monitored) and the boot-time `:subscriber`. The boot-time
+  # `:symbols` are kept. A notice-only subscriber dying releases nothing.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    was_data_subscriber? = MapSet.member?(state.subscribers, pid)
+
     state = %{
       state
       | subscribers: MapSet.delete(state.subscribers, pid),
@@ -984,7 +984,11 @@ defmodule DpExchange.Schwab.Feed do
         monitors: Fanout.forget(pid, state.monitors)
     }
 
-    {:noreply, state}
+    if was_data_subscriber? and MapSet.size(state.subscribers) == 0 do
+      {:noreply, release_subscribed_symbols(state)}
+    else
+      {:noreply, state}
+    end
   end
 
   @impl true
@@ -1914,6 +1918,52 @@ defmodule DpExchange.Schwab.Feed do
     else
       ["LEVELONE_EQUITIES", "CHART_EQUITY"]
     end
+  end
+
+  # The one removal path: `unsubscribe/2` and the last data subscriber dying both come here.
+  defp drop_symbols(state, symbols) do
+    state = %{
+      state
+      | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
+        delivering: Map.drop(state.delivering, symbols),
+        kinds: Map.drop(state.kinds, symbols)
+    }
+
+    # No route yet: the set is recorded and `settle_route/2` applies it when one is
+    # dialled, so there is nothing to send and nothing that failed. `{:error, :no_route}`
+    # here told a consumer that unsubscribed before ever subscribing that its call had
+    # been refused.
+    reply = if state.route == nil, do: :ok, else: apply_symbols(state)
+    {reply, state}
+  end
+
+  defp release_subscribed_symbols(state) do
+    released =
+      state.wanted
+      |> MapSet.difference(state.boot_symbols)
+      |> MapSet.to_list()
+
+    case released do
+      [] ->
+        state
+
+      symbols ->
+        {reply, state} = drop_symbols(state, symbols)
+        report_release(reply, length(symbols))
+        state
+    end
+  end
+
+  defp report_release(:ok, _count), do: :ok
+
+  defp report_release(other, count) do
+    Logger.warning(
+      "[Schwab Feed] releasing #{count} symbol(s) after the last subscriber died could not " <>
+        "reach a route: #{Bound.reason(other)} — they are no longer wanted, and the next " <>
+        "tick re-asserts the remaining set"
+    )
+
+    :ok
   end
 
   defp update_wanted(state, symbols, from) do

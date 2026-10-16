@@ -334,6 +334,14 @@ one. So:
 - **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
   token may already have been spent; try again with the credential you still hold, not the
   one you just sent.
+- **One process refreshes a given credential at a time.** This package holds no state, so it
+  cannot see that another caller is already refreshing the same refresh token. Two refreshes
+  racing on one token spend it twice: the venue honours the first, and the second is refused
+  `400`/`401`, which arrives as `{:refused, {:reauthorization_required, _, _}}` although the
+  grant is fine and the winner's result is the valid credential. Route every refresh through
+  one process (or a lock of your own), persist the result, and before treating
+  `:reauthorization_required` as terminal read your store again for a credential newer than
+  the one you sent.
 - `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. The refresh
   token's seven days elapsed, or the user reset their password. Send a person to the login
   page; do not retry.
@@ -602,9 +610,12 @@ the family where delivering nothing is the normal overnight state.
 `coverage/1` reports what has **arrived**, not what was subscribed. An empty map at 3am is
 not a fault. `DpExchange.Schwab.wanted/1` is the other half — what was asked for — so
 comparing the two tells "not yet arrived" apart from "never subscribed," which `coverage/1`
-alone cannot. `DpExchange.Schwab.status/1` is the feed-wide summary (route, delivering
-count, wanted count, last error) a health check reaches for instead of assembling one from
-`coverage/1` and `coverage_by_kind/1`.
+alone cannot. `DpExchange.Schwab.status/1` is the feed-wide summary a health check reaches
+for instead of assembling one from `coverage/1` and `coverage_by_kind/1`. Its shape depends
+on the route: on the Streamer it is `%{route: :stream, delivering: count, wanted: count,
+last_error: term | nil}`; on the fallback poll it is `Core.PollingFeed.status/1`'s map with
+`route: :internal_poll`; before the first `subscribe/2` it is `route: nil` with zero counts;
+and with no feed started it is `%{}`.
 
 ## 9. The Streamer, and what arrives only there
 
@@ -864,8 +875,9 @@ call with a real success path is wired, including `get_positions/1`, `get_option
 it has nothing to inject into.)
 
 **The fake models the normal route.** `Fake.coverage/1` reports `:stream` and
-`Fake.status/1` `route: :stream`, as a real feed does once the Streamer bootstraps (the
-`:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` judges `:to`
+`Fake.status/1` is `%{route: :stream, delivering: count, wanted: count, last_error: nil}`, the
+real feed's shape once the Streamer bootstraps (the `:internal_poll` fallback is not
+modelled). `Fake.subscribe_notices/1` judges `:to`
 (`{:invalid_subscriber, _}`) and sends nothing, as the real feed sends no notice on
 registration; the fake emits no notices at all. `Fake.update_symbols/2` ignores
 `:to`, as the real one does.
@@ -1171,6 +1183,19 @@ Treat the other two as a feed your supervision tree has to bring back.
 feed's mailbox and is applied when the feed reaches it. Retrying is safe because each of
 these calls is idempotent (add, remove or replace a symbol set, applied in order), and
 `wanted/1` reads back what the feed holds once it answers.
+
+**The symbol set is feed-wide, not per subscriber.** `subscribe/2` adds to one set, `unsubscribe/2`
+removes from it and `update_symbols/2` replaces it, for every process that subscribed: a symbol
+one consumer unsubscribes stops arriving for all of them. A subscriber pid that dies is
+dropped from delivery (its monitor is released), and **when the last data subscriber dies the
+symbols are released** exactly as `unsubscribe/2` would: the Streamer is told (an empty
+`SUBS`), so a crashed consumer does not hold the user's one Streamer connection open. A
+remaining data subscriber keeps the set: a registered name (never monitored, so a consumer
+restarting under its name keeps receiving) or the boot-time `:subscriber`. The boot-time
+`:symbols` are kept, and a notice-only subscriber (`subscribe_notices/1`) dying releases
+nothing. A consumer that restarts must `subscribe/2` again. The same pid subscribing twice is one
+subscriber (one delivery per message, one monitor). A frame for a symbol that was just
+unsubscribed is dropped, not delivered.
 
 **A symbol set must be a list.** Anything else answers `{:error, {:invalid_symbols, value}}`
 from all three, as a list holding a symbol this venue refuses already did, and the feed is

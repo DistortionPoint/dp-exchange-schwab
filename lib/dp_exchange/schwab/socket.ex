@@ -513,6 +513,13 @@ defmodule DpExchange.Schwab.Socket do
     # The link is up and the session is not. `:link_up` waits for that response —
     # announcing it here would tell a consumer the feed is live while the venue is still
     # ignoring every command.
+    #
+    # **A `:login` left in the mailbox by a connection that dropped before it was handled is
+    # discarded first.** Nothing reads the mailbox while the socket reconnects, so the earlier
+    # connection's `:login` was still there when this one queued its own, and the new
+    # connection sent TWO LOGIN frames. The venue answers the second with a failure, which
+    # counts against `login_failures`, closes a healthy session and backs the reconnect off.
+    flush_pending_login()
     send(self(), :login)
 
     state = cancel_timers(state)
@@ -599,6 +606,14 @@ defmodule DpExchange.Schwab.Socket do
   def terminate(_reason, state) do
     cancel_timers(state)
     :ok
+  end
+
+  defp flush_pending_login do
+    receive do
+      :login -> flush_pending_login()
+    after
+      0 -> :ok
+    end
   end
 
   defp schedule_liveness(liveness),

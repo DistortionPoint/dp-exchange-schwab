@@ -999,19 +999,27 @@ defmodule DpExchange.Schwab.Fake do
   def wanted(_opts \\ []), do: wanted_symbols()
 
   @doc """
-  The feed-wide summary, as `DpExchange.Schwab.status/1` answers it on the poll route
-  (`route: :stream`, which is the route `coverage/1` reports here), with nothing
-  failing: the fake delivers synchronously and has no error to report.
+  The feed-wide summary, in the shape `DpExchange.Schwab.status/1` answers on the Streamer
+  route (`route: :stream`, the route `coverage/1` reports here): `delivering` and `wanted` are
+  COUNTS, as the real feed's are, and `last_error` is `nil` because the fake delivers
+  synchronously and has no error to report.
+
+  This used to be a hybrid of the two real shapes (`delivering` a boolean, plus the poll
+  route's `symbols`, `covered` and `failures_since_ok`) that matched neither, so a consumer
+  reading `status.delivering > 0` or `status.wanted` passed on the real feed and failed here.
   """
-  @spec status(keyword()) :: map()
+  @spec status(keyword()) :: %{
+          route: :stream,
+          delivering: non_neg_integer(),
+          wanted: non_neg_integer(),
+          last_error: nil
+        }
   def status(_opts \\ []) do
     %{
-      delivering: subscribed() != [],
-      symbols: length(wanted_symbols()),
-      covered: length(subscribed()),
-      failures_since_ok: 0,
-      last_error: nil,
-      route: :stream
+      route: :stream,
+      delivering: length(subscribed()),
+      wanted: length(wanted_symbols()),
+      last_error: nil
     }
   end
 

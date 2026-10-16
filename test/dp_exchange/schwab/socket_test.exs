@@ -55,6 +55,18 @@ defmodule DpExchange.Schwab.SocketTest do
       assert_received :login
     end
 
+    test "a login left in the mailbox by a dropped connection is not sent a second time" do
+      # The earlier connection died before its `:login` was handled, so it is still queued
+      # when the next connection's `handle_connect/2` runs.
+      send(self(), :login)
+      send(self(), :login)
+
+      assert {:ok, _state} = Socket.handle_connect(%{}, state())
+
+      assert_received :login
+      refute_received :login
+    end
+
     test "the login frame carries the token and both identifiers" do
       assert {:reply, {:text, raw}, new_state} = Socket.handle_info(:login, state())
 
