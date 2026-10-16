@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.136] - 2026-10-16
+
 ### Fixed
 
 - **An order quantity a double cannot hold exactly is refused (tick AH).** The venue's
