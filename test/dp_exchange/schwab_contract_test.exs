@@ -3,6 +3,18 @@ defmodule DpExchange.SchwabContractTest do
   Core's conformance suite, run against this package.
   """
 
+  defmodule ContractLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, _weight, _opts), do: :ok
+    @impl true
+    def check(_provider, _weight, _opts), do: :ok
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+  end
+
   use DpExchange.Core.AdapterContract,
     venue: DpExchange.Schwab,
     fake: DpExchange.Schwab.Fake,
@@ -17,6 +29,24 @@ defmodule DpExchange.SchwabContractTest do
     # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
     package_root: "lib/dp_exchange",
     credentials: %{access_token: "test-token"},
+    # Conformance group 42: the REAL `Schwab.place_order/3` (through `Orders.build/2` and
+    # `Rest.place_order/4`), not the fake, answering a 503 to the only attempt an order write
+    # gets. The base request is accepted as-is; one refused before sending (no `:order_type`)
+    # never reaches the plug. The permissive limiter override is process-scoped, so this
+    # stays async-safe.
+    ambiguous_place_order: fn request ->
+      DpExchange.Core.Config.put_override(
+        :rate_limit_module,
+        DpExchange.SchwabContractTest.ContractLimiter
+      )
+
+      DpExchange.Schwab.place_order(
+        %{access_token: "test-token"},
+        request,
+        account_hash: "contract-account",
+        plug: fn conn -> Plug.Conn.resp(conn, 503, "busy") end
+      )
+    end,
     # The options this venue's own endpoints require before its fake will answer at all.
     #
     # Without these, every fake-driven assertion that calls an account-scoped endpoint was

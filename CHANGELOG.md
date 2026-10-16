@@ -31,6 +31,13 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Conformance group 42 is supplied (tick AH).** The contract test passes
+  `ambiguous_place_order:`, driving the real `place_order/3` with a 503 plug, so an
+  unconfirmed write is held to `{:error, {:order_unconfirmed, nil, _}}` and a pre-send refusal
+  to not being one. The `dp_exchange_core` floor is now `~> 0.3.98`.
+
 ## [0.2.136] - 2026-10-16
 
 ### Fixed
