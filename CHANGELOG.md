@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.137] - 2026-10-16
+
 ### Changed
 
 - **Conformance group 42 is supplied (tick AH).** The contract test passes
