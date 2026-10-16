@@ -31,6 +31,18 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order quantity a double cannot hold exactly is refused (tick AH).** The venue's
+  `quantity` is a double and `Orders.build/2` sent `Decimal.to_float/1` of it, which rounds:
+  `1.00000000000000001` went out as `1.0`, an order for a size the caller did not ask for.
+  It is now `{:error, {:invalid_quantity, value}}` unless the float reads back as the very
+  Decimal given.
+- **`preview_order` asks for its three attempts explicitly (tick AH).** Core's `HttpClient`
+  default for a POST becomes one attempt; a preview places nothing, so it sets
+  `retry_attempts: 3` with `put_new` (a caller's own value still wins). Order writes and the
+  token refresh already force one or zero attempts and are unchanged.
+
 ## [0.2.135] - 2026-10-16
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

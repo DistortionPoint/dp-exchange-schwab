@@ -309,6 +309,18 @@ defmodule DpExchange.Schwab.OrdersTest do
       assert [%{"quantity" => 0.5}] = payload["orderLegCollection"]
     end
 
+    test "a quantity a double cannot hold exactly is refused, never rounded to another size" do
+      for digits <- ["1.00000000000000001", "0.30000000000000004999", "12345678901234567890.5"] do
+        assert Orders.build(%{@buy | quantity: Decimal.new(digits)}) ==
+                 {:error, {:invalid_quantity, Decimal.new(digits)}}
+
+        assert Orders.build(%{@buy | quantity: digits}) == {:error, {:invalid_quantity, digits}}
+      end
+
+      assert {:ok, payload} = Orders.build(%{@buy | quantity: Decimal.new("1.50")})
+      assert [%{"quantity" => 1.5}] = payload["orderLegCollection"]
+    end
+
     test "a numeric string is read as the number it spells" do
       assert {:ok, payload} = Orders.build(%{@buy | quantity: "15"})
       assert [%{"quantity" => 15.0}] = payload["orderLegCollection"]

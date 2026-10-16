@@ -2971,7 +2971,12 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, body} <- Jason.encode(payload) do
       headers = [{"Content-Type", "application/json"} | headers]
 
-      case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
+      # `previewOrder` validates and places nothing, so a retry cannot duplicate an order.
+      # Core sends a POST once by default; the three attempts a read gets are asked for here,
+      # and a caller's own `:retry_attempts` still wins (`put_new`).
+      preview_opts = Keyword.update(request_opts(opts), :retry_attempts, 3, &(&1 || 3))
+
+      case HttpClient.request(:post, url, headers, body, preview_opts) do
         {:ok, %{status: status, body: response}} when status in 200..299 ->
           decoded_body(response)
 

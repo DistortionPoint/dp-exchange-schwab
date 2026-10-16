@@ -337,8 +337,7 @@ defmodule DpExchange.Schwab.Orders do
     if Decimal.nan?(quantity) or Decimal.inf?(quantity) or abs(quantity.exp) > 1000 do
       {:error, {:invalid_quantity, original}}
     else
-      float = Decimal.to_float(quantity)
-      if float > 0, do: {:ok, float}, else: {:error, {:invalid_quantity, original}}
+      float_quantity(quantity, original)
     end
   rescue
     # `Decimal.Error` is what the pinned Decimal raises for a finite value past the float range
@@ -439,6 +438,19 @@ defmodule DpExchange.Schwab.Orders do
     if upcased in @sessions,
       do: {:ok, upcased},
       else: {:error, {:unsupported_session, original}}
+  end
+
+  # **The venue's `quantity` is a double, so only a quantity a double holds exactly is sent.**
+  # `Decimal.to_float/1` rounds, in either direction, a Decimal with more digits than a double
+  # carries (`1.00000000000000001` went out as `1.0`, `0.30000000000000004999` as another
+  # number): an order for a size the caller did not ask for. The float must read back as the
+  # very Decimal that was given, or the quantity is refused by name.
+  defp float_quantity(quantity, original) do
+    float = Decimal.to_float(quantity)
+
+    if float > 0 and Decimal.eq?(Decimal.from_float(float), quantity),
+      do: {:ok, float},
+      else: {:error, {:invalid_quantity, original}}
   end
 
   defp positive(quantity) when quantity > 0, do: {:ok, quantity}
