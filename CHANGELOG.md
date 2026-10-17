@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.140] - 2026-10-17
+
 ### Changed — BREAKING
 
 - **A facade option the call does not read is refused, not ignored.** Every facade function
