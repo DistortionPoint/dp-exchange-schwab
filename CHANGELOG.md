@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.139] - 2026-10-17
+
 ### Added
 
 - **`DpExchange.Schwab.Fake` now carries every function the facade exports.** Seven had no
