@@ -31,6 +31,39 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **A non-keyword `opts` is refused, not raised.** Every facade function that reads `opts`
+  answered an `ArgumentError`/`FunctionClauseError` in the caller's process for a map or a
+  bare value; it is now `{:error, {:invalid_options, value}}` before anything is read or
+  sent (the family tag). `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `status/1`, which
+  have no error channel, raise `ArgumentError` (bounded inspect): an empty answer would be a
+  plausible "nothing covered". The Fake does the same on every function.
+- **`get_screener/2` refuses an unreadable row** as `{:error, {:unreadable_screener_row,
+  rank}}` instead of dropping it (a "top movers" list with a mover missing).
+- **`max_results:` on `get_orders/2` and `get_all_orders/2` is a positive integer or absent**,
+  else `{:error, {:invalid_option, :max_results, value}}` before any request (the spec types it
+  an integer; `0`, a negative, a float or a string was sent as given). The Fake refuses alike.
+- **`get_historical_prices/4` refuses `limit:`** as `{:error, {:unsupported_option, :limit}}`
+  (Core's MD4): `/pricehistory` documents no count parameter and the option used to be
+  accepted and ignored. A forwarded `limit: nil` is silence. The Fake refuses alike.
+- **`subscribe/2` refuses the market-data options the Streamer cannot honour** (MD4):
+  `include_partial: true`, `:limit`, `:depth` and `:since` are `{:error, {:unsupported_option,
+  key}}`, a non-boolean `include_partial` is `{:error, {:invalid_option, :include_partial,
+  v}}`. They used to be accepted and ignored. The Fake refuses alike.
+- **`get_option_expirations/2` refuses an unreadable row** as `{:error,
+  {:unreadable_expiration, row}}`. It used to drop it, answering a list with an expiry
+  missing, or `{:ok, []}` ("no expirations") for a reply that listed only unreadable ones.
+
+### Fixed
+
+- `get_symbol_quote/3`, `get_instrument/3`, `get_transaction/4` and the raw
+  `Rest.get_transactions/3` raised `FunctionClauseError` for a nil or non-binary symbol, CUSIP
+  or account hash. They answer `{:error, {:invalid_symbol, v}}` or `{:error,
+  {:invalid_path_segment, :schwab}}` (a blank CUSIP or symbol too, which built the path
+  `/instruments/` or `//quotes`). The Fake answers the same; its documented "raises, as the
+  real function does" is withdrawn.
+
 ## [0.2.139] - 2026-10-17
 
 ### Added

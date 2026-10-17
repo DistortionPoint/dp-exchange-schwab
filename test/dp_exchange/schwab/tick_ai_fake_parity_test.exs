@@ -97,9 +97,13 @@ defmodule DpExchange.Schwab.TickAiFakeParityTest do
       assert Fake.get_transaction(@creds, "H", 2) == {:refused, {:venue_error, 404}}
     end
 
-    test "a non-binary account hash raises, as the real function does" do
-      assert_raise FunctionClauseError, fn -> Fake.get_transaction(@creds, 7, 1) end
-      assert_raise FunctionClauseError, fn -> Schwab.get_transaction(@creds, 7, 1) end
+    test "a non-binary account hash is refused by name, on the Fake and the real facade alike" do
+      refusal = {:error, {:invalid_path_segment, :schwab}}
+
+      assert Fake.get_transaction(@creds, 7, 1) == refusal
+      assert Schwab.get_transaction(@creds, 7, 1) == refusal
+      assert Fake.get_transaction(@creds, nil, 1) == refusal
+      assert Schwab.get_transaction(@creds, nil, 1) == refusal
     end
   end
 
@@ -200,8 +204,13 @@ defmodule DpExchange.Schwab.TickAiFakeParityTest do
       assert Fake.get_instrument("000000000", @creds) == {:refused, {:venue_error, 404}}
     end
 
-    test "a non-binary CUSIP raises, as the real function does" do
-      assert_raise FunctionClauseError, fn -> Fake.get_instrument(37_833_100, @creds) end
+    test "a non-binary or blank CUSIP is refused by name, on the Fake and the real facade alike" do
+      refusal = {:error, {:invalid_path_segment, :schwab}}
+
+      for bad <- [37_833_100, nil, ""] do
+        assert Fake.get_instrument(bad, @creds) == refusal
+        assert Schwab.get_instrument(bad, @creds) == refusal
+      end
     end
   end
 

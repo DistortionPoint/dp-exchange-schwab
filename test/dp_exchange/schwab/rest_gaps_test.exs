@@ -151,12 +151,22 @@ defmodule DpExchange.Schwab.RestGapsTest do
   end
 
   describe "get_option_expirations/3 — rows without a date" do
-    test "a row that names no date is dropped, and the dated ones are kept" do
-      rows = [%{}, "2026-03-20", %{"expiration" => "2026-03-20"}, %{"expiration" => 5}]
-      body = %{"expirationList" => rows}
+    test "a row that names no readable date refuses the list, whatever else it holds" do
+      for bad <- [%{}, "2026-03-20", %{"expiration" => 5}, %{"expiration" => "not-a-date"}] do
+        body = %{"expirationList" => [%{"expiration" => "2026-03-20"}, bad]}
 
-      assert Rest.get_option_expirations("AAPL", @creds, opts(responding(body))) ==
-               {:ok, [~D[2026-03-20]]}
+        assert {:error, {:unreadable_expiration, shown}} =
+                 Rest.get_option_expirations("AAPL", @creds, opts(responding(body)))
+
+        assert shown == inspect(bad, limit: 10, printable_limit: 64) or shown == bad
+      end
+    end
+
+    test "a list of nothing but unreadable rows is not 'no expirations'" do
+      body = %{"expirationList" => [%{}, %{"expiration" => nil}]}
+
+      assert {:error, {:unreadable_expiration, _row}} =
+               Rest.get_option_expirations("AAPL", @creds, opts(responding(body)))
     end
 
     test "an absent list is no expirations listed" do

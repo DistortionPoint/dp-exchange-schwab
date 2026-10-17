@@ -544,6 +544,36 @@ defmodule DpExchange.Schwab.Feed do
   def valid_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
   @doc """
+  The market-data options `subscribe/3` was given that this stream cannot honour, or `:ok`.
+
+  `Core.Venue.subscribe/2` (MD4) says an option the stream cannot honour is refused by the
+  call that was given it, never accepted and ignored:
+
+    * `include_partial: true` is `{:error, {:unsupported_option, :include_partial}}`. This
+      package does not mark a forming `CHART_*` bar, so it cannot promise the bars it pushes
+      are finished or that a forming one is delivered; `false` (the default) is the only
+      value it can state. Anything that is not a boolean is
+      `{:error, {:invalid_option, :include_partial, value}}`.
+    * `:limit`, `:depth` and `:since` are `{:error, {:unsupported_option, key}}`: the
+      Streamer's subscription command takes symbols and fields and nothing like them.
+
+  A forwarded `nil` is silence, as everywhere in this family (`Core.Config.opt/3`). Public so
+  `DpExchange.Schwab.Fake` refuses exactly as the real facade does.
+  """
+  @spec check_stream_options(keyword()) :: :ok | {:error, term()}
+  def check_stream_options(opts) do
+    with :ok <- check_include_partial(Config.opt(opts, :include_partial, false)) do
+      Enum.find_value([:limit, :depth, :since], :ok, fn key ->
+        if Config.opt(opts, key, nil) != nil, do: {:error, {:unsupported_option, key}}
+      end)
+    end
+  end
+
+  defp check_include_partial(false), do: :ok
+  defp check_include_partial(true), do: {:error, {:unsupported_option, :include_partial}}
+  defp check_include_partial(other), do: {:error, {:invalid_option, :include_partial, other}}
+
+  @doc """
   Replaces the credentials this feed signs and connects with — see the moduledoc's
   "Credentials rotate" section.
 

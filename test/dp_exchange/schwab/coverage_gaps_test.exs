@@ -428,18 +428,18 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                )
     end
 
-    test "a date the venue sent that cannot be parsed is dropped rather than refused" do
-      # An expiration chain has no strikes hanging off each date, so a missing entry is a
-      # missing date and not a hole in a grid.
+    test "a date the venue sent that cannot be parsed refuses the list rather than thinning it" do
       body = %{
         "expirationList" => [%{"expiration" => "soon"}, %{"expiration" => "2026-03-20"}]
       }
 
-      assert {:ok, [~D[2026-03-20]]} =
+      assert {:error, {:unreadable_expiration, shown}} =
                Rest.get_option_expirations("AAPL", @creds,
                  plug: responding(body),
                  retry_attempts: 0
                )
+
+      assert is_binary(shown)
     end
 
     test "a screener's rank is the venue's returned order" do
@@ -480,51 +480,20 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       end
     end
 
-    test "a screener row that is not an object is dropped, not raised on" do
+    test "a screener row that is not an object refuses the list, naming its position" do
       body = %{"screeners" => [%{"symbol" => "AAPL"}, "x", %{"symbol" => "TSLA"}]}
 
-      assert {:ok, results} =
-               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
-
-      assert Enum.map(results, &{&1.symbol, &1.rank}) == [{"AAPL", 1}, {"TSLA", 3}]
+      assert Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0) ==
+               {:error, {:unreadable_screener_row, 2}}
     end
 
-    test "a screener row with no symbol is dropped, never published as an empty one" do
-      # `row["symbol"] || ""` satisfied `ScreenerResult`'s enforced `:symbol` while saying
-      # nothing, and an empty string is worse than the `nil` it replaced: a `nil` is
-      # detectable, `""` is a value, so a consumer keying coverage by symbol gets a live
-      # entry named "".
-      body = %{
-        "screeners" => [
-          %{"symbol" => "AAPL"},
-          %{"netPercentChange" => 0.05},
-          %{"symbol" => "TSLA"}
-        ]
-      }
+    test "a screener row with no symbol refuses the list, never published as an empty one" do
+      for bad <- [%{"netPercentChange" => 0.05}, %{"symbol" => ""}, %{"symbol" => 7}] do
+        body = %{"screeners" => [%{"symbol" => "AAPL"}, bad, %{"symbol" => "TSLA"}]}
 
-      assert {:ok, results} =
-               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
-
-      assert Enum.map(results, & &1.symbol) == ["AAPL", "TSLA"]
-      refute Enum.any?(results, &(&1.symbol == ""))
-    end
-
-    test "dropping a screener row does not re-rank the survivors" do
-      # Same reason the test above this one gives for not re-ranking by metric: the venue's
-      # returned position IS the ranking, and closing a gap answers a different question.
-      body = %{
-        "screeners" => [
-          %{"symbol" => "AAPL"},
-          %{"netPercentChange" => 0.05},
-          %{"symbol" => "TSLA"}
-        ]
-      }
-
-      assert {:ok, [first, second]} =
-               Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0)
-
-      assert first.rank == 1
-      assert second.rank == 3
+        assert Rest.get_screener("$SPX", @creds, plug: responding(body), retry_attempts: 0) ==
+                 {:error, {:unreadable_screener_row, 2}}
+      end
     end
 
     test "an unknown universe refuses through the screener too" do

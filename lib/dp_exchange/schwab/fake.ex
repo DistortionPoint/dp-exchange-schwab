@@ -194,7 +194,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_price(symbol, opts \\ []) do
-    with_injection(symbol, fn -> do_get_price(symbol, opts) end)
+    with_opts(opts, fn -> with_injection(symbol, fn -> do_get_price(symbol, opts) end) end)
   end
 
   defp do_get_price(symbol, opts) do
@@ -227,7 +227,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
-    with_injection(symbol, fn -> do_get_top_of_book(symbol, opts) end)
+    with_opts(opts, fn ->
+      with_injection(symbol, fn -> do_get_top_of_book(symbol, opts) end)
+    end)
   end
 
   defp do_get_top_of_book(symbol, opts) do
@@ -266,7 +268,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_historical_prices(symbol, timeframe, range, opts \\ []) do
-    with_injection(symbol, fn -> do_get_historical_prices(symbol, timeframe, range, opts) end)
+    with_opts(opts, fn ->
+      with_injection(symbol, fn -> do_get_historical_prices(symbol, timeframe, range, opts) end)
+    end)
   end
 
   defp do_get_historical_prices(symbol, timeframe, range, opts) do
@@ -335,7 +339,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_symbols(opts \\ []) do
-    with_injection(nil, fn -> do_get_symbols(opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_symbols(opts) end) end)
   end
 
   defp do_get_symbols(opts) do
@@ -427,7 +431,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def market_status(opts \\ []) do
-    with_injection(nil, fn -> do_market_status(opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_market_status(opts) end) end)
   end
 
   defp do_market_status(opts) do
@@ -456,7 +460,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_accounts(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_accounts(credentials, opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_accounts(credentials, opts) end) end)
   end
 
   defp do_get_accounts(credentials, opts) do
@@ -472,7 +476,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_balances(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_balances(credentials, opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_balances(credentials, opts) end) end)
   end
 
   defp do_get_balances(credentials, opts) do
@@ -517,7 +521,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def place_order(credentials, request, opts \\ []) do
-    with_injection(nil, fn -> do_place_order(credentials, request, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_place_order(credentials, request, opts) end)
+    end)
   end
 
   defp do_place_order(credentials, request, opts) do
@@ -598,7 +604,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
-    with_injection(nil, fn -> do_preview_order(credentials, request, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_preview_order(credentials, request, opts) end)
+    end)
   end
 
   defp do_preview_order(credentials, request, opts) do
@@ -645,7 +653,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def replace_order(credentials, order_id, request, opts \\ []) do
-    with_injection(nil, fn -> do_replace_order(credentials, order_id, request, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_replace_order(credentials, order_id, request, opts) end)
+    end)
   end
 
   defp do_replace_order(credentials, order_id, request, opts) do
@@ -676,7 +686,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
-    with_injection(nil, fn -> do_cancel_order(credentials, order_id, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_cancel_order(credentials, order_id, opts) end)
+    end)
   end
 
   defp do_cancel_order(credentials, order_id, opts) do
@@ -705,7 +717,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
-    with_injection(nil, fn -> do_get_order(credentials, order_id, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_order(credentials, order_id, opts) end)
+    end)
   end
 
   defp do_get_order(credentials, order_id, opts) do
@@ -728,7 +742,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_orders(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_orders(credentials, opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_orders(credentials, opts) end) end)
   end
 
   defp do_get_orders(credentials, opts) do
@@ -764,7 +778,9 @@ defmodule DpExchange.Schwab.Fake do
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_all_orders(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_all_orders(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_all_orders(credentials, opts) end)
+    end)
   end
 
   defp do_get_all_orders(credentials, opts) do
@@ -793,8 +809,9 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   # `maxResults` bounds the page the venue returns. A positive integer narrows the list as
-  # the venue's does; anything else is the venue's to judge, which the fake cannot, so it
-  # leaves the list whole rather than inventing a refusal.
+  # the venue's does. Anything else was already refused by name (`{:invalid_option,
+  # :max_results, v}`) in `Rest.check_order_window/1`/`check_all_orders_window/1`, so this
+  # never sees it; the fallback clause is for an absent `max_results` only.
   defp take_max_results(bodies, max) when is_integer(max) and max > 0,
     do: Enum.take(bodies, max)
 
@@ -873,7 +890,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def test_connection(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_test_connection(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_test_connection(credentials, opts) end)
+    end)
   end
 
   defp do_test_connection(credentials, opts) do
@@ -907,8 +926,12 @@ defmodule DpExchange.Schwab.Fake do
   # The fake used to drop it silently and answer `:ok`, so a consumer's test passed a pair
   # shaped symbol here that the real package refuses by name.
   def subscribe(symbols, opts \\ []) do
-    with {:ok, symbols} <- checked_symbols(symbols),
-         {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+    with :ok <- keyword_opts(opts),
+         {:ok, symbols} <- checked_symbols(symbols),
+         {:ok, to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         # The stream options the real feed refuses (`include_partial: true`, `:limit`,
+         # `:depth`, `:since`), in the same place: after the subscriber.
+         :ok <- Feed.check_stream_options(opts) do
       # Coverage is only for what was delivered: a `to:` name nothing holds receives nothing
       # (the real `Core.Fanout` skips it), so no symbol is recorded as covered for it.
       covered =
@@ -950,11 +973,12 @@ defmodule DpExchange.Schwab.Fake do
   See `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, _opts \\ [])
+  def unsubscribe(symbols, opts \\ [])
 
-  def unsubscribe(symbols, _opts) do
+  def unsubscribe(symbols, opts) do
     # Every element is judged, as the real feed judges it.
-    with {:ok, symbols} <- checked_symbols(symbols) do
+    with :ok <- keyword_opts(opts),
+         {:ok, symbols} <- checked_symbols(symbols) do
       # A set, so removing `m` symbols from `n` held is `n` lookups and not `n * m` list walks.
       dropped = MapSet.new(symbols)
       Process.put(@wanted_key, Enum.reject(wanted_symbols(), &MapSet.member?(dropped, &1)))
@@ -974,7 +998,8 @@ defmodule DpExchange.Schwab.Fake do
     # Checked before the set is cleared: the real feed refuses first and changes nothing.
     # `:to` is NOT read: the real `update_symbols/2` takes no subscriber (it replaces the
     # set; delivery goes to whoever subscribed), so a bad `:to` is not refused here either.
-    with {:ok, symbols} <- checked_symbols(symbols) do
+    with :ok <- keyword_opts(opts),
+         {:ok, symbols} <- checked_symbols(symbols) do
       Process.put(@wanted_key, [])
       Process.put(__MODULE__, [])
       subscribe(symbols, Keyword.delete(opts, :to))
@@ -989,7 +1014,10 @@ defmodule DpExchange.Schwab.Fake do
   See `c:DpExchange.Core.Venue.coverage/1`.
   """
   @impl true
-  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+  def coverage(opts \\ []) do
+    keyword_opts!(opts)
+    Map.new(subscribed(), &{&1, :stream})
+  end
 
   @doc """
   What has been asked for, as `DpExchange.Schwab.wanted/1` answers it — every symbol the feed
@@ -998,7 +1026,10 @@ defmodule DpExchange.Schwab.Fake do
   """
   @spec wanted(keyword()) :: [String.t()]
   @impl true
-  def wanted(_opts \\ []), do: wanted_symbols()
+  def wanted(opts \\ []) do
+    keyword_opts!(opts)
+    wanted_symbols()
+  end
 
   @doc """
   The feed-wide summary, in the shape `DpExchange.Schwab.status/1` answers on the Streamer
@@ -1016,7 +1047,9 @@ defmodule DpExchange.Schwab.Fake do
           wanted: non_neg_integer(),
           last_error: nil
         }
-  def status(_opts \\ []) do
+  def status(opts \\ []) do
+    keyword_opts!(opts)
+
     %{
       route: :stream,
       delivering: length(subscribed()),
@@ -1030,10 +1063,29 @@ defmodule DpExchange.Schwab.Fake do
   holds no credential of its own, so a map is accepted and kept nowhere; anything else is
   `{:error, {:invalid_credentials, :schwab}}`, checked before anything else as on the facade.
   """
-  @spec update_credentials(term(), keyword()) :: :ok | {:error, {:invalid_credentials, :schwab}}
-  def update_credentials(credentials, _opts \\ [])
-  def update_credentials(credentials, _opts) when is_map(credentials), do: :ok
+  @spec update_credentials(term(), keyword()) :: :ok | {:error, term()}
+  def update_credentials(credentials, opts \\ [])
+
+  def update_credentials(credentials, opts) when is_map(credentials),
+    do: with(:ok <- keyword_opts(opts), do: :ok)
+
   def update_credentials(_not_a_map, _opts), do: {:error, {:invalid_credentials, :schwab}}
+
+  # The real facade's refusal of non-keyword `opts`, for the Fake's functions that do not go
+  # through `with_opts/2`; and the raising form for the four plain-value reads, which have no
+  # error channel (an empty answer for bad options would be a plausible "nothing covered").
+  defp keyword_opts(opts) do
+    if Keyword.keyword?(opts), do: :ok, else: {:error, {:invalid_options, opts}}
+  end
+
+  defp keyword_opts!(opts) do
+    if not Keyword.keyword?(opts) do
+      raise ArgumentError,
+            "opts must be a keyword list, got: " <> inspect(opts, limit: 10, printable_limit: 64)
+    end
+
+    :ok
+  end
 
   @doc "The mover universes the venue publishes. See `DpExchange.Schwab.movers_universes/0`."
   @spec movers_universes() :: [String.t()]
@@ -1090,7 +1142,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    with {:ok, _to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
+    with :ok <- keyword_opts(opts),
+         {:ok, _to} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         do: :ok
   end
 
   defp subscribed, do: Process.get(__MODULE__, [])
@@ -1150,6 +1204,13 @@ defmodule DpExchange.Schwab.Fake do
   # Per-symbol targeting is real isolation: an override queued for one symbol can never be
   # satisfied by, or interfere with, a call for another. Functions taking no symbol pass
   # `nil` and match only a venue-wide override.
+  # Non-keyword `opts` is refused as the real facade refuses it, `{:error, {:invalid_options,
+  # opts}}`, before anything else (injection included) is consulted. A map is the usual
+  # mistake and `Config.opt/3` raises on it.
+  defp with_opts(opts, fun) do
+    if Keyword.keyword?(opts), do: fun.(), else: {:error, {:invalid_options, opts}}
+  end
+
   defp with_injection(symbol, fun) do
     case FakeInjection.next_outcome(:schwab, symbol) do
       {:override, outcome} -> outcome
@@ -1183,7 +1244,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_positions(opts \\ []) do
-    with_injection(nil, fn -> do_get_positions(opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_positions(opts) end) end)
   end
 
   defp do_get_positions(opts) do
@@ -1357,7 +1418,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_option_chain(underlying, opts \\ []) do
-    with_injection(injection_key(underlying), fn -> do_get_option_chain(underlying, opts) end)
+    with_opts(opts, fn ->
+      with_injection(injection_key(underlying), fn -> do_get_option_chain(underlying, opts) end)
+    end)
   end
 
   defp do_get_option_chain(underlying, opts) do
@@ -1393,10 +1456,12 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
-    with_injection(injection_key(underlying), fn ->
-      with :ok <- Rest.check_underlying(underlying),
-           :ok <- require_credentials(opts),
-           do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+    with_opts(opts, fn ->
+      with_injection(injection_key(underlying), fn ->
+        with :ok <- Rest.check_underlying(underlying),
+             :ok <- require_credentials(opts),
+             do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+      end)
     end)
   end
 
@@ -1501,7 +1566,7 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_screener(name, opts \\ []) do
-    with_injection(nil, fn -> do_get_screener(name, opts) end)
+    with_opts(opts, fn -> with_injection(nil, fn -> do_get_screener(name, opts) end) end)
   end
 
   defp do_get_screener(name, opts) do
@@ -1537,7 +1602,9 @@ defmodule DpExchange.Schwab.Fake do
   """
   @impl true
   def get_transactions(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_transactions(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_transactions(credentials, opts) end)
+    end)
   end
 
   defp do_get_transactions(credentials, opts) do
@@ -1587,7 +1654,9 @@ defmodule DpExchange.Schwab.Fake do
   @spec refresh_credentials(Auth.credentials(), keyword()) ::
           {:ok, Auth.credentials()} | {:error, term()} | {:refused, term()}
   def refresh_credentials(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_refresh_credentials(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_refresh_credentials(credentials, opts) end)
+    end)
   end
 
   defp do_refresh_credentials(credentials, opts) do
@@ -1609,17 +1678,18 @@ defmodule DpExchange.Schwab.Fake do
   the venue's own row, undecoded.
 
   Judges both path segments through `Rest.validate_transaction_path/2` (a blank or
-  non-string segment is `{:error, {:invalid_path_segment, :schwab}}`; a non-binary account
-  hash raises `FunctionClauseError` as the real function does), then the credential. The one
+  non-string segment, and a non-binary account hash, are `{:error, {:invalid_path_segment,
+  :schwab}}` - never a `FunctionClauseError`), then the credential. The one
   id this fake holds is `1`, the row `get_transactions/2` lists; any other is
   `{:refused, {:venue_error, 404}}`.
   """
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
-  def get_transaction(credentials, account_hash, transaction_id, opts \\ [])
-      when is_binary(account_hash) do
-    with_injection(nil, fn ->
-      do_get_transaction(credentials, account_hash, transaction_id, opts)
+  def get_transaction(credentials, account_hash, transaction_id, opts \\ []) do
+    with_opts(opts, fn ->
+      with_injection(nil, fn ->
+        do_get_transaction(credentials, account_hash, transaction_id, opts)
+      end)
     end)
   end
 
@@ -1641,7 +1711,9 @@ defmodule DpExchange.Schwab.Fake do
   @spec get_account_summaries(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_account_summaries(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_account_summaries(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_account_summaries(credentials, opts) end)
+    end)
   end
 
   defp do_get_account_summaries(credentials, opts) do
@@ -1686,21 +1758,26 @@ defmodule DpExchange.Schwab.Fake do
   the venue's own map keyed by symbol.
 
   Like the real function it does not run `SymbolFormat.validate/1` (the symbol is only
-  translated, and a non-binary raises `FunctionClauseError`), so a symbol outside
-  `listed/0` is `{:refused, {:venue_error, 404}}`, the venue's word for a name it does not
-  list. The credential is judged first, as signing does. Targetable by symbol through
-  `FakeInjection`.
+  translated; a nil, non-binary or blank one is `{:error, {:invalid_symbol, v}}`, judged
+  first), so a symbol outside `listed/0` is `{:refused, {:venue_error, 404}}`, the venue's
+  word for a name it does not list. The credential is judged next, as signing does.
+  Targetable by symbol through `FakeInjection`.
   """
   @spec get_symbol_quote(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_symbol_quote(symbol, credentials, opts \\ []) when is_binary(symbol) do
-    with_injection(symbol, fn -> do_get_symbol_quote(symbol, credentials, opts) end)
+  def get_symbol_quote(symbol, credentials, opts \\ []) do
+    key = if is_binary(symbol), do: symbol, else: nil
+
+    with_opts(opts, fn ->
+      with_injection(key, fn -> do_get_symbol_quote(symbol, credentials, opts) end)
+    end)
   end
 
   defp do_get_symbol_quote(symbol, credentials, _opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
+    with :ok <- SymbolFormat.check_present(symbol),
+         :ok <- require_credentials(credentials: credentials) do
+      native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with :ok <- require_credentials(credentials: credentials) do
       case Map.fetch(@prices, native) do
         {:ok, price} -> {:ok, %{native => quote_body(native, Decimal.new(price))}}
         :error -> {:refused, {:venue_error, 404}}
@@ -1742,7 +1819,9 @@ defmodule DpExchange.Schwab.Fake do
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market(market, credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_market(market, credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_market(market, credentials, opts) end)
+    end)
   end
 
   defp do_get_market(market, credentials, opts) do
@@ -1797,17 +1876,21 @@ defmodule DpExchange.Schwab.Fake do
   @doc """
   One instrument by CUSIP, as `DpExchange.Schwab.get_instrument/3` answers it: the venue's
   own map. The one CUSIP this fake holds is `037833100` (AAPL, the vendor example); any other
-  is `{:refused, {:venue_error, 404}}`. The real function validates nothing beyond a binary
-  argument (a non-binary raises `FunctionClauseError`), so this checks the credential only.
+  is `{:refused, {:venue_error, 404}}`. The real function validates nothing beyond a non-blank
+  binary (anything else is `{:error, {:invalid_path_segment, :schwab}}`, never a
+  `FunctionClauseError`), so this checks that and then the credential.
   """
   @spec get_instrument(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_instrument(cusip, credentials, opts \\ []) when is_binary(cusip) do
-    with_injection(nil, fn -> do_get_instrument(cusip, credentials, opts) end)
+  def get_instrument(cusip, credentials, opts \\ []) do
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_instrument(cusip, credentials, opts) end)
+    end)
   end
 
   defp do_get_instrument(cusip, credentials, _opts) do
-    with :ok <- require_credentials(credentials: credentials) do
+    with :ok <- check_cusip(cusip),
+         :ok <- require_credentials(credentials: credentials) do
       if cusip == "037833100" do
         {:ok,
          %{
@@ -1823,6 +1906,9 @@ defmodule DpExchange.Schwab.Fake do
     end
   end
 
+  defp check_cusip(cusip) when is_binary(cusip) and cusip != "", do: :ok
+  defp check_cusip(_cusip), do: {:error, {:invalid_path_segment, :schwab}}
+
   @doc """
   The signed-in user's preferences, as `DpExchange.Schwab.get_user_preference/2` answers
   them: the venue's own map (the vendor example), undecoded, with the fake's one account.
@@ -1831,7 +1917,9 @@ defmodule DpExchange.Schwab.Fake do
   @spec get_user_preference(map(), keyword()) ::
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_user_preference(credentials, opts \\ []) do
-    with_injection(nil, fn -> do_get_user_preference(credentials, opts) end)
+    with_opts(opts, fn ->
+      with_injection(nil, fn -> do_get_user_preference(credentials, opts) end)
+    end)
   end
 
   defp do_get_user_preference(credentials, _opts) do

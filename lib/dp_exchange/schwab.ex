@@ -324,7 +324,7 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_accounts(credentials, opts \\ []),
-    do: Rest.get_accounts(credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_accounts(credentials, with_limiter(opts)) end)
 
   @doc """
   Balances for one account.
@@ -373,7 +373,8 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def place_order(credentials, request, opts \\ []) do
-    with {:ok, payload} <- Orders.build(request, opts),
+    with :ok <- keyword_opts(opts),
+         {:ok, payload} <- Orders.build(request, opts),
          {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
          {:ok, id} <- Rest.place_order(credentials, hash, payload, with_limiter(opts)) do
@@ -428,7 +429,8 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
-    with {:ok, payload} <- Orders.build(request, opts),
+    with :ok <- keyword_opts(opts),
+         {:ok, payload} <- Orders.build(request, opts),
          {:ok, hash} <- account_hash(opts) do
       Rest.preview_order(credentials, hash, Orders.to_preview(payload), with_limiter(opts))
     end
@@ -458,6 +460,7 @@ defmodule DpExchange.Schwab do
   @impl true
   def replace_order(credentials, order_id, request, opts \\ []) do
     with :ok <- Orders.check_order_id(order_id),
+         :ok <- keyword_opts(opts),
          {:ok, payload} <- Orders.build(request, opts),
          {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
@@ -543,7 +546,8 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def test_connection(credentials, opts \\ []) do
-    with {:ok, accounts} <- Rest.get_accounts(credentials, with_limiter(opts)) do
+    with :ok <- keyword_opts(opts),
+         {:ok, accounts} <- Rest.get_accounts(credentials, with_limiter(opts)) do
       {:ok, %{accounts: length(accounts)}}
     end
   end
@@ -588,7 +592,7 @@ defmodule DpExchange.Schwab do
   @spec refresh_credentials(Auth.credentials(), keyword()) ::
           {:ok, Auth.credentials()} | {:error, term()} | {:refused, term()}
   def refresh_credentials(credentials, opts \\ []),
-    do: Auth.refresh(credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Auth.refresh(credentials, with_limiter(opts)) end)
 
   @doc """
   Whether `credentials` should be refreshed before the next call.
@@ -646,12 +650,15 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
-    feed = feed(opts)
+    # Arguments first (the options, the symbols, the subscriber, then the stream options),
+    # THEN whether a feed runs: a bad argument answers the same whether or not the feed is
+    # started.
+    with :ok <- keyword_opts(opts),
+         :ok <- Feed.check_symbols(symbols),
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         :ok <- Feed.check_stream_options(opts) do
+      feed = feed(opts)
 
-    # Arguments first (symbols, then subscriber), THEN whether a feed runs: a bad argument
-    # answers the same whether or not the feed is started.
-    with :ok <- Feed.check_symbols(symbols),
-         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
       if alive?(feed) do
         feed_call(
           fn -> Feed.subscribe(feed, canonical_case(symbols), opts) end,
@@ -670,9 +677,10 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def unsubscribe(symbols, opts \\ []) do
-    feed = feed(opts)
+    with :ok <- keyword_opts(opts),
+         :ok <- Feed.check_symbols(symbols) do
+      feed = feed(opts)
 
-    with :ok <- Feed.check_symbols(symbols) do
       feed_call(fn -> Feed.unsubscribe(feed, canonical_case(symbols)) end, :ok)
     end
   end
@@ -685,9 +693,10 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def update_symbols(symbols, opts \\ []) do
-    feed = feed(opts)
+    with :ok <- keyword_opts(opts),
+         :ok <- Feed.check_symbols(symbols) do
+      feed = feed(opts)
 
-    with :ok <- Feed.check_symbols(symbols) do
       feed_call(
         fn -> Feed.update_symbols(feed, canonical_case(symbols)) end,
         {:error, :feed_not_started}
@@ -701,10 +710,7 @@ defmodule DpExchange.Schwab do
   See `c:DpExchange.Core.Venue.coverage/1`.
   """
   @impl true
-  def coverage(opts \\ []) do
-    feed = feed(opts)
-    if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
-  end
+  def coverage(opts \\ []), do: read_feed(opts, %{}, &Feed.coverage/1)
 
   @doc """
   What has been asked for, which is not what `coverage/1` reports.
@@ -722,10 +728,7 @@ defmodule DpExchange.Schwab do
   """
   @spec wanted(keyword()) :: [String.t()]
   @impl true
-  def wanted(opts \\ []) do
-    feed = feed(opts)
-    if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
-  end
+  def wanted(opts \\ []), do: read_feed(opts, [], &Feed.wanted/1)
 
   @doc """
   What is arriving, per symbol, split by which kind of data it is — never what `coverage/1`
@@ -760,10 +763,7 @@ defmodule DpExchange.Schwab do
   @spec coverage_by_kind(keyword()) :: %{
           DpExchange.Core.Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
         }
-  def coverage_by_kind(opts \\ []) do
-    feed = feed(opts)
-    if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
-  end
+  def coverage_by_kind(opts \\ []), do: read_feed(opts, %{}, &Feed.coverage_by_kind/1)
 
   @doc """
   Whether the feed is delivering, on which route, and what it last failed on.
@@ -780,10 +780,7 @@ defmodule DpExchange.Schwab do
   that internal process. Returns `%{}` when no feed is started, matching `coverage/1`.
   """
   @spec status(keyword()) :: map()
-  def status(opts \\ []) do
-    feed = feed(opts)
-    if alive?(feed), do: feed_read(fn -> Feed.status(feed) end, %{}), else: %{}
-  end
+  def status(opts \\ []), do: read_feed(opts, %{}, &Feed.status/1)
 
   @doc """
   Registers `opts[:to]` (the caller, by default) for this package's own notices — every
@@ -824,9 +821,10 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    feed = feed(opts)
+    with :ok <- keyword_opts(opts),
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      feed = feed(opts)
 
-    with {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
       feed_call(fn -> Feed.subscribe_notices(feed, opts) end, {:error, :feed_not_started})
     end
   end
@@ -858,15 +856,17 @@ defmodule DpExchange.Schwab do
   def update_credentials(credentials, opts \\ [])
 
   def update_credentials(credentials, opts) when is_map(credentials) do
-    feed = feed(opts)
+    with :ok <- keyword_opts(opts) do
+      feed = feed(opts)
 
-    if alive?(feed),
-      do:
-        feed_call(
-          fn -> Feed.update_credentials(feed, credentials) end,
-          {:error, :feed_not_started}
-        ),
-      else: {:error, :feed_not_started}
+      if alive?(feed),
+        do:
+          feed_call(
+            fn -> Feed.update_credentials(feed, credentials) end,
+            {:error, :feed_not_started}
+          ),
+        else: {:error, :feed_not_started}
+    end
   end
 
   def update_credentials(_not_a_map, _opts), do: {:error, {:invalid_credentials, :schwab}}
@@ -874,18 +874,36 @@ defmodule DpExchange.Schwab do
   # --- plumbing -----------------------------------------------------------
 
   defp credentials(opts) do
-    case Keyword.get(opts, :credentials) do
-      %{} = credentials -> {:ok, credentials}
-      _absent -> {:error, {:missing_credentials, :schwab}}
+    with :ok <- keyword_opts(opts) do
+      case Keyword.get(opts, :credentials) do
+        %{} = credentials -> {:ok, credentials}
+        _absent -> {:error, {:missing_credentials, :schwab}}
+      end
     end
+  end
+
+  # **`opts` is a keyword list, or the call is refused.** Every function below reads it with
+  # `Keyword.get/3` or `Config.opt/3`, both of which raise on anything else, so a map or a
+  # bare value used to escape as an `ArgumentError`/`FunctionClauseError` in the caller's
+  # process instead of an answer. `{:error, {:invalid_options, value}}` (the family tag,
+  # `DpExchange.Core.Options`' design) before anything is read or sent.
+  defp keyword_opts(opts) do
+    if Keyword.keyword?(opts), do: :ok, else: {:error, {:invalid_options, opts}}
+  end
+
+  # `keyword_opts/1`, then `fun`, for a facade function that has no other `with` to put it in.
+  defp with_opts(opts, fun) do
+    with :ok <- keyword_opts(opts), do: fun.()
   end
 
   # Named rather than defaulted. Every account path takes the hash, and silently using
   # some first account would place an order against an account the caller did not choose.
   defp account_hash(opts) do
-    case Keyword.get(opts, :account_hash) do
-      hash when is_binary(hash) and hash != "" -> {:ok, hash}
-      _absent -> {:error, {:missing_option, :account_hash}}
+    with :ok <- keyword_opts(opts) do
+      case Keyword.get(opts, :account_hash) do
+        hash when is_binary(hash) and hash != "" -> {:ok, hash}
+        _absent -> {:error, {:missing_option, :account_hash}}
+      end
     end
   end
 
@@ -903,6 +921,23 @@ defmodule DpExchange.Schwab do
   defp ensure_order_limit_declared(opts), do: OrderLimit.ensure_declared(opts)
 
   defp feed(opts), do: Config.opt(opts, :feed, Supervisor.feed_name(opts))
+
+  # The four reads that return a plain value (`coverage/1`, `wanted/1`, `coverage_by_kind/1`,
+  # `status/1`) have no room for an error, and an empty answer for bad options would be a
+  # plausible "nothing covered". So options that are not a keyword list RAISE `ArgumentError`
+  # (bounded inspect): a caller bug, not a feed state.
+  defp read_feed(opts, empty, reader) do
+    if Keyword.keyword?(opts) do
+      read_running(feed(opts), empty, reader)
+    else
+      raise ArgumentError,
+            "opts must be a keyword list, got: " <> inspect(opts, limit: 10, printable_limit: 64)
+    end
+  end
+
+  defp read_running(feed, empty, reader) do
+    if alive?(feed), do: feed_read(fn -> reader.(feed) end, empty), else: empty
+  end
 
   # `{:global, _}` and `{:via, _, _}` feeds are running feeds too: `Process.whereis/1` only
   # knows local atoms, so a registered-elsewhere feed read as absent and coverage answered
@@ -977,7 +1012,10 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_positions(opts),
-    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), with_limiter(opts))
+    do:
+      with_opts(opts, fn ->
+        Rest.get_positions(Keyword.get(opts, :credentials, %{}), with_limiter(opts))
+      end)
 
   @doc """
   The option chain for an underlying — expiry × strike, both sides.
@@ -988,7 +1026,13 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_option_chain(underlying, opts),
     do:
-      Rest.get_option_chain(underlying, Keyword.get(opts, :credentials, %{}), with_limiter(opts))
+      with_opts(opts, fn ->
+        Rest.get_option_chain(
+          underlying,
+          Keyword.get(opts, :credentials, %{}),
+          with_limiter(opts)
+        )
+      end)
 
   @doc """
   The expiries listed on an underlying.
@@ -999,11 +1043,13 @@ defmodule DpExchange.Schwab do
   @impl true
   def get_option_expirations(underlying, opts),
     do:
-      Rest.get_option_expirations(
-        underlying,
-        Keyword.get(opts, :credentials, %{}),
-        with_limiter(opts)
-      )
+      with_opts(opts, fn ->
+        Rest.get_option_expirations(
+          underlying,
+          Keyword.get(opts, :credentials, %{}),
+          with_limiter(opts)
+        )
+      end)
 
   @doc """
   A mover list, by the venue's own universe — `movers_universes/0` lists them.
@@ -1013,7 +1059,10 @@ defmodule DpExchange.Schwab do
   """
   @impl true
   def get_screener(name, opts),
-    do: Rest.get_screener(name, Keyword.get(opts, :credentials, %{}), with_limiter(opts))
+    do:
+      with_opts(opts, fn ->
+        Rest.get_screener(name, Keyword.get(opts, :credentials, %{}), with_limiter(opts))
+      end)
 
   @doc """
   Transactions on one account.
@@ -1042,7 +1091,10 @@ defmodule DpExchange.Schwab do
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts \\ []),
-    do: Rest.get_transaction(credentials, account_hash, transaction_id, with_limiter(opts))
+    do:
+      with_opts(opts, fn ->
+        Rest.get_transaction(credentials, account_hash, transaction_id, with_limiter(opts))
+      end)
 
   @doc """
   Every account's balances, and its positions when asked.
@@ -1053,7 +1105,7 @@ defmodule DpExchange.Schwab do
   @spec get_account_summaries(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_account_summaries(credentials, opts \\ []),
-    do: Rest.get_account_summaries(credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_account_summaries(credentials, with_limiter(opts)) end)
 
   @doc """
   Orders across every account. `opts[:from]` and `opts[:to]` are required by the venue.
@@ -1063,7 +1115,7 @@ defmodule DpExchange.Schwab do
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_all_orders(credentials, opts \\ []),
-    do: Rest.get_all_orders(credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_all_orders(credentials, with_limiter(opts)) end)
 
   @doc """
   One symbol's quote, unnormalised. See `DpExchange.Schwab.Rest.get_symbol_quote/3`.
@@ -1071,19 +1123,19 @@ defmodule DpExchange.Schwab do
   @spec get_symbol_quote(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_symbol_quote(symbol, credentials, opts \\ []),
-    do: Rest.get_symbol_quote(symbol, credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_symbol_quote(symbol, credentials, with_limiter(opts)) end)
 
   @doc "One market's hours, optionally on another day. See `DpExchange.Schwab.Rest.get_market/3`."
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market(market, credentials, opts \\ []),
-    do: Rest.get_market(market, credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_market(market, credentials, with_limiter(opts)) end)
 
   @doc "One instrument by CUSIP. See `DpExchange.Schwab.Rest.get_instrument/3`."
   @spec get_instrument(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_instrument(cusip, credentials, opts \\ []),
-    do: Rest.get_instrument(cusip, credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_instrument(cusip, credentials, with_limiter(opts)) end)
 
   @doc """
   The signed-in user's preferences — the same endpoint the streamer bootstraps from.
@@ -1094,7 +1146,7 @@ defmodule DpExchange.Schwab do
   @spec get_user_preference(map(), keyword()) ::
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_user_preference(credentials, opts \\ []),
-    do: Rest.get_user_preference(credentials, with_limiter(opts))
+    do: with_opts(opts, fn -> Rest.get_user_preference(credentials, with_limiter(opts)) end)
 
   @doc "The mover universes this venue publishes."
   @spec movers_universes() :: [String.t()]

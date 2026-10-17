@@ -85,7 +85,8 @@ close and would drop today). An `:end` without a `:start` is
 
 The bar still forming (`opened_at + width > now`) is **not returned** unless you pass
 `include_partial: true`; with it the last bar may still change (`Candle` has no flag for it).
-`include_partial` must be a boolean.
+`include_partial` must be a boolean. `limit:` is `{:error, {:unsupported_option, :limit}}`:
+`/pricehistory` has no count parameter, and an option is never accepted and ignored.
 
 Daily, weekly and monthly bars are stamped exchange-local midnight by the venue; `opened_at`
 here is **00:00 UTC of that session date**, not the instant sent. Minute bars keep the
@@ -739,7 +740,17 @@ padded string.
 An orders reply is capped by the venue at 3000 rows unless `:max_results` is given
 ("Default is 3000"). With no `:max_results`, a reply of 3000 or more rows from
 `get_all_orders/2` or `get_orders/2` is `{:error, :history_truncated}`, as for
-`get_transactions/2`: narrow the window or pass the bound you want.
+`get_transactions/2`: narrow the window or pass the bound you want. `:max_results` is a
+positive integer or absent, else `{:error, {:invalid_option, :max_results, value}}`.
+
+`opts` is always a keyword list: anything else is `{:error, {:invalid_options, value}}` (the
+four plain-value reads `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `status/1` raise
+`ArgumentError` instead, since an empty answer would read as "nothing covered"; the Fake
+behaves identically). `get_screener/2` refuses an unreadable row as
+`{:error, {:unreadable_screener_row, rank}}`. `subscribe/2` refuses what the Streamer cannot honour:
+`include_partial: true`, `:limit`, `:depth` and `:since` are `{:error, {:unsupported_option,
+key}}`. `get_option_expirations/2` refuses a reply with an unreadable row as
+`{:error, {:unreadable_expiration, row}}` rather than listing fewer expiries.
 
 ## 11. What this package does not implement
 

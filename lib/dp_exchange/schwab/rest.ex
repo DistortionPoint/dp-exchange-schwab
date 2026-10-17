@@ -572,7 +572,8 @@ defmodule DpExchange.Schwab.Rest do
          {:ok, {period_type, frequency_type, frequency}} <- fetch_candle(timeframe),
          :ok <- check_range(range),
          {:ok, period} <- fetch_period(timeframe, period_type, range, now),
-         {:ok, include_partial} <- fetch_include_partial(opts) do
+         {:ok, include_partial} <- fetch_include_partial(opts),
+         :ok <- check_history_limit(opts) do
       params =
         %{
           "symbol" => native,
@@ -600,6 +601,18 @@ defmodule DpExchange.Schwab.Rest do
     case Config.opt(opts, :include_partial, false) do
       flag when is_boolean(flag) -> {:ok, flag}
       other -> {:error, {:invalid_option, :include_partial, other}}
+    end
+  end
+
+  # **`limit:` is refused, not accepted and ignored** (Core's MD4). `GET /pricehistory`
+  # documents no count or limit parameter (`market-data-production.openapi.json`: the
+  # parameters are symbol, periodType, period, frequencyType, frequency, startDate, endDate,
+  # needExtendedHoursData, needPreviousClose), and a limit applied to the page after the fact
+  # would be the cut-down series Core forbids. A forwarded `limit: nil` is silence.
+  defp check_history_limit(opts) do
+    case Config.opt(opts, :limit, nil) do
+      nil -> :ok
+      _limit -> {:error, {:unsupported_option, :limit}}
     end
   end
 
@@ -681,7 +694,7 @@ defmodule DpExchange.Schwab.Rest do
          :ok <- check_range(range),
          {:ok, _period} <- fetch_period(timeframe, period_type, range, now),
          {:ok, _include_partial} <- fetch_include_partial(opts) do
-      :ok
+      check_history_limit(opts)
     end
   end
 
@@ -1113,19 +1126,24 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec get_symbol_quote(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_symbol_quote(symbol, credentials, opts) when is_binary(symbol) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-    encoded = URI.encode(native, &URI.char_unreserved?/1)
-    query = query_string(%{"fields" => Keyword.get(opts, :fields)})
+  def get_symbol_quote(symbol, credentials, opts) do
+    # A nil, non-binary or blank symbol is `{:invalid_symbol, v}` (the rule every single-symbol
+    # read here follows). It used to be a `FunctionClauseError` in the caller's process for a
+    # non-binary, and a blank one built the path `//quotes`.
+    with :ok <- SymbolFormat.check_present(symbol) do
+      native = SymbolFormat.to_exchange_symbol(symbol)
+      encoded = URI.encode(native, &URI.char_unreserved?/1)
+      query = query_string(%{"fields" => Keyword.get(opts, :fields)})
 
-    # `object/1`, so the `{:ok, map()}` in this spec is true: a list body was returned as sent.
-    with {:ok, body} <-
-           get(
-             market_data_url(opts) <> "/#{encoded}/quotes" <> query,
-             credentials,
-             opts
-           ),
-         do: object(body)
+      # `object/1`, so the `{:ok, map()}` in this spec is true: a list body was returned as sent.
+      with {:ok, body} <-
+             get(
+               market_data_url(opts) <> "/#{encoded}/quotes" <> query,
+               credentials,
+               opts
+             ),
+           do: object(body)
+    end
   end
 
   @doc """
@@ -1408,13 +1426,18 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec get_instrument(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_instrument(cusip, credentials, opts) when is_binary(cusip) do
+  def get_instrument(cusip, credentials, opts) when is_binary(cusip) and cusip != "" do
     # One path segment, as in `get_symbol_quote/3`: `URI.encode/1` leaves `/`, `?` and `#`
     # alone, so a CUSIP carrying one reached the venue as a different path or a query.
     path = "/instruments/" <> URI.encode(cusip, &URI.char_unreserved?/1)
 
     with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
   end
+
+  # A nil, blank or non-binary CUSIP names no instrument: answered, never a
+  # `FunctionClauseError` in the caller's process (and `""` would have asked for the search
+  # endpoint's own path, `/instruments/`).
+  def get_instrument(_cusip, _credentials, _opts), do: {:error, {:invalid_path_segment, :schwab}}
 
   @doc """
   The option chain for an underlying, as `Types.OptionChain` — `GET /chains`.
@@ -1675,28 +1698,38 @@ defmodule DpExchange.Schwab.Rest do
   A much smaller answer than `get_option_chain/3`, and its own endpoint rather than a
   narrowing of one: the venue publishes both.
 
-  A date the venue sends that this package cannot parse is dropped from the list rather than
-  refused — an expiration chain has no strikes hanging off each date, so a missing entry is a
-  missing date and not a hole in a grid.
+  A row whose date this package cannot read refuses the whole list as `{:error,
+  {:unreadable_expiration, row}}` (the row bounded for the error). It used to be dropped, which
+  answered a list with an expiry missing, or `{:ok, []}` for a reply that listed only
+  unreadable ones - a plausible "no expirations".
   """
   @spec get_option_expirations(String.t() | term(), map(), keyword()) ::
           {:ok, [Date.t()]} | {:error, term()} | {:refused, term()}
   def get_option_expirations(underlying, credentials, opts)
       when is_binary(underlying) and underlying != "" do
     with {:ok, body} <- get_expiration_chain(underlying, credentials, opts),
-         {:ok, rows} <- list_field(body, "expirationList") do
-      dates =
-        rows
-        |> Enum.map(&expiration_date/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.uniq()
-        |> Enum.sort(Date)
-
-      {:ok, dates}
+         {:ok, rows} <- list_field(body, "expirationList"),
+         {:ok, dates} <- expiration_dates(rows) do
+      {:ok, dates |> Enum.uniq() |> Enum.sort(Date)}
     end
   end
 
   def get_option_expirations(underlying, _credentials, _opts), do: check_underlying(underlying)
+
+  # **A row that names no readable date refuses the list**, `{:error,
+  # {:unreadable_expiration, row}}`, and is not dropped. Dropping it (what this did until tick
+  # AJ) answered a list that looked complete with an expiry missing, and an all-unreadable list
+  # answered `{:ok, []}` - "this underlying lists no expirations" - from a reply that listed
+  # them. A caller choosing an expiry from a short list picks from the wrong set.
+  defp expiration_dates(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case expiration_date(row) do
+        nil -> {:halt, {:error, {:unreadable_expiration, bounded_raw(row)}}}
+        date -> {:cont, {:ok, [date | acc]}}
+      end
+    end)
+  end
 
   @doc """
   Whether `underlying` is a symbol the option endpoints can be asked about: a non-empty
@@ -1770,41 +1803,35 @@ defmodule DpExchange.Schwab.Rest do
   def get_screener(name, credentials, opts) do
     with {:ok, body} <- get_movers(name, credentials, opts),
          {:ok, screeners} <- list_field(body, "screeners") do
-      rows =
-        screeners
-        |> Enum.with_index(1)
-        # A row that cannot name its instrument is dropped rather than published under an
-        # empty one. `Core.Types.ScreenerResult` enforces `:symbol` and `new/1` refuses a
-        # `nil` there, but this builds the struct literally — as everywhere in this family —
-        # so `|| ""` satisfied the requirement while saying nothing. An empty string is worse
-        # than the `nil` it replaced: a `nil` is detectable, `""` is a value, so a consumer
-        # keying coverage by symbol gets a live entry named "".
-        #
-        # Dropped AFTER `Enum.with_index/2`, so a survivor keeps the position the venue
-        # returned it in. `rank` is that position and nothing else — closing the gap would
-        # re-rank the list, which is what the ordering comment above already rules out.
-        |> Enum.flat_map(fn {row, rank} ->
-          # Matched on the row, not `row["symbol"]`: a row that is not an object raised in
-          # `Access`. It names no instrument, and is dropped like one that names none.
-          case row do
-            %{"symbol" => symbol} when is_binary(symbol) and symbol != "" ->
-              [
-                %ScreenerResult{
-                  symbol: symbol,
-                  screener: name,
-                  rank: rank,
-                  metrics: row,
-                  venue_time: nil,
-                  provider: :schwab
-                }
-              ]
+      # **A row that cannot name its instrument refuses the list**, `{:error,
+      # {:unreadable_screener_row, rank}}` (`rank` is its position, 1-based). It used to be
+      # dropped, which answered a "top movers" list with a mover missing; `rank` kept the
+      # survivors' positions, but a consumer ranking by the list never sees the hole. It is
+      # never published under an empty symbol either (`|| ""` satisfied `ScreenerResult`'s
+      # enforced `:symbol` while saying nothing). Matched on the row, not `row["symbol"]`: a
+      # row that is not an object would raise in `Access`.
+      screeners
+      |> Enum.with_index(1)
+      |> Enum.reduce_while({:ok, []}, fn
+        {%{"symbol" => symbol} = row, rank}, {:ok, acc} when is_binary(symbol) and symbol != "" ->
+          result = %ScreenerResult{
+            symbol: symbol,
+            screener: name,
+            rank: rank,
+            metrics: row,
+            venue_time: nil,
+            provider: :schwab
+          }
 
-            _unnamed ->
-              []
-          end
-        end)
+          {:cont, {:ok, [result | acc]}}
 
-      {:ok, rows}
+        {_unnamed, rank}, _acc ->
+          {:halt, {:error, {:unreadable_screener_row, rank}}}
+      end)
+      |> case do
+        {:ok, results} -> {:ok, Enum.reverse(results)}
+        error -> error
+      end
     end
   end
 
@@ -2324,8 +2351,11 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec get_transactions(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def get_transactions(credentials, account_hash, opts) when is_binary(account_hash) do
-    with {:ok, from, to} <- transaction_window(opts),
+  def get_transactions(credentials, account_hash, opts) do
+    # A nil or non-binary hash is `{:invalid_path_segment, :schwab}`, not a
+    # `FunctionClauseError` in the caller's process.
+    with {:ok, path} <- binary_account_path(account_hash, ["transactions"]),
+         {:ok, from, to} <- transaction_window(opts),
          {:ok, types} <- transaction_type_param(opts) do
       query =
         query_string(%{
@@ -2335,8 +2365,7 @@ defmodule DpExchange.Schwab.Rest do
           "symbol" => Keyword.get(opts, :symbol)
         })
 
-      with {:ok, path} <- account_path(account_hash, ["transactions"]),
-           {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts),
+      with {:ok, body} <- get(trader_url(opts) <> path <> query, credentials, opts),
            {:ok, rows} <- list_body(body) do
         within_transactions_cap(rows)
       end
@@ -2380,8 +2409,7 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec check_order_window(keyword()) :: :ok | {:error, term()}
   def check_order_window(opts) do
-    with {:ok, _from, _to} <- order_window(opts),
-         do: check_order_status(Keyword.get(opts, :status))
+    with {:ok, _from, _to} <- order_window(opts), do: check_order_filters(opts)
   end
 
   @doc """
@@ -2396,8 +2424,7 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec check_all_orders_window(keyword()) :: :ok | {:error, term()}
   def check_all_orders_window(opts) do
-    with {:ok, _from, _to} <- all_orders_window(opts),
-         do: check_order_status(Keyword.get(opts, :status))
+    with {:ok, _from, _to} <- all_orders_window(opts), do: check_order_filters(opts)
   end
 
   defp all_orders_window(opts) do
@@ -2432,6 +2459,22 @@ defmodule DpExchange.Schwab.Rest do
 
   defp check_order_status(status) do
     if status in order_statuses(), do: :ok, else: {:error, {:invalid_order_status, status}}
+  end
+
+  # The two optional filters of both orders endpoints, in the order they are judged. `maxResults`
+  # is an integer in the spec (`int64`, "Default is 3000"), so a caller's `max_results` is a
+  # positive integer or `nil` (absent, as a forwarded `nil` is silence). Zero, a negative, a
+  # float or a string was sent as given: the venue's answer to it is unmeasured, and a reply
+  # bounded by a value the caller did not mean reads as "all the orders". Refused by name
+  # instead, before any request, through the same function the Fake calls.
+  defp check_order_filters(opts) do
+    with :ok <- check_order_status(Keyword.get(opts, :status)) do
+      case Keyword.get(opts, :max_results) do
+        nil -> :ok
+        max when is_integer(max) and max > 0 -> :ok
+        other -> {:error, {:invalid_option, :max_results, other}}
+      end
+    end
   end
 
   # **Every shape is answered, none raises.** A type that was not a string (`types: :TRADE`)
@@ -2477,8 +2520,9 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
-  def get_transaction(credentials, account_hash, transaction_id, opts)
-      when is_binary(account_hash) do
+  def get_transaction(credentials, account_hash, transaction_id, opts) do
+    # `validate_transaction_path/2` judges the hash too: a non-binary one is
+    # `{:invalid_path_segment, :schwab}` rather than a `FunctionClauseError`.
     with {:ok, path} <- validate_transaction_path(account_hash, transaction_id),
          {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
          do: object_or_list(body)
@@ -2493,7 +2537,15 @@ defmodule DpExchange.Schwab.Rest do
   """
   @spec validate_transaction_path(term(), term()) :: {:ok, String.t()} | {:error, term()}
   def validate_transaction_path(account_hash, transaction_id),
-    do: account_path(account_hash, ["transactions", transaction_id])
+    do: binary_account_path(account_hash, ["transactions", transaction_id])
+
+  # The hash is Schwab's encrypted string. `account_path/2` would also take an integer as a
+  # segment (right for an id, wrong for the hash), so the hash is held to a binary here and
+  # anything else is the same refusal a blank one gets.
+  defp binary_account_path(account_hash, rest) when is_binary(account_hash),
+    do: account_path(account_hash, rest)
+
+  defp binary_account_path(_not_a_hash, _rest), do: {:error, {:invalid_path_segment, :schwab}}
 
   @doc """
   The signed-in user's preferences — `GET /userPreference`.
@@ -3092,7 +3144,7 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, account_hash, opts) do
     with {:ok, from, to} <- order_window(opts),
-         :ok <- check_order_status(Keyword.get(opts, :status)) do
+         :ok <- check_order_filters(opts) do
       query =
         query_string(%{
           "fromEnteredTime" => from,
