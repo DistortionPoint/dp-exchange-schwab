@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.138] - 2026-10-17
+
 ### Fixed
 
 - **A crashed route or unresponsive poller now emits `[:dp_exchange, :link, :down]`
