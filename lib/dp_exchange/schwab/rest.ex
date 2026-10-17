@@ -1353,14 +1353,29 @@ defmodule DpExchange.Schwab.Rest do
   @spec get_market(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market(market, credentials, opts) do
-    with :ok <- check_market(market),
-         {:ok, date} <- date_param(:date, Keyword.get(opts, :date)) do
+    with {:ok, date} <- validate_market_request(market, opts) do
       query = query_string(%{"date" => date})
       path = "/markets/" <> market <> query
 
       # `object/1`, so the `{:ok, map()}` in this spec is true. It returned the body as sent,
       # and a caller reading market hours off a list got whatever the venue sent instead.
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts), do: object(body)
+    end
+  end
+
+  @doc """
+  Judges the arguments of `get_market/3` without sending anything: the market against the
+  venue's enum, then `opts[:date]`. Returns the date as the venue's `yyyy-MM-dd` string, or
+  `nil` when none was given.
+
+  `get_market/3` and `DpExchange.Schwab.Fake.get_market/3` both call this, so the two cannot
+  drift on what they refuse or in which order.
+  """
+  @spec validate_market_request(term(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def validate_market_request(market, opts) do
+    with :ok <- check_market(market) do
+      date_param(:date, Keyword.get(opts, :date))
     end
   end
 
@@ -2464,10 +2479,21 @@ defmodule DpExchange.Schwab.Rest do
           {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
   def get_transaction(credentials, account_hash, transaction_id, opts)
       when is_binary(account_hash) do
-    with {:ok, path} <- account_path(account_hash, ["transactions", transaction_id]),
+    with {:ok, path} <- validate_transaction_path(account_hash, transaction_id),
          {:ok, body} <- get(trader_url(opts) <> path, credentials, opts),
          do: object_or_list(body)
   end
+
+  @doc """
+  Judges the two path segments of `get_transaction/4` without sending anything, and returns
+  the request path. Each is one segment: a non-empty string or an integer, else
+  `{:error, {:invalid_path_segment, :schwab}}`.
+
+  Shared with `DpExchange.Schwab.Fake.get_transaction/4`, so the two cannot drift.
+  """
+  @spec validate_transaction_path(term(), term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_transaction_path(account_hash, transaction_id),
+    do: account_path(account_hash, ["transactions", transaction_id])
 
   @doc """
   The signed-in user's preferences — `GET /userPreference`.

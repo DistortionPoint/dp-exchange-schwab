@@ -31,6 +31,25 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`DpExchange.Schwab.Fake` now carries every function the facade exports.** Seven had no
+  fake - `refresh_credentials/2`, `get_transaction/4`, `get_account_summaries/2`,
+  `get_symbol_quote/3`, `get_market/3`, `get_instrument/3` and `get_user_preference/2` - so a
+  consumer who swapped the fake in met an `UndefinedFunctionError` on the real venue's own
+  surface. Each answers the venue's own JSON in the shape of the vendor specification's
+  examples (`get_market/3` only for `equity` and `option`, the two with an example; the other
+  markets are `{:refused, {:venue_error, 404}}` rather than invented hours), consults
+  `FakeInjection`, and judges its arguments before the credential as the real path does. A
+  test pins `Schwab.__info__(:functions) -- Fake.__info__(:functions) == []`.
+
+### Changed
+
+- The argument checks the new fakes share with the real code are now public:
+  `Rest.validate_market_request/2`, `Rest.validate_transaction_path/2` and
+  `Auth.validate_refresh_input/1`. `Rest.get_market/3`, `Rest.get_transaction/4` and
+  `Auth.refresh/2` call them, so behaviour is unchanged and the fake cannot drift from it.
+
 ## [0.2.138] - 2026-10-17
 
 ### Fixed

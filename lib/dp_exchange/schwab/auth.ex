@@ -278,11 +278,34 @@ defmodule DpExchange.Schwab.Auth do
           {:ok, credentials()} | {:error, term()} | {:refused, term()}
   def refresh(credentials, opts \\ [])
 
-  def refresh(
-        %{refresh_token: refresh_token, client_id: client_id, client_secret: client_secret} =
-          credentials,
+  def refresh(credentials, opts) do
+    with :ok <- validate_refresh_input(credentials) do
+      do_refresh(
+        credentials,
+        credentials.refresh_token,
+        credentials.client_id,
+        credentials.client_secret,
         opts
       )
+    end
+  end
+
+  @doc """
+  Judges a credential for `refresh/2` without sending anything: `:ok`, or the refusal
+  `refresh/2` would return before any request.
+
+  `refresh/2` and `DpExchange.Schwab.Fake.refresh_credentials/2` both call this, so the two
+  cannot drift on what they refuse. A credential lacking a binary `:refresh_token`,
+  `:client_id` or `:client_secret` (or not a map) is `{:error, {:missing_credentials,
+  :schwab}}`; a blank one is the same; one with surrounding whitespace or control characters
+  is `{:error, {:invalid_credentials, :schwab}}`.
+  """
+  @spec validate_refresh_input(term()) :: :ok | {:error, {atom(), :schwab}}
+  def validate_refresh_input(%{
+        refresh_token: refresh_token,
+        client_id: client_id,
+        client_secret: client_secret
+      })
       when is_binary(refresh_token) and is_binary(client_secret) and is_binary(client_id) do
     # All three, not two of them. `:client_secret` was guarded only by `is_binary/1` above,
     # so a blank one passed the gate and went out as `Basic base64("client_id:")`. Schwab
@@ -309,11 +332,11 @@ defmodule DpExchange.Schwab.Auth do
         {:error, {:invalid_credentials, :schwab}}
 
       true ->
-        do_refresh(credentials, refresh_token, client_id, client_secret, opts)
+        :ok
     end
   end
 
-  def refresh(_incomplete, _opts), do: {:error, {:missing_credentials, :schwab}}
+  def validate_refresh_input(_incomplete), do: {:error, {:missing_credentials, :schwab}}
 
   defp do_refresh(credentials, refresh_token, client_id, client_secret, opts) do
     # Basic auth over the client pair, per the venue's documented example. This is the

@@ -58,14 +58,16 @@ defmodule DpExchange.Schwab.Fake do
   calls judge their arguments and sign last. `%{refresh_token: "x"}` and
   `%{access_token: ""}` are refused here as they are there.
 
-  ## What is deliberately not provided
+  ## Every facade function exists here
 
-  The facade's raw, undecoded reads — `get_transaction/4`, `get_account_summaries/2`,
-  `get_symbol_quote/3`, `get_market/3`, `get_instrument/3` and `get_user_preference/2` —
-  and `refresh_credentials/2` have no fake. Each returns the venue's own JSON, so a fake
-  would have to invent a venue document this repository has no credential to check
-  against; a consumer needing one drives `DpExchange.Schwab.Rest` with its own `:plug`.
-  The static lists and pure predicates (`movers_universes/0`, `markets/0`,
+  `DpExchange.Schwab.__info__(:functions) -- DpExchange.Schwab.Fake.__info__(:functions)`
+  is `[]`, and a test pins it. That includes the raw, undecoded reads - `get_transaction/4`,
+  `get_account_summaries/2`, `get_symbol_quote/3`, `get_market/3`, `get_instrument/3` and
+  `get_user_preference/2` - and `refresh_credentials/2`. Each answers the venue's own JSON
+  in the shape of the vendor specification's examples, after the real function's own
+  argument checks (`Rest.validate_market_request/2`, `Rest.validate_transaction_path/2`,
+  `Auth.validate_refresh_input/1` are shared, not copied). The values are the fake's own: a
+  fake cannot know what a real account, security or token holds. The static lists and pure predicates (`movers_universes/0`, `markets/0`,
   `transaction_types/0`, `equity_instructions/0`, `option_instructions/0`,
   `needs_refresh?/2`, `credential_failure?/1`) are delegated, and `wanted/1`, `status/1`
   and `update_credentials/2` answer for the fake's own bookkeeping.
@@ -1551,9 +1553,312 @@ defmodule DpExchange.Schwab.Fake do
       # Through the cap check the real path applies, so a reply at the venue's cap is
       # refused as `{:error, :history_truncated}` here exactly as there. This fake's one
       # row is far below it.
-      Rest.within_transactions_cap([
-        %{"activityId" => 1, "type" => "TRADE", "netAmount" => Decimal.new("-1802.5")}
-      ])
+      Rest.within_transactions_cap([transaction_row()])
+    end
+  end
+
+  defp transaction_row,
+    do: %{"activityId" => 1, "type" => "TRADE", "netAmount" => Decimal.new("-1802.5")}
+
+  # --- the raw, undecoded reads -------------------------------------------
+  #
+  # Every public function on `DpExchange.Schwab` exists here too (a test pins it), so a
+  # consumer who swaps the fake in never meets an `UndefinedFunctionError` on the real
+  # venue's surface. These return the venue's own JSON in the shape the vendor specification
+  # documents (`test/fixtures/spec_examples/`), after the same argument checks as the real
+  # path - `Rest.validate_*` and `Auth.validate_refresh_input/1` are the real functions, not
+  # copies - and the credential last, as the real path signs last. Every id and value is the
+  # fake's own: what the venue would say about a real account, security or token is exactly
+  # what this repository has no credential to check.
+
+  @doc """
+  The credential after a refresh, as `DpExchange.Schwab.refresh_credentials/2` answers it:
+  both tokens replaced, `:expires_at` thirty minutes after `opts[:now]` (`as_of/0` by
+  default), and every other key of `credentials` kept.
+
+  Refuses first what `DpExchange.Schwab.Auth.refresh/2` refuses before a request, through the
+  same `Auth.validate_refresh_input/1`: a credential without a `:refresh_token`, `:client_id`
+  and `:client_secret` is `{:error, {:missing_credentials, :schwab}}`, a padded one
+  `{:error, {:invalid_credentials, :schwab}}`; then a non-https `:token_url`
+  `{:error, {:insecure_url, :schwab}}`. This call judges the credential itself, so
+  `FakeInjection.bypass_credentials/1` does not apply to it. The new tokens are the fake's,
+  and nothing is sent anywhere.
+  """
+  @spec refresh_credentials(Auth.credentials(), keyword()) ::
+          {:ok, Auth.credentials()} | {:error, term()} | {:refused, term()}
+  def refresh_credentials(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_refresh_credentials(credentials, opts) end)
+  end
+
+  defp do_refresh_credentials(credentials, opts) do
+    with :ok <- Auth.validate_refresh_input(credentials),
+         :ok <- Auth.check_secure_url(Auth.token_url(opts), opts) do
+      now = Keyword.get(opts, :now, @as_of)
+
+      {:ok,
+       Map.merge(credentials, %{
+         access_token: "fake-access-token-rotated",
+         refresh_token: "fake-refresh-token-rotated",
+         expires_at: DateTime.add(now, 1800, :second)
+       })}
+    end
+  end
+
+  @doc """
+  One transaction by id, as `DpExchange.Schwab.get_transaction/4` answers it: a list holding
+  the venue's own row, undecoded.
+
+  Judges both path segments through `Rest.validate_transaction_path/2` (a blank or
+  non-string segment is `{:error, {:invalid_path_segment, :schwab}}`; a non-binary account
+  hash raises `FunctionClauseError` as the real function does), then the credential. The one
+  id this fake holds is `1`, the row `get_transactions/2` lists; any other is
+  `{:refused, {:venue_error, 404}}`.
+  """
+  @spec get_transaction(map(), String.t(), integer() | String.t(), keyword()) ::
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
+  def get_transaction(credentials, account_hash, transaction_id, opts \\ [])
+      when is_binary(account_hash) do
+    with_injection(nil, fn ->
+      do_get_transaction(credentials, account_hash, transaction_id, opts)
+    end)
+  end
+
+  defp do_get_transaction(credentials, account_hash, transaction_id, _opts) do
+    with {:ok, _path} <- Rest.validate_transaction_path(account_hash, transaction_id),
+         :ok <- require_credentials(credentials: credentials) do
+      if transaction_id in [1, "1"],
+        do: {:ok, [transaction_row()]},
+        else: {:refused, {:venue_error, 404}}
+    end
+  end
+
+  @doc """
+  Every account's balances, and its positions when `opts[:fields]` is `"positions"`, as
+  `DpExchange.Schwab.get_account_summaries/2` answers them: a list of the venue's own
+  `securitiesAccount` wrappers, undecoded. The real function judges nothing before it
+  signs, so this checks only the credential.
+  """
+  @spec get_account_summaries(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_account_summaries(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_account_summaries(credentials, opts) end)
+  end
+
+  defp do_get_account_summaries(credentials, opts) do
+    with :ok <- require_credentials(credentials: credentials) do
+      account = %{
+        "type" => "MARGIN",
+        "accountNumber" => @account_number,
+        "roundTrips" => 0,
+        "isDayTrader" => false,
+        "currentBalances" => %{
+          "availableFunds" => 15_000,
+          "buyingPower" => 30_000,
+          "equity" => 45_825
+        }
+      }
+
+      {:ok, [%{"securitiesAccount" => with_positions(account, Keyword.get(opts, :fields))}]}
+    end
+  end
+
+  defp with_positions(account, "positions") do
+    Map.put(account, "positions", [
+      %{
+        "shortQuantity" => 0,
+        "longQuantity" => 100,
+        "averagePrice" => Decimal.new("150.25"),
+        "marketValue" => 22_750,
+        "instrument" => %{
+          "assetType" => "EQUITY",
+          "cusip" => "037833100",
+          "symbol" => "AAPL",
+          "description" => "Apple Inc"
+        }
+      }
+    ])
+  end
+
+  defp with_positions(account, _no_positions), do: account
+
+  @doc """
+  One symbol's quote, unnormalised, as `DpExchange.Schwab.get_symbol_quote/3` answers it:
+  the venue's own map keyed by symbol.
+
+  Like the real function it does not run `SymbolFormat.validate/1` (the symbol is only
+  translated, and a non-binary raises `FunctionClauseError`), so a symbol outside
+  `listed/0` is `{:refused, {:venue_error, 404}}`, the venue's word for a name it does not
+  list. The credential is judged first, as signing does. Targetable by symbol through
+  `FakeInjection`.
+  """
+  @spec get_symbol_quote(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_symbol_quote(symbol, credentials, opts \\ []) when is_binary(symbol) do
+    with_injection(symbol, fn -> do_get_symbol_quote(symbol, credentials, opts) end)
+  end
+
+  defp do_get_symbol_quote(symbol, credentials, _opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+
+    with :ok <- require_credentials(credentials: credentials) do
+      case Map.fetch(@prices, native) do
+        {:ok, price} -> {:ok, %{native => quote_body(native, Decimal.new(price))}}
+        :error -> {:refused, {:venue_error, 404}}
+      end
+    end
+  end
+
+  defp quote_body(symbol, price) do
+    ms = DateTime.to_unix(@as_of, :millisecond)
+
+    %{
+      "assetMainType" => "EQUITY",
+      "symbol" => symbol,
+      "quoteType" => "NBBO",
+      "realtime" => true,
+      "quote" => %{
+        "lastPrice" => price,
+        "bidPrice" => Decimal.sub(price, Decimal.new("0.01")),
+        "askPrice" => Decimal.add(price, Decimal.new("0.01")),
+        "totalVolume" => 1_000_000,
+        "quoteTime" => ms,
+        "tradeTime" => ms
+      }
+    }
+  end
+
+  @doc """
+  One market's hours, as `DpExchange.Schwab.get_market/3` answers them: the venue's own map,
+  keyed by market then product.
+
+  Judges the market and `opts[:date]` through `Rest.validate_market_request/2` (an unknown
+  market is `{:error, {:unknown_market, m}}`, a bad date `{:error, {:invalid_date, :date, v}}`),
+  then the credential. Only `equity` and `option` carry an example in the vendor
+  specification, so those two are answered; `bond`, `future` and `forex` are
+  `{:refused, {:venue_error, 404}}` rather than hours this repository invented. `isOpen`
+  follows `opts[:market_status]` as `market_status/1` does, and the session offsets are the
+  specification example's (`-04:00`), not computed for the date.
+  """
+  @spec get_market(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_market(market, credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_market(market, credentials, opts) end)
+  end
+
+  defp do_get_market(market, credentials, opts) do
+    with {:ok, date} <- Rest.validate_market_request(market, opts),
+         :ok <- require_credentials(credentials: credentials) do
+      date = date || Date.to_iso8601(DateTime.to_date(@as_of))
+      market_hours(market, date, Config.opt(opts, :market_status, :open) == :open)
+    end
+  end
+
+  defp market_hours("equity", date, open?) do
+    {:ok,
+     %{
+       "equity" => %{
+         "EQ" => %{
+           "date" => date,
+           "marketType" => "EQUITY",
+           "product" => "EQ",
+           "productName" => "equity",
+           "isOpen" => open?,
+           "sessionHours" => %{
+             "preMarket" => [session(date, "07:00:00", "09:30:00")],
+             "regularMarket" => [session(date, "09:30:00", "16:00:00")],
+             "postMarket" => [session(date, "16:00:00", "20:00:00")]
+           }
+         }
+       }
+     }}
+  end
+
+  defp market_hours("option", date, open?) do
+    {:ok,
+     %{
+       "option" => %{
+         "EQO" => %{
+           "date" => date,
+           "marketType" => "OPTION",
+           "product" => "EQO",
+           "productName" => "equity option",
+           "isOpen" => open?,
+           "sessionHours" => %{"regularMarket" => [session(date, "09:30:00", "16:00:00")]}
+         }
+       }
+     }}
+  end
+
+  defp market_hours(_no_example, _date, _open?), do: {:refused, {:venue_error, 404}}
+
+  defp session(date, from, to),
+    do: %{"start" => "#{date}T#{from}-04:00", "end" => "#{date}T#{to}-04:00"}
+
+  @doc """
+  One instrument by CUSIP, as `DpExchange.Schwab.get_instrument/3` answers it: the venue's
+  own map. The one CUSIP this fake holds is `037833100` (AAPL, the vendor example); any other
+  is `{:refused, {:venue_error, 404}}`. The real function validates nothing beyond a binary
+  argument (a non-binary raises `FunctionClauseError`), so this checks the credential only.
+  """
+  @spec get_instrument(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_instrument(cusip, credentials, opts \\ []) when is_binary(cusip) do
+    with_injection(nil, fn -> do_get_instrument(cusip, credentials, opts) end)
+  end
+
+  defp do_get_instrument(cusip, credentials, _opts) do
+    with :ok <- require_credentials(credentials: credentials) do
+      if cusip == "037833100" do
+        {:ok,
+         %{
+           "cusip" => "037833100",
+           "symbol" => "AAPL",
+           "description" => "Apple Inc",
+           "exchange" => "NASDAQ",
+           "assetType" => "EQUITY"
+         }}
+      else
+        {:refused, {:venue_error, 404}}
+      end
+    end
+  end
+
+  @doc """
+  The signed-in user's preferences, as `DpExchange.Schwab.get_user_preference/2` answers
+  them: the venue's own map (the vendor example), undecoded, with the fake's one account.
+  Takes no parameters, so only the credential is judged.
+  """
+  @spec get_user_preference(map(), keyword()) ::
+          {:ok, map() | [map()]} | {:error, term()} | {:refused, term()}
+  def get_user_preference(credentials, opts \\ []) do
+    with_injection(nil, fn -> do_get_user_preference(credentials, opts) end)
+  end
+
+  defp do_get_user_preference(credentials, _opts) do
+    with :ok <- require_credentials(credentials: credentials) do
+      {:ok,
+       %{
+         "accounts" => [
+           %{
+             "accountNumber" => @account_number,
+             "primaryAccount" => true,
+             "type" => "MARGIN",
+             "nickName" => "Trading",
+             "displayAcctId" => "...789",
+             "autoPositionEffect" => false
+           }
+         ],
+         "streamerInfo" => [
+           %{
+             "streamerSocketUrl" => "wss://streamer-api.schwab.com/ws",
+             "schwabClientCustomerId" => "cust-1",
+             "schwabClientCorrelId" => "corr-1",
+             "schwabClientChannel" => "IO",
+             "schwabClientFunctionId" => "APIAPP"
+           }
+         ],
+         "offers" => [%{"level2Permissions" => true, "mktDataPermission" => "NP"}]
+       }}
     end
   end
 

@@ -862,6 +862,15 @@ DpExchange.Core.FakeInjection.bypass_credentials(:schwab)
 DpExchange.Schwab.Fake.get_price("AAPL", [])  #=> {:ok, %Quote{}}, no credentials needed
 ```
 
+**The fake has every function the facade has.** `DpExchange.Schwab.__info__(:functions) --
+DpExchange.Schwab.Fake.__info__(:functions)` is `[]`, pinned by a test, including the raw reads
+(`get_transaction/4`, `get_account_summaries/2`, `get_symbol_quote/3`, `get_market/3`,
+`get_instrument/3`, `get_user_preference/2`) and `refresh_credentials/2`. They check their
+arguments with the real modules' own `validate_*` functions and the credential last, then
+answer the vendor specification's example shapes with the fake's own values. `get_market/3`
+has hours for `equity` and `option` only; another valid market is `{:refused, {:venue_error,
+404}}`, and so is an unknown id, symbol or CUSIP.
+
 Injection is process-scoped through `Core.Config`, so it is `async: true` safe and reaches
 only the calling process and `Task`s it spawns — not a separately-supervised `GenServer`.
 
