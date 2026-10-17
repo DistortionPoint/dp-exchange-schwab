@@ -298,7 +298,7 @@ defmodule DpExchange.Schwab.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed}
+  alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed, Telemetry}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
   alias DpExchange.Schwab.{Auth, Bound, Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
 
@@ -693,6 +693,11 @@ defmodule DpExchange.Schwab.Feed do
       # A `:link_down` this feed sent itself (a crashed route, an unresponsive poller) that no
       # `:link_up` has closed yet. Latched so the first good poll says so once.
       link_down_open: false,
+      # `Core.Telemetry.link_down/2` has been emitted for the link as it stands and no
+      # `:link_up` has followed. Set when the Socket reports its own `:link_down` (it emitted
+      # the event itself) and when this feed emits one for a route that died without saying
+      # so; cleared by the next `:link_up`. Keeps the event once per lost link.
+      telemetry_link_down: false,
       route: nil,
       delivering: %{},
       # `symbol => MapSet.t(Core.Capabilities.data_kind())`, populated only from the
@@ -1008,14 +1013,15 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_info({:dp_exchange, :schwab, %Notice{kind: :link_down} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
-    {:noreply, %{state | delivering: %{}, kinds: %{}}}
+    # The Socket emits `Telemetry.link_down/2` itself before sending this notice.
+    {:noreply, %{state | delivering: %{}, kinds: %{}, telemetry_link_down: true}}
   end
 
   # The Socket's `:link_up` closes whatever `:link_down` this feed had open, so the poll
   # clause does not announce a second recovery for the same outage.
   def handle_info({:dp_exchange, :schwab, %Notice{kind: :link_up} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
-    {:noreply, %{state | link_down_open: false}}
+    {:noreply, %{state | link_down_open: false, telemetry_link_down: false}}
   end
 
   def handle_info({:dp_exchange, :schwab, %Notice{} = notice}, state) do
@@ -1604,7 +1610,7 @@ defmodule DpExchange.Schwab.Feed do
 
     # A `:link_down` is closed by a `:link_up`: from the Socket when the redial reaches the
     # Streamer, from `handle_info/2`'s poll clause on the first good poll otherwise.
-    state = %{state | link_down_open: true}
+    state = %{state | link_down_open: true} |> emit_link_down(reason)
 
     # Tries the Streamer first and falls back to the poll on failure, exactly like a
     # first-ever bootstrap — a poller crash is not assumed to mean "restart the same
@@ -2219,14 +2225,26 @@ defmodule DpExchange.Schwab.Feed do
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :schwab, notice})
-    %{state | link_down_open: true}
+    %{state | link_down_open: true} |> emit_link_down(reason)
+  end
+
+  # **The metrics half of a lost link.** A socket that crashes runs no `handle_disconnect/2`, so
+  # its `Telemetry.link_down/2` never fires, and an unresponsive poller never emitted one at
+  # all; a consumer's link gauge stayed "up" for an outage the notice channel had reported.
+  # Emitted once per lost link: a link the Socket already reported down (it emits its own) or
+  # one this feed already reported is not reported again, until a `:link_up` closes it.
+  defp emit_link_down(%{telemetry_link_down: true} = state, _reason), do: state
+
+  defp emit_link_down(state, reason) do
+    Telemetry.link_down(:schwab, Bound.reason(reason))
+    %{state | telemetry_link_down: true}
   end
 
   # The first good poll after a `:link_down` this feed sent itself says so, once. A poll that
   # delivered a quote is the evidence; a refusal or a notice is not.
   defp maybe_poll_link_up(%{link_down_open: true} = state, %Quote{}) do
     notify(state, Notice.new(:link_up, :schwab))
-    %{state | link_down_open: false}
+    %{state | link_down_open: false, telemetry_link_down: false}
   end
 
   defp maybe_poll_link_up(state, _value), do: state

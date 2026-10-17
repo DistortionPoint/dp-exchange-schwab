@@ -80,8 +80,9 @@ defmodule DpExchange.Schwab.Supervisor do
   behaviour would have surfaced as a rejection from Schwab itself, not from this package's
   own configured guard. It went unnoticed because the read ceiling and Schwab's documented
   order maximum are both `120`, so nothing about it ever *looked* wrong. `Rest` now tags
-  those three calls `provider: :schwab_orders`, so a declared ceiling is the one that
-  actually meters them.
+  those three calls `rate_limit_key: :schwab_orders` (their `provider` stays `:schwab`, so
+  errors and telemetry name the venue), so a declared ceiling is the one that actually
+  meters them.
   """
 
   use Supervisor

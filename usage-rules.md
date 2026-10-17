@@ -1050,7 +1050,9 @@ the names, not to anything venue-specific:
 ```
 
 `:provider` in the metadata is how you tell venues apart — one handler covers the whole
-family.
+family. Order writes (`place_order/3`, `replace_order/4`, `cancel_order/3`) are metered in
+their own limiter bucket but are still `provider: :schwab` in telemetry and in
+`{:exchange_error, :schwab, _}`.
 
 **These names were documented long before anything emitted them.** If you attached a handler
 before this version and saw nothing, that was not your venue being quiet:
@@ -1077,6 +1079,13 @@ Four things to know before you build on them:
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
 part of a URL that can carry a token.
+
+**`[:dp_exchange, :link, :down]` fires once per lost link, whichever way it was lost.** A
+socket disconnect emits it from the socket; a socket or poller that *crashed* (no disconnect
+callback runs) and a poller that stopped answering are reported by the feed itself, with the
+bounded crash reason. The feed does not emit a second one for a link the socket already
+reported, and emits no further one until a `:link_up` has closed the outage, so a link gauge
+driven by up/down events stays correct.
 
 ## Every capability claim is dated, and says what it was measured against
 

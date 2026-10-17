@@ -243,7 +243,7 @@ defmodule DpExchange.Schwab.RestGapsTest do
                %{"orderType" => "MARKET"},
                plug: exploding,
                rate_limit_blocking: true
-             ) == {:error, {:exchange_error, :schwab_orders, :rate_limit_timeout}}
+             ) == {:error, {:exchange_error, :schwab, :rate_limit_timeout}}
     end
 
     test "an answer too large to read is unconfirmed: the order may be live" do
@@ -253,7 +253,7 @@ defmodule DpExchange.Schwab.RestGapsTest do
         Plug.Conn.resp(conn, 201, :binary.copy("x", 16 * 1024 * 1024 + 1))
       end
 
-      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab_orders, reason}}} =
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab, reason}}} =
                Rest.place_order(@creds, "ABCDEF", %{"orderType" => "MARKET"}, plug: oversized)
 
       assert reason =~ "response_too_large"

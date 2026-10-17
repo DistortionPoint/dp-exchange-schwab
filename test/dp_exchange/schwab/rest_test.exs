@@ -1184,7 +1184,7 @@ defmodule DpExchange.Schwab.RestTest do
       assert {:error, {:exchange_error, :schwab, _m}} =
                Rest.preview_order(@creds, "H", %{}, plug: responding(%{}, 500), retry_attempts: 0)
 
-      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab_orders, _m}}} =
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab, _m}}} =
                Rest.replace_order(@creds, "H", "1", %{},
                  plug: responding(%{}, 500),
                  retry_attempts: 0

@@ -306,10 +306,11 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       # Both are order writes and meter against `:schwab_orders`, not `:schwab` — see
       # `Rest.order_write_request_opts/1`. A placement that met a 5xx may have taken effect, so
       # it is unconfirmed rather than an error worth retrying; a cancel is a plain error.
-      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab_orders, _msg}}} =
+      # The bucket is `:schwab_orders`; the error's venue tag is `:schwab`, never the bucket.
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :schwab, _msg}}} =
                Rest.place_order(@creds, "H", %{}, opts(responding(%{}, 500)))
 
-      assert {:error, {:exchange_error, :schwab_orders, _msg}} =
+      assert {:error, {:exchange_error, :schwab, _msg}} =
                Rest.cancel_order(@creds, "H", "1", opts(responding(%{}, 500)))
     end
 

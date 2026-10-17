@@ -31,6 +31,28 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A crashed route or unresponsive poller now emits `[:dp_exchange, :link, :down]`
+  (tick AI).** A Socket that crashes runs no `handle_disconnect/2`, so its link_down event never
+  fired, and `Feed.isolate_crashed_route/2` and the unresponsive-poller path sent only the
+  `:link_down` Notice; a consumer's link gauge stayed "up". `Feed` now emits
+  `Telemetry.link_down(:schwab, reason)` (bounded text) once per lost link: not again when the
+  Socket already reported its own, and not again until a `:link_up` closes the outage.
+- **A failed order write is tagged `{:exchange_error, :schwab, _}`, not
+  `{:exchange_error, :schwab_orders, _}` (tick AI).** `Rest.place_order/4`,
+  `replace_order/5` and `cancel_order/4` meter in the `:schwab_orders` bucket by passing it
+  as `Core.HttpClient`'s `:provider`, and Core echoes that option as the error's venue tag, so
+  an internal bucket name leaked where the family's venue tag belongs and a consumer matching
+  `{:exchange_error, :schwab, _}` on a placement never matched (also inside
+  `{:order_unconfirmed, nil, _}`). Order writes now pass `provider: :schwab` with Core's
+  `rate_limit_key: :schwab_orders`, which selects only the limiter bucket, so errors AND
+  `[:dp_exchange, :request, _]` / `[:dp_exchange, :rate_limit, _]` telemetry say `:schwab`.
+  Behaviour change for anything that matched `:schwab_orders`. Needs `dp_exchange_core` with
+  `:rate_limit_key`: the floor is now `~> 0.3.99`.
+- Tests: an unresponsive poller emits link_down telemetry once; an order write's
+  `[:dp_exchange, :request, :stop]` carries `provider: :schwab`.
+
 ## [0.2.137] - 2026-10-16
 
 ### Changed

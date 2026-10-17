@@ -2735,10 +2735,13 @@ defmodule DpExchange.Schwab.Rest do
       url = trader_url(opts) <> path
 
       :post
-      |> HttpClient.request(url, headers, body, order_write_request_opts(opts))
+      |> order_write_request(url, headers, body, opts)
       |> order_write_outcome(false)
     end
   end
+
+  defp order_write_request(method, url, headers, body, opts),
+    do: HttpClient.request(method, url, headers, body, order_write_request_opts(opts))
 
   # **An order write that may have reached the venue and is not proven is
   # `{:error, {:order_unconfirmed, nil, reason}}`, never a bare error.** The request is sent
@@ -2960,7 +2963,7 @@ defmodule DpExchange.Schwab.Rest do
       url = trader_url(opts) <> path
 
       :put
-      |> HttpClient.request(url, headers, body, order_write_request_opts(opts))
+      |> order_write_request(url, headers, body, opts)
       |> order_write_outcome(true)
     end
   end
@@ -3003,7 +3006,7 @@ defmodule DpExchange.Schwab.Rest do
          :ok <- Auth.check_secure_url(trader_url(opts), opts) do
       url = trader_url(opts) <> path
 
-      case HttpClient.request(:delete, url, headers, nil, order_write_request_opts(opts)) do
+      case order_write_request(:delete, url, headers, nil, opts) do
         {:ok, %{status: status}} when status in 200..299 ->
           :ok
 
@@ -3158,7 +3161,14 @@ defmodule DpExchange.Schwab.Rest do
       :req_adapter,
       :rate_limit_blocking
     ])
-    |> Keyword.merge(provider: :schwab_orders, raw_status: true, retry_attempts: 1)
+    # `:rate_limit_key` selects only the limiter bucket; `:provider` stays `:schwab`, so errors
+    # and telemetry name the venue, not the bucket.
+    |> Keyword.merge(
+      provider: :schwab,
+      rate_limit_key: :schwab_orders,
+      raw_status: true,
+      retry_attempts: 1
+    )
   end
 
   # **`retry_attempts: 1` means one attempt, no retry, and `:retry_attempts` is deliberately
