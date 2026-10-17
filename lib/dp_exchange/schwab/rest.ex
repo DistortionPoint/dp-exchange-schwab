@@ -1223,6 +1223,13 @@ defmodule DpExchange.Schwab.Rest do
     entitlement: "entitlement"
   ]
 
+  @doc """
+  The option keys `get_chains/2` turns into query parameters, so the facade's allowed-key
+  table (`DpExchange.Schwab.Options`) is derived from the same list and cannot drift from it.
+  """
+  @spec chain_option_keys() :: [atom()]
+  def chain_option_keys, do: Keyword.keys(@chain_params)
+
   # **`contract_type:` is the option's name, like every other snake_case key here.** The table
   # listed it as `:contractType` alone, so `contract_type: "CALL"` was dropped without a word
   # and the caller got the full chain, calls and puts, where it asked for one side: a plausible
@@ -1416,6 +1423,15 @@ defmodule DpExchange.Schwab.Rest do
   @doc "The markets this venue publishes hours for."
   @spec markets() :: [String.t()]
   def markets, do: @markets
+
+  @doc """
+  The refusal `get_instrument/3` makes for a CUSIP that is not a non-empty string:
+  `{:error, {:invalid_path_segment, :schwab}}`. Public so the facade and
+  `DpExchange.Schwab.Fake` judge the positional argument before the options.
+  """
+  @spec check_cusip(term()) :: :ok | {:error, {:invalid_path_segment, :schwab}}
+  def check_cusip(cusip) when is_binary(cusip) and cusip != "", do: :ok
+  def check_cusip(_cusip), do: {:error, {:invalid_path_segment, :schwab}}
 
   @doc """
   One instrument by CUSIP — `GET /instruments/{cusip_id}`.

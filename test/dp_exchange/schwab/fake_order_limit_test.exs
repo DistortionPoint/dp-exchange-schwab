@@ -63,6 +63,9 @@ defmodule DpExchange.Schwab.FakeOrderLimitTest do
   test "reads are never gated" do
     opts = start_tree([])
 
-    assert {:ok, [_balance]} = Fake.get_balances(@creds, opts)
+    # A read takes no order-limit name, so only the account is passed; handing it the name
+    # is a stray key.
+    assert {:ok, [_balance]} = Fake.get_balances(@creds, Keyword.take(opts, [:account_hash]))
+    assert Fake.get_balances(@creds, opts) == {:error, {:unknown_option, :order_limit}}
   end
 end

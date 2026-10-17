@@ -204,7 +204,7 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
     test "update_symbols/2 likewise" do
       FakeInjection.fail_always(:schwab, {:error, :injected})
 
-      assert Fake.update_symbols(["MSFT"], to: self()) == :ok
+      assert Fake.update_symbols(["MSFT"]) == :ok
       assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "MSFT"}}
     end
   end
@@ -221,7 +221,7 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
     test "update_symbols/2 refuses before it clears what was subscribed" do
       :ok = Fake.subscribe(["AAPL"], to: self())
 
-      assert Fake.update_symbols(["BTC-USD"], to: self()) ==
+      assert Fake.update_symbols(["BTC-USD"]) ==
                {:error, {:invalid_symbols, ["BTC-USD"]}}
 
       assert Map.keys(Fake.coverage()) == ["AAPL"]

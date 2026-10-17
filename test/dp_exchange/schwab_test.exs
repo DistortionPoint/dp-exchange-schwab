@@ -360,9 +360,13 @@ defmodule DpExchange.SchwabTest do
       }
 
       plug = fn conn -> Req.Test.json(conn, body) end
-      call_opts = base ++ [plug: plug, retry_attempts: 0]
+      # Preview reads no order-limit name, so it is not passed (it would be a stray key).
+      call_opts = Keyword.delete(base, :order_limit) ++ [plug: plug, retry_attempts: 0]
 
       assert {:ok, _preview} = Schwab.preview_order(@creds, @order_request, call_opts)
+
+      assert Schwab.preview_order(@creds, @order_request, base ++ [plug: plug]) ==
+               {:error, {:unknown_option, :order_limit}}
     end
 
     test "a consumer who never supervises this module at all is unaffected — no tree, no new refusal" do
@@ -920,8 +924,12 @@ defmodule DpExchange.SchwabTest do
       assert Fake.coverage() == %{"AAPL" => :stream}
     end
 
-    test "update_symbols ignores :to, as the real one does" do
-      assert :ok = Fake.update_symbols(["AAPL"], to: "not a subscriber")
+    test "update_symbols reads no :to, so it is an unknown option there as on the real one" do
+      assert Fake.update_symbols(["AAPL"], to: "not a subscriber") ==
+               {:error, {:unknown_option, :to}}
+
+      assert Fake.coverage() == %{}
+      assert :ok = Fake.update_symbols(["AAPL"])
       assert Fake.coverage() == %{"AAPL" => :stream}
     end
 
@@ -1119,11 +1127,9 @@ defmodule DpExchange.SchwabTest do
     # The real facade upper-cases symbols on the way in. The fake has to give the same
     # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
     test "is delivered under the canonical symbol, as the real package does" do
-      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
-
-      assert :ok = DpExchange.Schwab.Fake.subscribe(["aapl"], opts)
+      assert :ok = DpExchange.Schwab.Fake.subscribe(["aapl"], to: self())
       assert_receive {:dp_exchange, _venue, %{symbol: "AAPL"}}, 5_000
-      assert Map.has_key?(DpExchange.Schwab.Fake.coverage(opts), "AAPL")
+      assert Map.has_key?(DpExchange.Schwab.Fake.coverage(), "AAPL")
     end
   end
 end

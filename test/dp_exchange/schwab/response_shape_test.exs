@@ -37,10 +37,7 @@ defmodule DpExchange.Schwab.ResponseShapeTest do
     [
       plug: answering(body),
       retry_attempts: 0,
-      credentials: @credentials,
-      account_id: "acct",
-      account_number: "acct",
-      account_hash: "acct"
+      credentials: @credentials
     ]
   end
 

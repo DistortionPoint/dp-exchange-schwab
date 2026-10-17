@@ -31,6 +31,27 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **A facade option the call does not read is refused, not ignored.** Every facade function
+  that takes keyword `opts` checks them with `DpExchange.Core.Options.check/2` at the
+  boundary, against the keys that function reads (the shared transport keys plus its own),
+  and answers `{:error, {:unknown_option, key}}` for the first other key - a `nil`-valued
+  one included - before an internal key is added, before anything is sent and before the
+  credential is judged. A positional argument that can be judged without `opts` (symbol,
+  order id, underlying, universe, market, CUSIP, transaction path, subscribed symbols) is
+  judged first. `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `status/1`, which have no
+  error channel, raise `ArgumentError` for an unknown key. The Fake refuses identically
+  (conformance group 43), before `FakeInjection` is consulted. The allowed keys live in one
+  table, `DpExchange.Schwab.Options`, and `usage-rules.md` section 16 lists them. This
+  replaces the package's own non-keyword check, so there is one implementation.
+
+  A caller who passed a stray key now gets the refusal: `update_symbols/2` takes no `:to`
+  (it replaces the set and delivers to whoever subscribed), and the Fake-only
+  `market_status:` seam is `{:unknown_option, :market_status}` on the real facade.
+  `:limit`, `:depth`, `:since` and `include_partial: true` keep answering
+  `{:unsupported_option, key}`. Requires `dp_exchange_core ~> 0.3.101`.
+
 ### Changed
 
 - **A non-keyword `opts` is refused, not raised.** Every facade function that reads `opts`

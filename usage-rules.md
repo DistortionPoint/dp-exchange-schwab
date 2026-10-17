@@ -1249,3 +1249,50 @@ reported as `{:refused, symbol, _}` for every wanted symbol, which a consumer re
 venue does not carry this" and answers by dropping the symbol. It is now an ordinary failed
 cycle: retried, and surfaced by the poll's "delivered nothing" `:coverage_change` notice.
 Refresh the credential and call `update_credentials/2`.
+
+## 16. An option the call does not read is refused, not ignored
+
+Every function that takes keyword `opts` answers `{:error, {:unknown_option, key}}` for the
+first key it does not read (a `nil`-valued key counts, so does a misspelt `limt:`), and
+`{:error, {:invalid_options, value}}` when `opts` is not a keyword list. This is decided
+before anything is sent and before the credential is judged; a positional argument that can
+be judged without `opts` (symbol, order id, underlying, universe, market, CUSIP, the
+symbols you subscribe) is judged first. `coverage/1`, `wanted/1`, `coverage_by_kind/1` and
+`status/1` have no error channel and raise `ArgumentError`. `DpExchange.Schwab.Fake` refuses
+the same keys in the same order, before `FakeInjection` is consulted.
+
+Every function reads the shared transport keys: `:credentials`, `:environment`, `:base_url`,
+`:plug`, `:adapter`, `:req_adapter`, `:limiter`, `:rate_limit_blocking`, `:weight`,
+`:timeout`, `:retry_attempts`, `:retry_delay`, `:max_retry_after_s`, `:max_body_bytes` and
+`:log_requests`. Beyond those, per function (the table is `DpExchange.Schwab.Options`):
+
+| Function | Its own keys |
+|---|---|
+| `get_price/2`, `get_top_of_book/2`, `get_option_expirations/2`, `get_instrument/3` | `:market_data_url`, `:extra_headers` |
+| `get_historical_prices/4` | those two, `:include_partial`, `:extended_hours`, `:limit` (refused as unsupported) |
+| `get_symbols/1` | those two, `:query`, `:projection` |
+| `market_status/1` | those two, `:market` |
+| `get_symbol_quote/3` | those two, `:fields` |
+| `get_market/3` | those two, `:date` |
+| `get_option_chain/2` | those two, `:contractType` and the chain filters (`:contract_type`, `:strike_count`, `:include_underlying_quote`, `:strategy`, `:interval`, `:strike`, `:range`, `:from_date`, `:to_date`, `:volatility`, `:underlying_price`, `:interest_rate`, `:days_to_expiration`, `:exp_month`, `:option_type`, `:entitlement`) |
+| `get_screener/2` | those two, `:sort`, `:frequency` |
+| `get_accounts/2`, `test_connection/2`, `get_user_preference/2`, `get_transaction/4` | `:trader_url`, `:extra_headers` |
+| `get_balances/2`, `get_order/3` | those two, `:account_hash` |
+| `get_account_summaries/2` | those two, `:fields` |
+| `get_positions/1` | those two, `:account_number` |
+| `get_orders/2` | those two, `:account_hash`, `:from`, `:to`, `:status`, `:max_results` |
+| `get_all_orders/2` | those two, `:from`, `:to`, `:status`, `:max_results`, `:now` |
+| `get_transactions/2` | those two, `:account_hash`, `:from`, `:to`, `:types`, `:symbol` |
+| `place_order/3`, `replace_order/4` | those two, `:account_hash`, `:session`, `:order_limit` |
+| `preview_order/3` | those two, `:account_hash`, `:session` |
+| `cancel_order/3` | those two, `:account_hash`, `:order_limit` |
+| `refresh_credentials/2` | `:token_url`, `:now` |
+| `subscribe/2` | `:to`, `:feed`, `:include_partial`, `:limit`, `:depth`, `:since` (the last four are refused as unsupported) |
+| `subscribe_notices/1` | `:to`, `:feed` |
+| `unsubscribe/2`, `update_symbols/2`, `update_credentials/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `status/1` | `:feed` |
+
+`update_symbols/2` reads no `:to` (it replaces the set; delivery goes to whoever subscribed),
+so `to:` there is an unknown option. A function this venue does not serve keeps answering
+`{:error, :not_supported}` whatever the options. The Fake alone also reads `:market_status`
+(`market_status/1`, `get_market/3`) and `:account_hash` (`get_accounts/2`) to steer what it
+returns; on the real facade those are unknown options.

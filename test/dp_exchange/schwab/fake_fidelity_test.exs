@@ -428,7 +428,7 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert Fake.wanted() == ["TSLA"]
       assert Fake.status() == %{route: :stream, wanted: 1, delivering: 0, last_error: nil}
 
-      :ok = Fake.update_symbols(["MSFT"], to: self())
+      :ok = Fake.update_symbols(["MSFT"])
       assert Fake.wanted() == ["MSFT"]
     end
 

@@ -118,7 +118,12 @@ defmodule DpExchange.Schwab.InvalidSubscriberTest do
 
     test "update_symbols/2 takes no subscriber, as the real one takes none" do
       assert Fake.subscribe(["AAPL"]) == :ok
-      assert Fake.update_symbols(["MSFT"], to: "x") == :ok
+
+      # A `:to` is a key nothing reads, so it is refused by name and changes nothing.
+      assert Fake.update_symbols(["MSFT"], to: "x") == {:error, {:unknown_option, :to}}
+      assert Fake.wanted() == ["AAPL"]
+
+      assert Fake.update_symbols(["MSFT"]) == :ok
       assert Fake.wanted() == ["MSFT"]
 
       # Symbols are still judged first and change nothing when refused.
