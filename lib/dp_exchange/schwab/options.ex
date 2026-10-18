@@ -32,9 +32,13 @@ defmodule DpExchange.Schwab.Options do
       call reads either: the base URLs are `:market_data_url` and `:trader_url`. Accepting a
       `base_url:` that does nothing would send a live token to the production host from a
       caller who believed it had redirected the call.
-    * `:retry_delay` on an order write: it is exactly one attempt, so there is no wait to
-      scale. (`:max_retry_after_s` is read, it clamps the `Retry-After` a 429 penalises the
-      limiter for, and is forwarded.)
+    * `:retry_attempts` and `:retry_delay` on `place_order/3`, `replace_order/4` and
+      `cancel_order/3`: an order write is always exactly one attempt whatever the caller
+      passes (Schwab has no idempotency key, so a retry of a write that timed out after the
+      venue accepted it could place the order twice), so neither key is read. Any value,
+      `0` and `1` included, is `{:error, {:unknown_option, key}}` before anything is sent.
+      (`:max_retry_after_s` is read, it clamps the `Retry-After` a 429 penalises the limiter
+      for, and is forwarded.)
     * `:retry_attempts` and `:retry_delay` on `refresh_credentials/2`: a refresh spends a
       single-use refresh token and is never retried, whatever the caller asks.
 
@@ -45,11 +49,6 @@ defmodule DpExchange.Schwab.Options do
   could not be read, so accepting it would be a silent no-op. `:credentials` is exempt, as in
   Core's rule: a consumer hands one credential set to every call and an unneeded one changes
   no answer.
-
-  **On `place_order/3`, `replace_order/4` and `cancel_order/3` a `:retry_attempts` other than
-  absent, `nil` or `0` is `{:error, {:unsupported_option, :retry_attempts}}`**, before anything
-  is sent. Schwab has no idempotency key, so a retry of a write that timed out after the venue
-  accepted it could place the order twice; an order write is exactly one attempt.
 
   | function | keys beyond the transport keys |
   |---|---|
@@ -92,10 +91,10 @@ defmodule DpExchange.Schwab.Options do
   # URLs are `:market_data_url` and `:trader_url`. Refused rather than silently ignored.
   @not_read [:environment, :base_url]
 
-  # The order writes, which are never retried. See `check_retry/2`. One attempt has no wait
-  # between attempts, so `:retry_delay` is read by nothing there.
+  # The order writes, which are sent exactly once whatever the caller passes: neither retry
+  # key is read, so both are refused as unknown rather than accepted and overwritten.
   @no_retry [:place_order, :replace_order, :cancel_order]
-  @write_not_read [:retry_delay]
+  @write_not_read [:retry_attempts, :retry_delay]
 
   # A refresh is never retried (`Auth` forces `retry_attempts: 0`), so neither retry key is read.
   @refresh_not_read [:retry_attempts, :retry_delay]
@@ -186,7 +185,7 @@ defmodule DpExchange.Schwab.Options do
   """
   @spec check(atom(), term()) :: :ok | {:error, check_error()}
   def check(function, opts) do
-    with :ok <- CoreOptions.check(opts, allowed(function)), do: check_retry(function, opts)
+    CoreOptions.check(opts, allowed(function))
   end
 
   @doc """
@@ -194,29 +193,11 @@ defmodule DpExchange.Schwab.Options do
   """
   @spec check_fake(atom(), term()) :: :ok | {:error, check_error()}
   def check_fake(function, opts) do
-    with :ok <- CoreOptions.check(opts, allowed(function) ++ fake_only(function)),
-         do: check_retry(function, opts)
+    CoreOptions.check(opts, allowed(function) ++ fake_only(function))
   end
 
   @typedoc "What a refused option check answers."
-  @type check_error ::
-          {:unknown_option, atom()}
-          | {:invalid_options, term()}
-          | {:unsupported_option, :retry_attempts}
-
-  # **An order write is exactly one attempt, so a retry count is refused, not ignored.**
-  # Schwab has no idempotency key: a retried `place_order/3` that timed out after the venue
-  # accepted it places the order twice. `:retry_attempts` is allowed as a key, but
-  # only absent, `nil` or `0` is honoured; any other
-  # value would be a retry request this package silently did not carry out.
-  defp check_retry(function, opts) when function in @no_retry do
-    case Keyword.get(opts, :retry_attempts) do
-      attempts when attempts in [nil, 0] -> :ok
-      _more -> {:error, {:unsupported_option, :retry_attempts}}
-    end
-  end
-
-  defp check_retry(_function, _opts), do: :ok
+  @type check_error :: {:unknown_option, atom()} | {:invalid_options, term()}
 
   @doc """
   As `check/2` for the reads that return a plain value and so have no error channel: a

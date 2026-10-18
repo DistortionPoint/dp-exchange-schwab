@@ -658,7 +658,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Schwab.cancel_order(
                  @creds,
                  "1",
-                 base ++ opts(fn c -> Plug.Conn.resp(c, 200, "") end)
+                 base ++ [plug: fn c -> Plug.Conn.resp(c, 200, "") end]
                )
     end
 
@@ -672,7 +672,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       request = @buy_request
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
-               Schwab.place_order(@creds, request, [account_hash: "H"] ++ opts(plug))
+               Schwab.place_order(@creds, request, account_hash: "H", plug: plug)
     end
 
     test "preview and replace route through Orders, so both refuse an invalid order" do
@@ -720,7 +720,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       end
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "9"}} =
-               Schwab.replace_order(@creds, "1", request, base ++ opts(plug))
+               Schwab.replace_order(@creds, "1", request, base ++ [plug: plug])
     end
 
     test "preview_order sends /previewOrder's own documented shape, not place_order's" do

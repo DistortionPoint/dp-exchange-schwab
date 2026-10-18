@@ -411,7 +411,7 @@ defmodule DpExchange.Schwab do
   # order is still placed, so the answer is `{:ok, _}`, built only from what was sent
   # (`Orders.accepted/2`): the id the venue named and the payload, `:pending`, nothing invented.
   defp placed_order(credentials, id, payload, opts) do
-    case fetch_order(credentials, id, opts) do
+    case read_back(credentials, id, opts) do
       {:ok, %Types.Order{} = order} -> {:ok, order}
       _read_back_failed -> Orders.accepted(id, payload)
     end
@@ -491,7 +491,7 @@ defmodule DpExchange.Schwab do
       # The NEW order, read back the way a placement is - but a failed read is not papered
       # over with an order built from the request: the replacement was applied, so the answer
       # says so and carries the id.
-      case fetch_order(credentials, new_id, opts) do
+      case read_back(credentials, new_id, opts) do
         {:ok, %Types.Order{} = order} -> {:ok, order}
         {:error, reason} -> {:error, {:replace_accepted_unread, new_id, reason}}
         {:refused, reason} -> {:error, {:replace_accepted_unread, new_id, reason}}
@@ -538,6 +538,12 @@ defmodule DpExchange.Schwab do
 
   # The read itself, with no option check: `place_order/3` and `replace_order/4` read the order
   # back with their own (already checked) options, which carry keys `get_order/3` does not take.
+  # The read-back after an accepted write is one attempt: the write's options carry no retry
+  # keys (an order write is never retried), so the read would otherwise fall to Core's default
+  # backoff and hold the caller after the order is already placed.
+  defp read_back(credentials, order_id, opts),
+    do: fetch_order(credentials, order_id, Keyword.put(opts, :retry_attempts, 0))
+
   defp fetch_order(credentials, order_id, opts) do
     with :ok <- Orders.check_order_id(order_id),
          {:ok, hash} <- account_hash(opts),

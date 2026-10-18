@@ -36,8 +36,7 @@ defmodule DpExchange.Schwab.OrdersReviewTest do
   defp no_tree_opts do
     [
       account_hash: "H",
-      order_limit: :"no_order_limit_#{System.unique_integer([:positive])}",
-      retry_attempts: 0
+      order_limit: :"no_order_limit_#{System.unique_integer([:positive])}"
     ]
   end
 

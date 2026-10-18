@@ -257,7 +257,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
 
     test "the facade and the fake agree" do
       gone = fn conn -> Plug.Conn.resp(conn, 404, "") end
-      opts = [account_hash: "H", plug: gone, retry_attempts: 0]
+      opts = [account_hash: "H", plug: gone]
 
       assert Schwab.get_order(@creds, "1", opts) == {:refused, :not_found}
       assert Schwab.cancel_order(@creds, "1", opts) == {:refused, :not_found}
@@ -495,7 +495,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
         end
       end
 
-      opts = [account_hash: "H", plug: plug, retry_attempts: 0]
+      opts = [account_hash: "H", plug: plug]
 
       assert {:error, {:replace_accepted_unread, "9", {:exchange_error, _provider, _message}}} =
                Schwab.replace_order(@creds, "1", @buy, opts)
@@ -509,7 +509,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
         end
       end
 
-      opts = [account_hash: "H", plug: plug, retry_attempts: 0]
+      opts = [account_hash: "H", plug: plug]
 
       assert Schwab.replace_order(@creds, "1", @buy, opts) ==
                {:error, {:replace_accepted_unread, "9", :not_found}}
@@ -523,7 +523,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
         end
       end
 
-      opts = [account_hash: "H", plug: plug, retry_attempts: 0]
+      opts = [account_hash: "H", plug: plug]
 
       assert Schwab.replace_order(@creds, "1", @buy, opts) ==
                {:error, {:replace_accepted_unread, "9", {:missing_required_field, :id}}}
@@ -548,7 +548,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
         end
       end
 
-      opts = [account_hash: "H", plug: plug, retry_attempts: 0]
+      opts = [account_hash: "H", plug: plug]
 
       assert {:ok, %Order{id: "9", status: :open, side: :buy}} =
                Schwab.replace_order(@creds, "1", @buy, opts)
@@ -563,7 +563,7 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
       end
 
       request = Map.merge(@buy, %{side: "BUY", symbol: "MSFT", quantity: "3"})
-      opts = [account_hash: "H", plug: plug, retry_attempts: 0]
+      opts = [account_hash: "H", plug: plug]
 
       assert {:ok, %Order{id: "7", symbol: "MSFT", side: :buy, status: :pending} = order} =
                Schwab.place_order(@creds, request, opts)

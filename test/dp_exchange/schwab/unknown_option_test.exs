@@ -124,9 +124,14 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
         # An order write is one attempt (no wait to scale); a refresh is never retried.
         unread =
           cond do
-            function in [:place_order, :replace_order, :cancel_order] -> [:retry_delay]
-            function == :refresh_credentials -> [:retry_attempts, :retry_delay]
-            true -> []
+            function in [:place_order, :replace_order, :cancel_order] ->
+              [:retry_attempts, :retry_delay]
+
+            function == :refresh_credentials ->
+              [:retry_attempts, :retry_delay]
+
+            true ->
+              []
           end
 
         if key in unread do
@@ -252,7 +257,7 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       assert_received {:weighed, 9}
     end
 
-    test "a retry count on an order write is refused, not ignored" do
+    test "an order write is sent once whatever is passed: either retry key is an unknown option" do
       parent = self()
 
       plug = fn conn ->
@@ -267,23 +272,24 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       ]
 
       for {function, args} <- calls,
-          attempts <- [1, 3, "2", :infinity],
+          key <- [:retry_attempts, :retry_delay],
+          value <- [0, 1, 3, nil, "2", :infinity],
           module <- [Schwab, Fake] do
-        opts = [plug: plug, account_hash: "H", retry_attempts: attempts]
+        opts = [plug: plug, account_hash: "H"] ++ [{key, value}]
 
-        assert apply(module, function, args ++ [opts]) ==
-                 {:error, {:unsupported_option, :retry_attempts}},
-               "#{inspect(module)}.#{function} with #{inspect(attempts)}"
+        assert apply(module, function, args ++ [opts]) == {:error, {:unknown_option, key}},
+               "#{inspect(module)}.#{function} with #{key}: #{inspect(value)}"
       end
 
       refute_receive {:reached_the_venue, _path}, 500
     end
 
-    test "absent, nil and zero retry counts are not refused on an order write" do
-      for function <- [:place_order, :replace_order, :cancel_order],
-          opts <- [[], [retry_attempts: nil], [retry_attempts: 0]] do
-        assert Options.check(function, opts) == :ok
-        assert Options.check_fake(function, opts) == :ok
+    test "absent retry keys are what an order write is checked with, and it passes" do
+      for function <- [:place_order, :replace_order, :cancel_order] do
+        refute :retry_attempts in Options.allowed(function)
+        refute :retry_delay in Options.allowed(function)
+        assert Options.check(function, []) == :ok
+        assert Options.check_fake(function, []) == :ok
       end
     end
 

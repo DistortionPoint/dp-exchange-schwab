@@ -31,6 +31,19 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`place_order/3`, `replace_order/4` and `cancel_order/3` no longer list `:retry_attempts`
+  or `:retry_delay`.** An order write is always sent exactly once, so neither key is read:
+  any value (`0` and `1` included) is `{:error, {:unknown_option, key}}` before anything is
+  sent, on the facade and the Fake. Before, `:retry_attempts` was accepted when absent, `nil`
+  or `0` and refused as `{:error, {:unsupported_option, :retry_attempts}}` otherwise, while
+  the request quietly forced one attempt. `refresh_credentials/2` already refused both.
+  `preview_order/3` keeps both (it is retried). `Options.check_error` loses its
+  `{:unsupported_option, :retry_attempts}` member.
+- The read-back after an accepted `place_order/3` / `replace_order/4` is a single attempt, so
+  a failing read no longer holds the caller in backoff after the order is already placed.
+
 ## [0.2.142] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).

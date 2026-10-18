@@ -1283,15 +1283,16 @@ Things to know about them:
   function, although `Core` lists them as shared. This venue has one environment, and the base
   URLs are `:market_data_url` and `:trader_url`; an accepted `base_url:` that did nothing would
   send your live token to the production host while you believed the call was redirected.
-- **`:retry_delay` is refused on the three order writes** (exactly one attempt, so no wait to
-  scale), **and `:retry_attempts` and `:retry_delay` are refused on `refresh_credentials/2`**
-  (a refresh spends a single-use refresh token and is never retried). `:max_retry_after_s` is
-  honoured on both: it clamps the `Retry-After` a 429 penalises the limiter for.
-- **`:retry_attempts` on `place_order/3`, `replace_order/4` and `cancel_order/3` must be
-  absent, `nil` or `0`**; anything else is `{:error, {:unsupported_option, :retry_attempts}}`,
-  before anything is sent (the Fake agrees). Schwab has no idempotency key, so a retry of a
-  write that timed out after the venue accepted it could place the order twice; an order
-  write is exactly one attempt (§7a). `preview_order/3` is a read in effect and does retry.
+- **`:retry_attempts` and `:retry_delay` are refused on `place_order/3`, `replace_order/4`
+  and `cancel_order/3`, whatever the value** (`0` and `1` included):
+  `{:error, {:unknown_option, key}}` before anything is sent, the Fake agreeing. Schwab has no
+  idempotency key, so a retry of a write that timed out after the venue accepted it could
+  place the order twice; an order write is always exactly one attempt and reads neither key
+  (§7a). **They are refused on `refresh_credentials/2` too**: a refresh spends a single-use
+  refresh token and is never retried. `:max_retry_after_s` is honoured on all four: it clamps
+  the `Retry-After` a 429 penalises the limiter for. `preview_order/3` is a read in effect and
+  does retry, so it keeps both keys. The read-back after an accepted `place_order/3` or
+  `replace_order/4` is a single attempt.
 - **`:credentials` is read from `opts` only by the calls that take no credential argument**
   (`get_price/2`, `get_top_of_book/2`, `get_historical_prices/4`, `get_symbols/1`,
   `market_status/1`, `get_positions/1`, `get_option_chain/2`, `get_option_expirations/2`,

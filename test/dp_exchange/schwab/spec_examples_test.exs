@@ -661,11 +661,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
         capturing_body(201, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000001"}])
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "1000000001"}} =
-               Schwab.place_order(@creds, request,
-                 account_hash: "H",
-                 plug: plug,
-                 retry_attempts: 0
-               )
+               Schwab.place_order(@creds, request, account_hash: "H", plug: plug)
 
       assert_received {:request, "POST", "/trader/v1/accounts/H/orders", body}
       assert body == expected
@@ -699,8 +695,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert {:error, {:replace_accepted_unread, "1000000002", _reason}} =
                Schwab.replace_order(@creds, "1000000001", request,
                  account_hash: "H",
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
 
       assert_received {:request, "PUT", "/trader/v1/accounts/H/orders/1000000001", body}

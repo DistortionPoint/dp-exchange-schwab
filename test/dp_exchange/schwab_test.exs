@@ -308,7 +308,7 @@ defmodule DpExchange.SchwabTest do
     test "a tree started without :order_limit_per_minute refuses all three, before the venue is ever reached" do
       base = start_order_tree([])
       exploding = fn _conn -> raise "an order write should never have reached the venue" end
-      call_opts = base ++ [plug: exploding, retry_attempts: 0]
+      call_opts = base ++ [plug: exploding]
 
       assert Schwab.place_order(@creds, @order_request, call_opts) ==
                {:error, :order_limit_not_declared}
@@ -321,7 +321,7 @@ defmodule DpExchange.SchwabTest do
 
     test "a tree started WITH :order_limit_per_minute lets every one of the three reach the venue" do
       base = start_order_tree(order_limit_per_minute: 20)
-      call_opts = base ++ [plug: readable_plug(), retry_attempts: 0]
+      call_opts = base ++ [plug: readable_plug()]
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, @order_request, call_opts)
@@ -333,8 +333,7 @@ defmodule DpExchange.SchwabTest do
                Schwab.cancel_order(@creds, "1",
                  account_hash: "H",
                  order_limit: base[:order_limit],
-                 plug: fn c -> Plug.Conn.resp(c, 200, "") end,
-                 retry_attempts: 0
+                 plug: fn c -> Plug.Conn.resp(c, 200, "") end
                )
     end
 
@@ -344,7 +343,7 @@ defmodule DpExchange.SchwabTest do
       # no order throughput one write a minute. A stated `0` is its own answer, and a
       # different one from `:order_limit_not_declared`.
       base = start_order_tree(order_limit_per_minute: 0)
-      call_opts = base ++ [plug: placed_ok_plug(), retry_attempts: 0]
+      call_opts = base ++ [plug: placed_ok_plug()]
 
       assert {:error, :order_limit_zero} = Schwab.place_order(@creds, @order_request, call_opts)
       assert {:error, :order_limit_zero} = Schwab.cancel_order(@creds, "1", call_opts)
@@ -376,8 +375,7 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, %DpExchange.Core.Types.Order{id: "7"}} =
                Schwab.place_order(@creds, @order_request,
                  account_hash: "H",
-                 plug: placed_ok_plug(),
-                 retry_attempts: 0
+                 plug: placed_ok_plug()
                )
     end
   end
