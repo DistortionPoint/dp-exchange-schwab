@@ -643,11 +643,9 @@ defmodule DpExchange.SchwabTest do
     test "the happy path returns the rotated credential, exactly as Auth.refresh/2 does" do
       body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
 
-      assert {:ok, renewed} =
-               Schwab.refresh_credentials(@refresh_creds,
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+      # No `:retry_attempts`: the refresh is always one attempt (a refresh token is single
+      # use), so since tick AK the facade refuses the key rather than accept and drop it.
+      assert {:ok, renewed} = Schwab.refresh_credentials(@refresh_creds, plug: responding(body))
 
       assert renewed.access_token == "at-2"
       assert renewed.refresh_token == "rt-2"
@@ -686,10 +684,7 @@ defmodule DpExchange.SchwabTest do
       body = %{"error" => "invalid_grant", "error_description" => "refresh token invalid"}
 
       assert {:refused, {:reauthorization_required, 400, "refresh token invalid"}} =
-               Schwab.refresh_credentials(@refresh_creds,
-                 plug: responding(body, 400),
-                 retry_attempts: 0
-               )
+               Schwab.refresh_credentials(@refresh_creds, plug: responding(body, 400))
     end
   end
 

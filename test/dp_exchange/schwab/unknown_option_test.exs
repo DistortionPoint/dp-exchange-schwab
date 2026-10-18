@@ -93,6 +93,17 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
   # The four reads that return a plain value have no error channel, so they raise instead.
   @plain_reads [:coverage, :wanted, :coverage_by_kind, :status]
 
+  # The calls in `@answering` that send no HTTP request: their own keys and :credentials only.
+  @no_request [
+    :subscribe,
+    :unsubscribe,
+    :update_symbols,
+    :subscribe_notices,
+    :update_credentials
+  ]
+
+  @refresh_creds %{access_token: "a", refresh_token: "r", client_id: "c", client_secret: "s"}
+
   describe "the allowed-key table" do
     test "names every function this file drives, and no other" do
       driven = Enum.map(@answering, &elem(&1, 0)) ++ @plain_reads
@@ -105,16 +116,112 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       end
     end
 
-    test "every function allows the shared transport keys this venue reads" do
-      read = DpExchange.Core.Options.transport_options() -- [:environment, :base_url]
+    test "a call that sends a request allows the shared transport keys it reads" do
+      shared = DpExchange.Core.Options.transport_options()
+      requesting = Enum.map(@answering, &elem(&1, 0)) -- @no_request
 
-      for function <- Enum.map(@answering, &elem(&1, 0)) ++ @plain_reads do
-        allowed = Options.allowed(function)
+      for function <- requesting, key <- shared -- [:environment, :base_url] do
+        # An order write is one attempt (no wait to scale); a refresh is never retried.
+        unread =
+          cond do
+            function in [:place_order, :replace_order, :cancel_order] -> [:retry_delay]
+            function == :refresh_credentials -> [:retry_attempts, :retry_delay]
+            true -> []
+          end
 
-        for key <- read do
-          assert key in allowed, "#{function} does not allow #{inspect(key)}"
+        if key in unread do
+          refute key in Options.allowed(function), "#{function} allows #{inspect(key)}"
+        else
+          assert key in Options.allowed(function), "#{function} does not allow #{inspect(key)}"
         end
       end
+    end
+
+    test "a call that sends no request allows its own keys and :credentials, no transport key" do
+      shared = DpExchange.Core.Options.transport_options() -- [:credentials]
+
+      for function <- @no_request ++ @plain_reads do
+        allowed = Options.allowed(function)
+
+        assert :credentials in allowed, "#{function} refuses :credentials"
+
+        for key <- shared do
+          refute key in allowed, "#{function} allows #{inspect(key)}"
+        end
+      end
+    end
+
+    test "a no-request call given timeout: 5_000 answers unknown_option, facade and Fake alike" do
+      opts = [timeout: 5_000]
+      refusal = {:error, {:unknown_option, :timeout}}
+
+      for module <- [Schwab, Fake] do
+        assert module.subscribe(["AAPL"], opts) == refusal
+        assert module.unsubscribe(["AAPL"], opts) == refusal
+        assert module.update_symbols(["AAPL"], opts) == refusal
+        assert module.subscribe_notices(opts) == refusal
+        assert module.update_credentials(@creds, opts) == refusal
+      end
+    end
+
+    test "the plain-value reads raise on a transport key, and take :credentials" do
+      for module <- [Schwab, Fake], function <- @plain_reads do
+        error = assert_raise ArgumentError, fn -> apply(module, function, [[timeout: 5_000]]) end
+
+        assert error.message =~ "unknown option :timeout"
+      end
+
+      assert Schwab.coverage(credentials: @creds, feed: :unknown_option_test_no_such_feed) == %{}
+    end
+
+    test "a refresh and an order write refuse the retry keys they cannot honour" do
+      assert Schwab.refresh_credentials(@creds, retry_attempts: 0) ==
+               {:error, {:unknown_option, :retry_attempts}}
+
+      assert Fake.refresh_credentials(@creds, retry_delay: 10) ==
+               {:error, {:unknown_option, :retry_delay}}
+
+      for module <- [Schwab, Fake] do
+        assert module.cancel_order(@creds, "1", account_hash: "H", retry_delay: 10) ==
+                 {:error, {:unknown_option, :retry_delay}}
+      end
+    end
+
+    test "max_body_bytes bounds a read: a body over the cap is refused, not held" do
+      plug = fn conn -> Plug.Conn.resp(conn, 200, String.duplicate("x", 65)) end
+
+      assert {:error, {:exchange_error, :schwab, {:response_too_large, 64}}} =
+               Schwab.get_accounts(@creds, plug: plug, retry_attempts: 0, max_body_bytes: 64)
+    end
+
+    test "max_body_bytes bounds an order write too" do
+      plug = fn conn -> Plug.Conn.resp(conn, 200, String.duplicate("x", 65)) end
+
+      assert {:error, {:exchange_error, :schwab, {:response_too_large, 64}}} =
+               Schwab.cancel_order(@creds, "1", account_hash: "H", plug: plug, max_body_bytes: 64)
+    end
+
+    test "max_retry_after_s reaches the request on an order write and on a refresh" do
+      plug = fn conn -> Plug.Conn.resp(conn, 200, "{}") end
+
+      # Core validates the ceiling when the request starts, so a bad one raises only if the key
+      # was forwarded. Accepted and dropped, both calls would have answered normally.
+      assert_raise ArgumentError, ~r/max_retry_after_s/, fn ->
+        Schwab.cancel_order(@creds, "1", account_hash: "H", plug: plug, max_retry_after_s: -1)
+      end
+
+      assert_raise ArgumentError, ~r/max_retry_after_s/, fn ->
+        Schwab.refresh_credentials(@refresh_creds, plug: plug, max_retry_after_s: -1)
+      end
+    end
+
+    test "weight reaches the limiter on a token refresh" do
+      Config.put_override(:rate_limit_module, WeighingLimiter)
+      plug = fn conn -> Plug.Conn.resp(conn, 200, "{}") end
+
+      _refresh = Schwab.refresh_credentials(@refresh_creds, weight: 5, plug: plug)
+
+      assert_received {:weighed, 5}
     end
 
     test "the two shared transport keys no Schwab call reads are refused, not ignored" do
@@ -216,7 +323,9 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       end
 
       for {function, args} <- @answering do
-        opts = [plug: plug, retry_attempts: 0, credentials: @creds, limt: 5]
+        # `limt` leads: the first stray key in the caller's order is the one named, and a
+        # no-request call refuses `plug` as well.
+        opts = [limt: 5, plug: plug, credentials: @creds]
 
         assert apply(Schwab, function, args ++ [opts]) == {:error, {:unknown_option, :limt}},
                "facade #{function}"

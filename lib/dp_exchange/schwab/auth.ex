@@ -487,6 +487,9 @@ defmodule DpExchange.Schwab.Auth do
     |> Keyword.take([
       :limiter,
       :timeout,
+      # Read on a 429 even though a refresh is never retried: it clamps the `Retry-After`
+      # the limiter is penalised for.
+      :max_retry_after_s,
       :max_body_bytes,
       :weight,
       :log_requests,

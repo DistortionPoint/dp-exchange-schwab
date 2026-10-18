@@ -31,6 +31,23 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
+
+### Changed
+
+- **A shared transport key is allowed on a call only when the call reads it.** A call that
+  sends no HTTP request (`subscribe/2`, `subscribe_notices/1`, `unsubscribe/2`,
+  `update_symbols/2`, `update_credentials/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1`,
+  `status/1`) now allows only its own keys and `:credentials`: `timeout:`, `plug:`,
+  `max_body_bytes:` and the rest answer `{:error, {:unknown_option, key}}` (the plain-value
+  reads raise `ArgumentError`), on the facade and the Fake. They used to be accepted for
+  "uniformity" and read by nothing. `:retry_delay` is likewise refused on the three order
+  writes (one attempt, no wait), and `:retry_attempts` and `:retry_delay` on
+  `refresh_credentials/2` (never retried, whatever the caller asked).
+- **`:max_retry_after_s` is now forwarded on the order writes and on `refresh_credentials/2`.**
+  It was dropped there although Core reads it on a 429 even with no retry (it clamps the
+  `Retry-After` the limiter is penalised for).
+
 ## [0.2.141] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).

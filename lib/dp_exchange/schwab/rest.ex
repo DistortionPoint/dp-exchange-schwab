@@ -3280,6 +3280,9 @@ defmodule DpExchange.Schwab.Rest do
     |> forwarded([
       :limiter,
       :timeout,
+      # Read on a 429 even when there is no retry: it clamps the `Retry-After` the limiter is
+      # penalised for. `:retry_delay` is not forwarded: with one attempt there is no wait.
+      :max_retry_after_s,
       :max_body_bytes,
       :weight,
       :log_requests,

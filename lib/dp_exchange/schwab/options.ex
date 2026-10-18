@@ -19,18 +19,32 @@ defmodule DpExchange.Schwab.Options do
 
   ## What is allowed
 
-  A function's list is `DpExchange.Core.Options.transport_options/0` minus `:environment`
-  and `:base_url`, plus the keys named in the table below. A key holding `nil` is still a
-  key.
+  A key is allowed on a function only when that function reads it. A key holding `nil` is
+  still a key. Two kinds of function:
 
-  **`:environment` and `:base_url` are refused on every function.** Core lists them as shared
-  transport keys, but this venue has one environment and no call reads either: the base URLs
-  are `:market_data_url` and `:trader_url`. Accepting a `base_url:` that does nothing would
-  send a live token to the production host from a caller who believed it had redirected the
-  call. The other shared keys are forwarded to `Core.HttpClient` by the REST calls
+  **A call that sends an HTTP request** (every REST call and `refresh_credentials/2`) allows
+  `DpExchange.Core.Options.transport_options/0` minus the keys it cannot honour, plus the keys
+  named in the table below. Each key it allows is forwarded to `Core.HttpClient`
   (`:credentials`, the signing credential, is read from `opts` by the calls that take no
-  credential argument). The feed functions and the pure ones accept them for uniformity and
-  do not read them.
+  credential argument). The keys it cannot honour are refused as `{:unknown_option, key}`:
+
+    * `:environment` and `:base_url`, on every request. This venue has one environment and no
+      call reads either: the base URLs are `:market_data_url` and `:trader_url`. Accepting a
+      `base_url:` that does nothing would send a live token to the production host from a
+      caller who believed it had redirected the call.
+    * `:retry_delay` on an order write: it is exactly one attempt, so there is no wait to
+      scale. (`:max_retry_after_s` is read, it clamps the `Retry-After` a 429 penalises the
+      limiter for, and is forwarded.)
+    * `:retry_attempts` and `:retry_delay` on `refresh_credentials/2`: a refresh spends a
+      single-use refresh token and is never retried, whatever the caller asks.
+
+  **A call that sends no request** (`subscribe/2`, `subscribe_notices/1`, `unsubscribe/2`,
+  `update_symbols/2`, `update_credentials/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1`,
+  `status/1`) allows only its own keys from the table plus `:credentials`. Every other shared
+  transport key (`:timeout`, `:plug`, `:max_body_bytes`, ...) is `{:unknown_option, key}`: it
+  could not be read, so accepting it would be a silent no-op. `:credentials` is exempt, as in
+  Core's rule: a consumer hands one credential set to every call and an unneeded one changes
+  no answer.
 
   **On `place_order/3`, `replace_order/4` and `cancel_order/3` a `:retry_attempts` other than
   absent, `nil` or `0` is `{:error, {:unsupported_option, :retry_attempts}}`**, before anything
@@ -78,8 +92,26 @@ defmodule DpExchange.Schwab.Options do
   # URLs are `:market_data_url` and `:trader_url`. Refused rather than silently ignored.
   @not_read [:environment, :base_url]
 
-  # The order writes, which are never retried. See `check_retry/2`.
+  # The order writes, which are never retried. See `check_retry/2`. One attempt has no wait
+  # between attempts, so `:retry_delay` is read by nothing there.
   @no_retry [:place_order, :replace_order, :cancel_order]
+  @write_not_read [:retry_delay]
+
+  # A refresh is never retried (`Auth` forces `retry_attempts: 0`), so neither retry key is read.
+  @refresh_not_read [:retry_attempts, :retry_delay]
+
+  # Calls that send no HTTP request: they allow their own keys and `:credentials` only.
+  @no_request [
+    :subscribe,
+    :subscribe_notices,
+    :unsubscribe,
+    :update_symbols,
+    :update_credentials,
+    :coverage,
+    :wanted,
+    :coverage_by_kind,
+    :status
+  ]
 
   # The single table. Anything that is not here has no `opts` the facade reads.
   @own %{
@@ -135,7 +167,11 @@ defmodule DpExchange.Schwab.Options do
   """
   @spec allowed(atom()) :: [atom()]
   def allowed(:get_option_chain), do: allowed_chain()
-  def allowed(function), do: transport() ++ Map.fetch!(@own, function)
+
+  def allowed(function) when function in @no_request,
+    do: [:credentials | Map.fetch!(@own, function)]
+
+  def allowed(function), do: transport(function) ++ Map.fetch!(@own, function)
 
   @doc """
   The extra keys only `DpExchange.Schwab.Fake` reads for `function`, as test seams.
@@ -170,8 +206,8 @@ defmodule DpExchange.Schwab.Options do
 
   # **An order write is exactly one attempt, so a retry count is refused, not ignored.**
   # Schwab has no idempotency key: a retried `place_order/3` that timed out after the venue
-  # accepted it places the order twice. `:retry_attempts` is allowed as a key (every function
-  # takes the shared transport keys), but only absent, `nil` or `0` is honoured; any other
+  # accepted it places the order twice. `:retry_attempts` is allowed as a key, but
+  # only absent, `nil` or `0` is honoured; any other
   # value would be a retry request this package silently did not carry out.
   defp check_retry(function, opts) when function in @no_retry do
     case Keyword.get(opts, :retry_attempts) do
@@ -203,8 +239,13 @@ defmodule DpExchange.Schwab.Options do
   end
 
   defp allowed_chain do
-    transport() ++ @market ++ [:contractType | Rest.chain_option_keys()]
+    transport(:get_option_chain) ++ @market ++ [:contractType | Rest.chain_option_keys()]
   end
 
-  defp transport, do: CoreOptions.transport_options() -- @not_read
+  defp transport(function),
+    do: CoreOptions.transport_options() -- (@not_read ++ not_read(function))
+
+  defp not_read(function) when function in @no_retry, do: @write_not_read
+  defp not_read(:refresh_credentials), do: @refresh_not_read
+  defp not_read(_function), do: []
 end

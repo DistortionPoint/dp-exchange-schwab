@@ -1268,16 +1268,25 @@ symbols you subscribe) is judged first. `coverage/1`, `wanted/1`, `coverage_by_k
 `status/1` have no error channel and raise `ArgumentError`. `DpExchange.Schwab.Fake` refuses
 the same keys in the same order, before `FakeInjection` is consulted.
 
-Every function allows the shared transport keys: `:credentials`, `:plug`, `:adapter`,
-`:req_adapter`, `:limiter`, `:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`,
-`:retry_delay`, `:max_retry_after_s`, `:max_body_bytes` and `:log_requests`. The REST calls
-forward them to `Core.HttpClient` (a `nil` is silence); the feed functions accept them for
-uniformity and do not read them. Four things to know about them:
+A shared transport key is allowed on a call only when that call reads it. A call that sends
+an HTTP request (every REST call and `refresh_credentials/2`) allows `:credentials`, `:plug`,
+`:adapter`, `:req_adapter`, `:limiter`, `:rate_limit_blocking`, `:weight`, `:timeout`,
+`:retry_attempts`, `:retry_delay`, `:max_retry_after_s`, `:max_body_bytes` and `:log_requests`,
+and forwards each to `Core.HttpClient` (a `nil` is silence). A call that sends no request
+(`subscribe/2`, `subscribe_notices/1`, `unsubscribe/2`, `update_symbols/2`,
+`update_credentials/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `status/1`) allows its
+own keys (`:feed`, `:to`, ...) and `:credentials` only; `subscribe(["AAPL"], timeout: 5_000)`
+is `{:error, {:unknown_option, :timeout}}` (the four plain-value reads raise `ArgumentError`).
+Things to know about them:
 
 - **`:environment` and `:base_url` are refused** (`{:error, {:unknown_option, key}}`) on every
   function, although `Core` lists them as shared. This venue has one environment, and the base
   URLs are `:market_data_url` and `:trader_url`; an accepted `base_url:` that did nothing would
   send your live token to the production host while you believed the call was redirected.
+- **`:retry_delay` is refused on the three order writes** (exactly one attempt, so no wait to
+  scale), **and `:retry_attempts` and `:retry_delay` are refused on `refresh_credentials/2`**
+  (a refresh spends a single-use refresh token and is never retried). `:max_retry_after_s` is
+  honoured on both: it clamps the `Retry-After` a 429 penalises the limiter for.
 - **`:retry_attempts` on `place_order/3`, `replace_order/4` and `cancel_order/3` must be
   absent, `nil` or `0`**; anything else is `{:error, {:unsupported_option, :retry_attempts}}`,
   before anything is sent (the Fake agrees). Schwab has no idempotency key, so a retry of a
