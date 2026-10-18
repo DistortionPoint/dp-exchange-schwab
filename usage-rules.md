@@ -17,7 +17,7 @@ the top and carries its `legs`. An order with no `orderId` is refused rather tha
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.95`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.101`.
 
 ```elixir
 # before
@@ -122,9 +122,10 @@ the redial reaches the Streamer instead, the Streamer's own `:link_up` closes it
 
 **A dropped streamed frame is announced, once.** A `LEVELONE_*` book, a `*_BOOK` frame or a
 `CHART_*` bar refused for an unreadable value (a bar with a zero or negative open, high, low
-or close is refused too, on REST and on the stream) raises one `:degraded` `Core.Notice` per
-symbol and kind per Streamer session, with `details.symbol`, `details.service` and
-`details.reason`. A book that has stopped updating while that notice stands is frozen on the
+or close is refused too, on REST and on the stream) raises one `:data_quality` `Core.Notice` (an undecodable payload; it was `:degraded` before,
+a **breaking change of the notice kind**) per symbol and kind per Streamer session, with
+`details.symbol`, `details.service` and `details.reason` (`:frame_unreadable`, an atom; the
+text is in `details.message`). A book that has stopped updating while that notice stands is frozen on the
 last good frame, not live. The set of announced symbols and kinds is capped at 5,000 (past it the frame is still dropped,
 just not announced again) and cleared on reconnect.
 
@@ -233,7 +234,7 @@ credential check, and `{:empty_symbol, ""}` for blank.) A well-formed string tha
 equity (a crypto pair, a future, an index) answers `{:refused, {:not_an_equity_symbol, value}}`:
 a refusal, because the same symbol never succeeds on retry. (Formerly `{:error, ...}`: a
 **breaking change of a returned reason**; match `{:refused, {:not_an_equity_symbol, _}}`, in
-`get_prices/2` per symbol as well.) `get_historical_prices/4` answers
+`Rest.get_prices/3` per symbol as well.) `get_historical_prices/4` answers
 `{:error, {:invalid_range, range}}` for a `range` that is not a keyword list or whose
 `:start`/`:end` is not a `DateTime` (formerly a raise, and `{:invalid_range_bound, key,
 value}`), before any request.
@@ -752,6 +753,12 @@ behaves identically). `get_screener/2` refuses an unreadable row as
 key}}`. `get_option_expirations/2` refuses a reply with an unreadable row as
 `{:error, {:unreadable_expiration, row}}` rather than listing fewer expiries.
 
+`get_symbols/1` needs a `:query` (`{:error, {:query_required, :schwab}}` without one) and takes
+an optional `:projection`, one of the venue's six: `symbol-search` (the default),
+`symbol-regex`, `desc-search`, `desc-regex`, `search`, `fundamental`. Any other value is
+`{:error, {:invalid_projection, value}}`, decided before a request is spent; the Fake agrees,
+though it always matches by prefix.
+
 ## 11. What this package does not implement
 
 *This section used to be headed "what this venue does not have". That was wrong for at
@@ -1261,10 +1268,28 @@ symbols you subscribe) is judged first. `coverage/1`, `wanted/1`, `coverage_by_k
 `status/1` have no error channel and raise `ArgumentError`. `DpExchange.Schwab.Fake` refuses
 the same keys in the same order, before `FakeInjection` is consulted.
 
-Every function reads the shared transport keys: `:credentials`, `:environment`, `:base_url`,
-`:plug`, `:adapter`, `:req_adapter`, `:limiter`, `:rate_limit_blocking`, `:weight`,
-`:timeout`, `:retry_attempts`, `:retry_delay`, `:max_retry_after_s`, `:max_body_bytes` and
-`:log_requests`. Beyond those, per function (the table is `DpExchange.Schwab.Options`):
+Every function allows the shared transport keys: `:credentials`, `:plug`, `:adapter`,
+`:req_adapter`, `:limiter`, `:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`,
+`:retry_delay`, `:max_retry_after_s`, `:max_body_bytes` and `:log_requests`. The REST calls
+forward them to `Core.HttpClient` (a `nil` is silence); the feed functions accept them for
+uniformity and do not read them. Four things to know about them:
+
+- **`:environment` and `:base_url` are refused** (`{:error, {:unknown_option, key}}`) on every
+  function, although `Core` lists them as shared. This venue has one environment, and the base
+  URLs are `:market_data_url` and `:trader_url`; an accepted `base_url:` that did nothing would
+  send your live token to the production host while you believed the call was redirected.
+- **`:retry_attempts` on `place_order/3`, `replace_order/4` and `cancel_order/3` must be
+  absent, `nil` or `0`**; anything else is `{:error, {:unsupported_option, :retry_attempts}}`,
+  before anything is sent (the Fake agrees). Schwab has no idempotency key, so a retry of a
+  write that timed out after the venue accepted it could place the order twice; an order
+  write is exactly one attempt (§7a). `preview_order/3` is a read in effect and does retry.
+- **`:credentials` is read from `opts` only by the calls that take no credential argument**
+  (`get_price/2`, `get_top_of_book/2`, `get_historical_prices/4`, `get_symbols/1`,
+  `market_status/1`, `get_positions/1`, `get_option_chain/2`, `get_option_expirations/2`,
+  `get_screener/2`). On the others the positional credential is the one signed with.
+- **`:max_body_bytes` also caps `refresh_credentials/2`'s token response** (1 MiB by default).
+
+Beyond those, per function (the table is `DpExchange.Schwab.Options`):
 
 | Function | Its own keys |
 |---|---|

@@ -85,7 +85,9 @@ defmodule DpExchange.Schwab.FrameRetentionTest do
 
     assert {:ok, after_frame} = Socket.handle_frame(frame(row), state())
 
-    assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    assert_received {:dp_exchange, :schwab,
+                     %Notice{kind: :data_quality, details: %{reason: :frame_unreadable}}}
+
     assert [{_what, reported}] = MapSet.to_list(after_frame.unreadable_reported)
     assert held_bytes(reported) == byte_size("AAPL")
   end

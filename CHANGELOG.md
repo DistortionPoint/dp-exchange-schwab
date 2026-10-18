@@ -31,6 +31,44 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).
+
+### Changed — BREAKING
+
+- **`:environment` and `:base_url` are refused on every facade function and on the Fake**
+  (`{:error, {:unknown_option, key}}`). `Core` lists them as shared transport keys, but this
+  venue has one environment and no call read either: the base URLs are `:market_data_url` and
+  `:trader_url`. A `base_url:` that was accepted and did nothing sent a live token to the
+  production host from a caller who believed it had redirected the call.
+- **`:retry_attempts` on `place_order/3`, `replace_order/4` and `cancel_order/3` is refused
+  unless absent, `nil` or `0`**: `{:error, {:unsupported_option, :retry_attempts}}` before
+  anything is sent, on the facade and the Fake. It used to be accepted and silently not
+  honoured. Schwab has no idempotency key, so a retry could place an order twice.
+- **A streamed frame dropped for an unreadable value is announced as `:data_quality`, not
+  `:degraded`** (`details.reason: :frame_unreadable`, an atom; the text is in
+  `details.message`), per the family rule that an undecodable payload is `:data_quality`.
+  `:delayed_quotes_withheld` stays `:degraded`: the payload decodes, the account lacks the
+  entitlement.
+- **`get_symbols/1` refuses a `:projection` outside the venue's six** (`symbol-search`,
+  `symbol-regex`, `desc-search`, `desc-regex`, `search`, `fundamental`) as `{:error,
+  {:invalid_projection, value}}`, before a request is spent learning it; the Fake agrees.
+
+### Fixed
+
+- **`:adapter`, `:weight`, `:retry_delay`, `:max_retry_after_s` and `:max_body_bytes` were
+  accepted on every REST call and silently dropped.** They are now forwarded to
+  `Core.HttpClient` (the order writes take `:adapter`, `:weight` and `:max_body_bytes`; their
+  attempt count stays fixed at one, see the `:retry_attempts` entry above). A forwarded `nil`
+  is silence for all of them.
+- **A forwarded `max_body_bytes: nil` removed the 1 MiB cap on `refresh_credentials/2`'s token
+  response**: the key survived `put_new/3` and Core read it as its own 16 MiB default.
+- Docs: `README.md` and `usage-rules.md` stated a stale package version and a stale
+  `dp_exchange_core` floor (`~> 0.3.95`; it is `~> 0.3.101`); the `usage-rules.md` section on
+  options said every function reads the shared transport keys, which was untrue; the README's
+  supervision example now says that supervising dials nothing and `:symbols` names no
+  subscriber; `get_all_orders/2` pointed at `get_orders/3` (the facade function is
+  `get_orders/2`).
+
 ## [0.2.140] - 2026-10-17
 
 ### Changed — BREAKING

@@ -28,6 +28,24 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
     def record(_provider, _weight, _opts), do: :ok
   end
 
+  defmodule WeighingLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    # The facade calls run in the caller's process, so `self()` here is the test.
+    @impl true
+    def acquire(_provider, weight, _opts), do: weigh(weight)
+    @impl true
+    def check(_provider, weight, _opts), do: weigh(weight)
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+
+    defp weigh(weight) do
+      send(self(), {:weighed, weight})
+      :ok
+    end
+  end
+
   setup do
     Config.put_override(:rate_limit_module, PermissiveLimiter)
     :ok
@@ -87,14 +105,84 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       end
     end
 
-    test "every function allows the shared transport keys" do
+    test "every function allows the shared transport keys this venue reads" do
+      read = DpExchange.Core.Options.transport_options() -- [:environment, :base_url]
+
       for function <- Enum.map(@answering, &elem(&1, 0)) ++ @plain_reads do
         allowed = Options.allowed(function)
 
-        for key <- DpExchange.Core.Options.transport_options() do
+        for key <- read do
           assert key in allowed, "#{function} does not allow #{inspect(key)}"
         end
       end
+    end
+
+    test "the two shared transport keys no Schwab call reads are refused, not ignored" do
+      for key <- [:environment, :base_url] do
+        for function <- Enum.map(@answering, &elem(&1, 0)) ++ @plain_reads do
+          refute key in Options.allowed(function), "#{function} allows #{inspect(key)}"
+        end
+
+        assert Schwab.get_price("AAPL", [{key, "https://x.invalid"}, {:credentials, @creds}]) ==
+                 {:error, {:unknown_option, key}}
+
+        assert Fake.get_price("AAPL", [{key, "https://x.invalid"}, {:credentials, @creds}]) ==
+                 {:error, {:unknown_option, key}}
+      end
+    end
+
+    test "a shared transport key is forwarded to the request, not accepted and dropped" do
+      Config.put_override(:rate_limit_module, WeighingLimiter)
+      plug = fn conn -> Plug.Conn.resp(conn, 200, "{}") end
+
+      # `:weight` is what the limiter is charged; it used to be allowed and never forwarded.
+      _read = Schwab.get_accounts(@creds, weight: 7, plug: plug, retry_attempts: 0)
+      assert_received {:weighed, 7}
+
+      # The same on an order write, which keeps its own bucket and a single attempt.
+      _write = Schwab.cancel_order(@creds, "1", account_hash: "H", weight: 9, plug: plug)
+
+      assert_received {:weighed, 9}
+    end
+
+    test "a retry count on an order write is refused, not ignored" do
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, {:reached_the_venue, conn.request_path})
+        Plug.Conn.resp(conn, 200, "{}")
+      end
+
+      calls = [
+        {:place_order, [@creds, %{}]},
+        {:replace_order, [@creds, "1", %{}]},
+        {:cancel_order, [@creds, "1"]}
+      ]
+
+      for {function, args} <- calls,
+          attempts <- [1, 3, "2", :infinity],
+          module <- [Schwab, Fake] do
+        opts = [plug: plug, account_hash: "H", retry_attempts: attempts]
+
+        assert apply(module, function, args ++ [opts]) ==
+                 {:error, {:unsupported_option, :retry_attempts}},
+               "#{inspect(module)}.#{function} with #{inspect(attempts)}"
+      end
+
+      refute_receive {:reached_the_venue, _path}, 500
+    end
+
+    test "absent, nil and zero retry counts are not refused on an order write" do
+      for function <- [:place_order, :replace_order, :cancel_order],
+          opts <- [[], [retry_attempts: nil], [retry_attempts: 0]] do
+        assert Options.check(function, opts) == :ok
+        assert Options.check_fake(function, opts) == :ok
+      end
+    end
+
+    test "a retry count is still accepted on a read, which may retry" do
+      assert Options.check(:get_orders, retry_attempts: 3) == :ok
+      assert Options.check(:preview_order, retry_attempts: 3) == :ok
     end
 
     test "the keys only the Fake reads are not allowed on the real facade" do

@@ -896,9 +896,12 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
       refute_received {:dp_exchange, :schwab, %Types.Candle{}}
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :data_quality, details: details}},
+                     5_000
+
       assert details.symbol == "AAPL"
       assert details.reason == :frame_unreadable
+      assert is_atom(details.reason)
       assert details.message =~ "candle frame dropped"
 
       assert {:ok, _state} = Socket.handle_frame(frame(data), state)
@@ -995,7 +998,9 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
       refute_received {:dp_exchange, :schwab, %Types.OrderBook{}}
 
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :data_quality, details: details}},
+                     5_000
+
       assert details.symbol == "AAPL"
       assert details.reason == :frame_unreadable
       assert details.message =~ "order book frame dropped"
@@ -1321,8 +1326,10 @@ defmodule DpExchange.Schwab.SocketTest do
 
       refute_received {:dp_exchange, :schwab, %TopOfBook{}}
 
-      # The dropped frame is TOLD, not silent: a degraded notice naming the symbol.
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+      # The dropped frame is TOLD, not silent: a data_quality notice naming the symbol.
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :data_quality, details: details}},
+                     5_000
+
       assert details.symbol == "AAPL"
       assert details.reason == :frame_unreadable
       assert details.message =~ "top of book frame dropped"
@@ -1366,7 +1373,10 @@ defmodule DpExchange.Schwab.SocketTest do
         Socket.handle_frame(data_frame(%{"key" => "AAPL", "1" => "99.60", "4" => "junk"}), state)
 
       refute_received {:dp_exchange, :schwab, %TopOfBook{}}
-      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
+
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :data_quality, details: details}},
+                     5_000
+
       assert details.reason == :frame_unreadable
       assert details.message =~ "top of book frame dropped"
 

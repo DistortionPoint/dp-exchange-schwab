@@ -9,7 +9,7 @@ facade how data reaches the package, and must not be able to.
 
 ```elixir
 def deps do
-  [{:dp_exchange_schwab, "~> 0.2.119"}]
+  [{:dp_exchange_schwab, "~> 0.2.140"}]
 end
 ```
 
@@ -131,6 +131,11 @@ children = [
   {DpExchange.Schwab, symbols: ["AAPL", "MSFT"], credentials: credentials}
 ]
 ```
+
+**Supervising it dials nothing.** No `GET /userPreference`, no Streamer login and no poll
+happen until the first `subscribe/2` or `update_symbols/2`, and `:symbols` here only seeds
+what the feed wants: it names no subscriber, so call `subscribe/2` (which takes `to:`, the
+caller by default) to receive anything. See `usage-rules.md` section 15.
 
 The order ceiling is **not** declared in `capabilities/0`, because Schwab has none to
 declare: the documented limit is `0..120` order writes per minute *per account*, set *per

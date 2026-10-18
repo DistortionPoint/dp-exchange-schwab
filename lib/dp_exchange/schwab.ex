@@ -236,6 +236,9 @@ defmodule DpExchange.Schwab do
   `:query`; without one this returns `{:error, {:query_required, :schwab}}`, which is
   deliberately not `:not_supported`. Returning some arbitrary search instead would hand
   back a short list that looks like a catalogue.
+
+  `:projection` defaults to `"symbol-search"`; a value outside the venue's six is
+  `{:error, {:invalid_projection, value}}`, decided before anything is sent.
   """
   @impl true
   def get_symbols(opts \\ []) do
@@ -1132,7 +1135,7 @@ defmodule DpExchange.Schwab do
   @doc """
   Orders across every account. `opts[:from]` and `opts[:to]` are required by the venue.
 
-  See `DpExchange.Schwab.Rest.get_all_orders/2`. `get_orders/3` is the per-account read.
+  See `DpExchange.Schwab.Rest.get_all_orders/2`. `get_orders/2` is the per-account read.
   """
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}

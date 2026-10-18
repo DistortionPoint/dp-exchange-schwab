@@ -488,8 +488,10 @@ defmodule DpExchange.Schwab.Auth do
       :limiter,
       :timeout,
       :max_body_bytes,
+      :weight,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
       # Forwarded for the same family-wide reason as `Rest.request_opts/1` — see its
       # comment. Not defaulted here either, and for a stronger reason than a one-off
@@ -497,6 +499,10 @@ defmodule DpExchange.Schwab.Auth do
       # nothing and only delays the caller from finding out it needs to re-authenticate.
       :rate_limit_blocking
     ])
+    # A forwarded `nil` is silence. It must not survive to `put_new/3` below: a present
+    # `max_body_bytes: nil` keeps the key, Core reads it as its own 16 MiB default and the
+    # token cap is gone; `adapter: nil` would replace Req's adapter with nothing.
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Keyword.merge(provider: :schwab, raw_status: true, retry_attempts: 0)
     # A token response is a couple of kilobytes. Core's default cap is 16 MiB, which is what a
     # captive portal or a hostile host answering the token URL could make this process hold.

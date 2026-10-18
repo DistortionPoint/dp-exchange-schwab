@@ -1183,7 +1183,7 @@ defmodule DpExchange.Schwab.Socket do
         # An unreadable (or negative) bid/ask refuses this frame's book: publishing `nil`
         # would say "no resting order", and carrying the old level would answer a question
         # the venue did ask. The last published book stays as it was, and the consumer is
-        # TOLD (a bounded `:degraded` notice, once per symbol per session): a dropped frame
+        # TOLD (a bounded `:data_quality` notice, once per symbol per session): a dropped frame
         # with no word left a book that looked live and was frozen.
         {:error, _unreadable_side} ->
           {quoted, report_unreadable(state, "LEVELONE", symbol, "top of book")}
@@ -1228,7 +1228,7 @@ defmodule DpExchange.Schwab.Socket do
     else
       notify(
         state,
-        Notice.new(:degraded, :schwab,
+        Notice.new(:data_quality, :schwab,
           details: %{
             symbol: Bound.text(symbol),
             service: Bound.text(service),

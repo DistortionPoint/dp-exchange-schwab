@@ -1044,22 +1044,41 @@ defmodule DpExchange.Schwab.Rest do
   some arbitrary search instead would hand back a short list that looks like a catalogue,
   which is the plausible wrong answer this venue makes available.
 
-  Pass `:query`, and optionally `:projection` (default `symbol-search`).
+  Pass `:query`, and optionally `:projection` (default `symbol-search`; one of the six above,
+  else `{:error, {:invalid_projection, value}}` before any request).
   """
   @spec get_symbols(map(), keyword()) ::
           {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
   def get_symbols(credentials, opts) do
-    with {:ok, query} <- fetch_query(opts) do
-      params = %{
-        "symbol" => query,
-        "projection" => Config.opt(opts, :projection, "symbol-search")
-      }
-
+    with {:ok, query} <- fetch_query(opts),
+         {:ok, projection} <- fetch_projection(opts) do
+      params = %{"symbol" => query, "projection" => projection}
       path = "/instruments?" <> URI.encode_query(params)
 
       with {:ok, body} <- get(market_data_url(opts) <> path, credentials, opts) do
         instrument_symbols(body)
       end
+    end
+  end
+
+  # The `projection` enum of `GET /instruments` (`QueryParamprojection`). A projection outside
+  # it cost a read to be told no, so it is refused here by name, as `check_market/1` does.
+  @projections ~w(symbol-search symbol-regex desc-search desc-regex search fundamental)
+
+  @doc """
+  The `projection` `get_symbols/2` will send: `opts[:projection]`, `"symbol-search"` when
+  absent, else one of the venue's six (`symbol-search`, `symbol-regex`, `desc-search`,
+  `desc-regex`, `search`, `fundamental`). Anything else is
+  `{:error, {:invalid_projection, value}}`, before any request.
+
+  Public so `DpExchange.Schwab.Fake` refuses the same projection in the same place.
+  """
+  @spec fetch_projection(keyword()) ::
+          {:ok, String.t()} | {:error, {:invalid_projection, term()}}
+  def fetch_projection(opts) do
+    case Config.opt(opts, :projection, "symbol-search") do
+      projection when projection in @projections -> {:ok, projection}
+      other -> {:error, {:invalid_projection, other}}
     end
   end
 
@@ -3215,16 +3234,27 @@ defmodule DpExchange.Schwab.Rest do
   # its own fallback poll route, which is a background replay this module has no part in.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([
+    |> forwarded([
       :limiter,
       :timeout,
       :retry_attempts,
+      :retry_delay,
+      :max_retry_after_s,
+      :max_body_bytes,
+      :weight,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
       :rate_limit_blocking
     ])
     |> Keyword.merge(provider: :schwab, raw_status: true, decode_body: false)
+  end
+
+  # The listed keys the caller set, a forwarded `nil` being silence (as everywhere in this
+  # family): handed on, `adapter: nil` would replace Req's own adapter with nothing.
+  defp forwarded(opts, keys) do
+    opts |> Keyword.take(keys) |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   # **`:schwab_orders`, not `:schwab` — found by the same review that corrected
@@ -3247,11 +3277,14 @@ defmodule DpExchange.Schwab.Rest do
   # that exists so a caller does not have to.
   defp order_write_request_opts(opts) do
     opts
-    |> Keyword.take([
+    |> forwarded([
       :limiter,
       :timeout,
+      :max_body_bytes,
+      :weight,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
       :rate_limit_blocking
     ])

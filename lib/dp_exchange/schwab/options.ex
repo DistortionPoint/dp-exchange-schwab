@@ -19,8 +19,23 @@ defmodule DpExchange.Schwab.Options do
 
   ## What is allowed
 
-  A function's list is `DpExchange.Core.Options.transport_options/0` plus the keys named in
-  the table below. A key holding `nil` is still a key.
+  A function's list is `DpExchange.Core.Options.transport_options/0` minus `:environment`
+  and `:base_url`, plus the keys named in the table below. A key holding `nil` is still a
+  key.
+
+  **`:environment` and `:base_url` are refused on every function.** Core lists them as shared
+  transport keys, but this venue has one environment and no call reads either: the base URLs
+  are `:market_data_url` and `:trader_url`. Accepting a `base_url:` that does nothing would
+  send a live token to the production host from a caller who believed it had redirected the
+  call. The other shared keys are forwarded to `Core.HttpClient` by the REST calls
+  (`:credentials`, the signing credential, is read from `opts` by the calls that take no
+  credential argument). The feed functions and the pure ones accept them for uniformity and
+  do not read them.
+
+  **On `place_order/3`, `replace_order/4` and `cancel_order/3` a `:retry_attempts` other than
+  absent, `nil` or `0` is `{:error, {:unsupported_option, :retry_attempts}}`**, before anything
+  is sent. Schwab has no idempotency key, so a retry of a write that timed out after the venue
+  accepted it could place the order twice; an order write is exactly one attempt.
 
   | function | keys beyond the transport keys |
   |---|---|
@@ -58,6 +73,13 @@ defmodule DpExchange.Schwab.Options do
   @trader [:trader_url, :extra_headers]
   @write_account [:account_hash, :session]
   @order_filters [:from, :to, :status, :max_results]
+
+  # In Core's shared transport list and read by no Schwab call: one environment, and the base
+  # URLs are `:market_data_url` and `:trader_url`. Refused rather than silently ignored.
+  @not_read [:environment, :base_url]
+
+  # The order writes, which are never retried. See `check_retry/2`.
+  @no_retry [:place_order, :replace_order, :cancel_order]
 
   # The single table. Anything that is not here has no `opts` the facade reads.
   @own %{
@@ -113,7 +135,7 @@ defmodule DpExchange.Schwab.Options do
   """
   @spec allowed(atom()) :: [atom()]
   def allowed(:get_option_chain), do: allowed_chain()
-  def allowed(function), do: CoreOptions.transport_options() ++ Map.fetch!(@own, function)
+  def allowed(function), do: transport() ++ Map.fetch!(@own, function)
 
   @doc """
   The extra keys only `DpExchange.Schwab.Fake` reads for `function`, as test seams.
@@ -126,17 +148,39 @@ defmodule DpExchange.Schwab.Options do
 
   `:ok`, `{:error, {:unknown_option, key}}` or `{:error, {:invalid_options, opts}}`.
   """
-  @spec check(atom(), term()) ::
-          :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
-  def check(function, opts), do: CoreOptions.check(opts, allowed(function))
+  @spec check(atom(), term()) :: :ok | {:error, check_error()}
+  def check(function, opts) do
+    with :ok <- CoreOptions.check(opts, allowed(function)), do: check_retry(function, opts)
+  end
 
   @doc """
   As `check/2`, for `DpExchange.Schwab.Fake`: the real list plus `fake_only/1`.
   """
-  @spec check_fake(atom(), term()) ::
-          :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
-  def check_fake(function, opts),
-    do: CoreOptions.check(opts, allowed(function) ++ fake_only(function))
+  @spec check_fake(atom(), term()) :: :ok | {:error, check_error()}
+  def check_fake(function, opts) do
+    with :ok <- CoreOptions.check(opts, allowed(function) ++ fake_only(function)),
+         do: check_retry(function, opts)
+  end
+
+  @typedoc "What a refused option check answers."
+  @type check_error ::
+          {:unknown_option, atom()}
+          | {:invalid_options, term()}
+          | {:unsupported_option, :retry_attempts}
+
+  # **An order write is exactly one attempt, so a retry count is refused, not ignored.**
+  # Schwab has no idempotency key: a retried `place_order/3` that timed out after the venue
+  # accepted it places the order twice. `:retry_attempts` is allowed as a key (every function
+  # takes the shared transport keys), but only absent, `nil` or `0` is honoured; any other
+  # value would be a retry request this package silently did not carry out.
+  defp check_retry(function, opts) when function in @no_retry do
+    case Keyword.get(opts, :retry_attempts) do
+      attempts when attempts in [nil, 0] -> :ok
+      _more -> {:error, {:unsupported_option, :retry_attempts}}
+    end
+  end
+
+  defp check_retry(_function, _opts), do: :ok
 
   @doc """
   As `check/2` for the reads that return a plain value and so have no error channel: a
@@ -159,6 +203,8 @@ defmodule DpExchange.Schwab.Options do
   end
 
   defp allowed_chain do
-    CoreOptions.transport_options() ++ @market ++ [:contractType | Rest.chain_option_keys()]
+    transport() ++ @market ++ [:contractType | Rest.chain_option_keys()]
   end
+
+  defp transport, do: CoreOptions.transport_options() -- @not_read
 end

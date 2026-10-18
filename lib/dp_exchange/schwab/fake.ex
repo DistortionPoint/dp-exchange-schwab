@@ -339,7 +339,9 @@ defmodule DpExchange.Schwab.Fake do
   @doc """
   The listed symbols that start with `opts[:query]`, sorted.
 
-  Without a `:query` this answers `{:error, {:query_required, :schwab}}`, as the real facade does.
+  Without a `:query` this answers `{:error, {:query_required, :schwab}}`, as the real facade does,
+  and a `:projection` outside the venue's six is `{:error, {:invalid_projection, value}}`. The
+  match is a prefix whatever the projection: the fake has no descriptions to search.
   See `c:DpExchange.Core.Venue.get_symbols/1`.
   """
   @impl true
@@ -352,6 +354,7 @@ defmodule DpExchange.Schwab.Fake do
   defp do_get_symbols(opts) do
     with :ok <- require_credential_map(opts),
          {:ok, query} <- fetch_query(opts),
+         {:ok, _projection} <- Rest.fetch_projection(opts),
          :ok <- require_credentials(opts) do
       # Sorted, as `Rest.get_symbols/2` returns them.
       {:ok,
