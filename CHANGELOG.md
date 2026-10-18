@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.143] - 2026-10-18
+
 ### Changed — BREAKING
 
 - **`place_order/3`, `replace_order/4` and `cancel_order/3` no longer list `:retry_attempts`
