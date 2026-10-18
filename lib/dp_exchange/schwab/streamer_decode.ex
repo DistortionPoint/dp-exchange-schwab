@@ -45,6 +45,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
   """
 
   alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
+  alias DpExchange.Schwab.Bound
 
   @doc """
   A `Quote` from a `LEVELONE_*` frame.
@@ -427,7 +428,7 @@ defmodule DpExchange.Schwab.StreamerDecode do
       case level(row) do
         {:ok, level} -> {:cont, {:ok, [level | acc]}}
         :empty -> {:cont, {:ok, acc}}
-        :unreadable -> {:halt, {:error, {:unreadable_level, side, row}}}
+        :unreadable -> {:halt, {:error, {:unreadable_level, side, bounded_value(row)}}}
       end
     end)
     |> case do
@@ -440,7 +441,16 @@ defmodule DpExchange.Schwab.StreamerDecode do
   end
 
   defp levels(nil, _side, _direction), do: {:ok, []}
-  defp levels(other, side, _direction), do: {:error, {:unreadable_level, side, other}}
+
+  defp levels(other, side, _direction),
+    do: {:error, {:unreadable_level, side, bounded_value(other)}}
+
+  # The venue's value, quoted into an error tuple: a small one comes back as sent, a large one
+  # (a whole book sent where a level was expected) is cut so a hostile or broken frame cannot
+  # ride the error into every log.
+  defp bounded_value(value) do
+    if :erlang.external_size(value) <= 512, do: value, else: Bound.text(value)
+  end
 
   defp level(row) do
     case {level_at(row, 0), level_at(row, 1)} do

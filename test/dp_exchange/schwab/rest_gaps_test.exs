@@ -97,6 +97,20 @@ defmodule DpExchange.Schwab.RestGapsTest do
     end
   end
 
+  describe "an unreadable price is quoted into the error bounded, not echoed whole" do
+    test "a huge string or object where a price belongs is cut" do
+      for bad <- [String.duplicate("z", 10_000), %{"v" => String.duplicate("z", 10_000)}] do
+        body = quote_body(%{"lastPrice" => bad})
+
+        assert {:error, {:invalid_decimal, :price, shown}} =
+                 Rest.get_price("AAPL", @creds, opts(responding(body)))
+
+        assert is_binary(shown)
+        assert byte_size(shown) < 2_200
+      end
+    end
+  end
+
   describe "get_historical_prices/5 — a bar price that is present but empty" do
     test "an empty open is an unreadable bar, not a bar with a nil open" do
       body = %{

@@ -362,7 +362,8 @@ defmodule DpExchange.SchwabTest do
       # Preview reads no order-limit name, so it is not passed (it would be a stray key).
       call_opts = Keyword.delete(base, :order_limit) ++ [plug: plug, retry_attempts: 0]
 
-      assert {:ok, _preview} = Schwab.preview_order(@creds, @order_request, call_opts)
+      assert {:ok, %{"commissionAndFee" => %{"commission" => %{}}}} =
+               Schwab.preview_order(@creds, @order_request, call_opts)
 
       assert Schwab.preview_order(@creds, @order_request, base ++ [plug: plug]) ==
                {:error, {:unknown_option, :order_limit}}

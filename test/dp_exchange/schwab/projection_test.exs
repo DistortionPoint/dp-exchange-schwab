@@ -111,7 +111,9 @@ defmodule DpExchange.Schwab.ProjectionTest do
         assert {:ok, symbols} =
                  Fake.get_symbols(credentials: @creds, query: "A", projection: projection)
 
-        assert is_list(symbols)
+        assert [_first | _rest] = symbols
+        assert Enum.all?(symbols, &String.starts_with?(&1, "A"))
+        assert symbols == Enum.sort(symbols)
       end
     end
   end

@@ -2620,12 +2620,17 @@ defmodule DpExchange.Schwab.Rest do
   end
 
   defp path_segments(values) do
-    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+    values
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
       case path_segment(value) do
-        {:ok, segment} -> {:cont, {:ok, acc ++ [segment]}}
+        {:ok, segment} -> {:cont, {:ok, [segment | acc]}}
         :error -> {:halt, {:error, {:invalid_path_segment, :schwab}}}
       end
     end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      error -> error
+    end
   end
 
   defp path_segment(value) when is_integer(value),
@@ -3460,9 +3465,16 @@ defmodule DpExchange.Schwab.Rest do
   # or empty bar price as `:unexpected_response_shape`), so `nil` never arrives here.
   defp required_decimal(value, field) do
     case decimal(value) do
-      nil -> {:error, {:invalid_decimal, field, value}}
+      nil -> {:error, {:invalid_decimal, field, quoted_raw(value)}}
       parsed -> {:ok, parsed}
     end
+  end
+
+  # The venue's value quoted into an error tuple: a small one as sent, a large one (an object
+  # or a long string where a price belongs) cut by `bounded_raw/1`, so a hostile or broken
+  # reply cannot ride the error into every log.
+  defp quoted_raw(value) do
+    if :erlang.external_size(value) <= 512, do: value, else: bounded_raw(value)
   end
 
   # A traded price on a bar (tick R, MD6): zero or negative refuses the reply, like an
@@ -3471,7 +3483,7 @@ defmodule DpExchange.Schwab.Rest do
     with {:ok, parsed} <- required_decimal(value, field) do
       if Decimal.positive?(parsed),
         do: {:ok, parsed},
-        else: {:error, {:non_positive_price, field, value}}
+        else: {:error, {:non_positive_price, field, quoted_raw(value)}}
     end
   end
 end

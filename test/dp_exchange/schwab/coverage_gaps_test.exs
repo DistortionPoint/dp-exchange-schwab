@@ -1007,22 +1007,26 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
     test "the facade reaches the new surface" do
       base = [credentials: @creds, retry_attempts: 0]
 
-      assert {:ok, _chain} =
+      assert {:ok, %{underlying: "AAPL", expiries: %{~D[2026-03-20] => _strikes}}} =
                DpExchange.Schwab.get_option_chain(
                  "AAPL",
                  base ++ [plug: responding(chain_body())]
                )
 
-      assert {:ok, _dates} =
+      assert {:ok, [~D[2026-03-20]]} =
                DpExchange.Schwab.get_option_expirations(
                  "AAPL",
-                 base ++ [plug: responding(%{"expirationList" => []})]
+                 base ++
+                   [
+                     plug:
+                       responding(%{"expirationList" => [%{"expirationDate" => "2026-03-20"}]})
+                   ]
                )
 
-      assert {:ok, _movers} =
+      assert {:ok, [%{symbol: "NVDA", screener: "$DJI", rank: 1}]} =
                DpExchange.Schwab.get_screener(
                  "$DJI",
-                 base ++ [plug: responding(%{"screeners" => []})]
+                 base ++ [plug: responding(%{"screeners" => [%{"symbol" => "NVDA"}]})]
                )
 
       assert {:ok, []} = DpExchange.Schwab.get_positions(base ++ [plug: responding([])])
@@ -1040,50 +1044,76 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                  retry_attempts: 0
                )
 
-      assert {:ok, _prefs} =
+      # Each of these names the path it reaches: a facade function delegating to a neighbour
+      # would answer `{:ok, _}` just the same, and only the path tells them apart.
+      me = self()
+
+      assert {:ok, %{"streamerInfo" => []}} =
                DpExchange.Schwab.get_user_preference(@creds,
-                 plug: responding(%{}),
+                 plug: capturing(%{"streamerInfo" => []}, me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _summaries} =
+      assert_receive {:request, prefs_path, ""}
+      assert String.ends_with?(prefs_path, "/userPreference")
+
+      assert {:ok, []} =
                DpExchange.Schwab.get_account_summaries(@creds,
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _orders} =
+      assert_receive {:request, summaries_path, ""}
+      assert String.ends_with?(summaries_path, "/accounts")
+
+      assert {:ok, []} =
                DpExchange.Schwab.get_all_orders(@creds,
                  from: ~U[2026-08-01 00:00:00Z],
                  to: ~U[2026-09-01 00:00:00Z],
                  now: ~U[2026-08-15 00:00:00Z],
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _quote} =
+      assert_receive {:request, orders_path, orders_query}
+      assert String.ends_with?(orders_path, "/orders")
+      assert orders_query =~ "fromEnteredTime=2026-08-01T00%3A00%3A00.000Z"
+
+      assert {:ok, %{"AAPL" => %{}}} =
                DpExchange.Schwab.get_symbol_quote("AAPL", @creds,
-                 plug: responding(%{}),
+                 plug: capturing(%{"AAPL" => %{}}, me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _hours} =
+      assert_receive {:request, quote_path, ""}
+      assert String.ends_with?(quote_path, "/AAPL/quotes")
+
+      assert {:ok, %{"equity" => %{}}} =
                DpExchange.Schwab.get_market("equity", @creds,
-                 plug: responding(%{}),
+                 plug: capturing(%{"equity" => %{}}, me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _instrument} =
+      assert_receive {:request, market_path, ""}
+      assert String.ends_with?(market_path, "/markets/equity")
+
+      assert {:ok, %{"cusip" => "037833100"}} =
                DpExchange.Schwab.get_instrument("037833100", @creds,
-                 plug: responding(%{}),
+                 plug: capturing(%{"cusip" => "037833100"}, me),
                  retry_attempts: 0
                )
 
-      assert {:ok, _transaction} =
+      assert_receive {:request, instrument_path, ""}
+      assert String.ends_with?(instrument_path, "/instruments/037833100")
+
+      assert {:ok, %{"activityId" => 1}} =
                DpExchange.Schwab.get_transaction(@creds, "h", 1,
-                 plug: responding(%{}),
+                 plug: capturing(%{"activityId" => 1}, me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, transaction_path, ""}
+      assert String.ends_with?(transaction_path, "/accounts/h/transactions/1")
 
       assert DpExchange.Schwab.movers_universes() == Rest.movers_universes()
       assert DpExchange.Schwab.markets() == Rest.markets()

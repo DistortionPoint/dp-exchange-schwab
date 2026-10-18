@@ -869,6 +869,26 @@ defmodule DpExchange.Schwab.StreamerTest do
                StreamerDecode.to_order_book(%{fields | bids: ["10.5@300"]}, "AAPL")
     end
 
+    test "an unreadable level or side is quoted into the error bounded, not echoed whole" do
+      huge = List.duplicate("x", 5_000)
+      base = %{snapshot_time: 1_787_936_147_000, asks: []}
+
+      assert {:error, {:unreadable_level, :bids, quoted_level}} =
+               StreamerDecode.to_order_book(Map.put(base, :bids, [huge]), "AAPL")
+
+      assert is_binary(quoted_level)
+      assert byte_size(quoted_level) < 2_200
+
+      assert {:error, {:unreadable_level, :asks, quoted_side}} =
+               StreamerDecode.to_order_book(
+                 %{base | asks: String.duplicate("y", 10_000)},
+                 "AAPL"
+               )
+
+      assert is_binary(quoted_side)
+      assert byte_size(quoted_side) < 2_200
+    end
+
     test "a level price or size that is not a number at all refuses the book" do
       base = %{snapshot_time: 1_787_936_147_000, asks: []}
 

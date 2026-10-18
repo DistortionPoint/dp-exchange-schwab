@@ -44,6 +44,17 @@ an acceptable changelog line.
 - The read-back after an accepted `place_order/3` / `replace_order/4` is a single attempt, so
   a failing read no longer holds the caller in backoff after the order is already placed.
 
+### Fixed
+
+- **A venue value quoted into an error tuple is bounded.** `{:unreadable_level, side, value}`
+  (order-book decode) and `{:invalid_decimal, field, value}` / `{:non_positive_price, field,
+  value}` (REST quotes and bars) carried the venue's value whole, so a huge string, object or
+  list where a level or price belongs rode into the caller's error and every log. A value up to
+  512 bytes (external size) is still returned as sent; a larger one is cut like the rest of the
+  package's venue text (`Bound.text/1`, `bounded_raw/1`).
+- `Rest` builds a request path's segments with a prepend and one reverse rather than `++` in
+  the reducer (no behaviour change).
+
 ## [0.2.142] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
