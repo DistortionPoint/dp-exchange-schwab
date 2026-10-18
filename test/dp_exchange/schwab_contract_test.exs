@@ -64,8 +64,13 @@ defmodule DpExchange.SchwabContractTest do
       {:get_balances, 2} => [account_hash: "contract-account"],
       {:get_orders, 2} => [account_hash: "contract-account"],
       {:place_order, 3} => [account_hash: "contract-account"],
-      {:get_order, 3} => [account_hash: "contract-account"]
+      {:get_order, 3} => [account_hash: "contract-account"],
+      {:cancel_order, 3} => [account_hash: "contract-account"]
     },
+    # Conformance group 49: an order id nobody placed is `{:refused, :not_found}` on the Fake
+    # and the real path alike (`Rest.get_order/4` and `Rest.cancel_order/4` map the venue's 404
+    # to it). Schwab order ids are integers, so the id is one.
+    unknown_order_id: "999999999999",
     # A replace on this venue is a whole new order (`Fake.replace_order/4` builds it with
     # `Orders.build/2`), so the suite's generic price-only edit is refused as missing its
     # symbol. The replacement is the placed order with a new price.
