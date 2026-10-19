@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.144] - 2026-10-19
+
 ### Changed — BREAKING
 
 - **A venue refusing a Streamer subscription is a `:refusal` notice, not `:degraded`.** A
