@@ -35,7 +35,7 @@ YYYY-MM-DD_design-topic-name/
 │   └── README.md
 ├── config/                     # Configuration examples
 │   ├── config-example.exs
-│   ├── environment-vars.env
+│   ├── environment-vars.sample
 │   └── README.md
 └── docs/                       # Additional documentation
     ├── implementation-notes.md
@@ -129,9 +129,9 @@ Configuration examples and environment setup:
 
 #### Prerequisites
 
-- Phoenix application environment set up
 - Dependencies installed via `mix deps.get`
-- Database configured and running
+- No database and no Phoenix application: this package is a library, and its tests run
+  against in-process fakes
 
 #### Testing Samples
 
@@ -200,7 +200,7 @@ mix test --cover
 
 ### Configuration Files
 
-- **Environment**: `.env.example`, `.env.development`
+- **Environment**: `.env.sample` only (placeholders; every real `.env.*` stays local and is never committed)
 - **Application**: `descriptive_name.exs`
 - **Docker**: `Dockerfile.example`, `docker-compose.example.yml`
 
@@ -298,17 +298,15 @@ EXTERNAL_API_KEY=<your-api-key>
 ### Debug Commands
 
 ```bash
-# Useful debugging commands
-iex -S mix phx.server
+# Useful debugging commands (this is a library: no Phoenix server, no Ecto)
+iex -S mix
 mix deps.compile --force
-mix ecto.reset
 ```
 
 ### Log Analysis
 
-- Check application logs: `tail -f log/development.log`
-- Monitor database queries: Enable query logging
-- Track performance: Use Phoenix LiveDashboard
+- Check the `Logger` output of the failing test run
+- Attach a `:telemetry` handler to the events `DpExchange.Core.Telemetry` documents
 
 ## Version History
 

@@ -31,6 +31,45 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **A credential whose `:expires_at` has passed is refused before anything is sent:
+  `{:error, {:credentials_expired, :schwab}}`.** Every REST read, `preview_order/3` and every
+  order write (`place_order/3`, `replace_order/4`, `cancel_order/3`) now asks
+  `Auth.check_unexpired/1` after the token check and before the request, so a token the
+  credential itself says is dead no longer spends a rate-limit slot (or a throttled order write)
+  to be answered `401`. Absent, `nil` or non-`DateTime` `:expires_at` is not expired (as for
+  `needs_refresh?/2`) and is judged by the venue; a token inside the 120 s refresh margin is still
+  sent. `DpExchange.Schwab.Fake` refuses an expired credential with the same tuple, in the same
+  order, and `Fake.refresh_credentials/2` now dates its new token from the real clock (as
+  `Auth.refresh/2` does) rather than the fake's fixed `as_of/0`, whose thirty minutes are long
+  over. Nothing in the package refreshes, retries or loops on a `401`: that stays the host's call.
+- **Two overlapping `refresh_credentials/2` calls on one refresh token no longer both reach the
+  venue: the second answers `{:error, {:refresh_in_progress, :schwab}}`, sent nothing.** The
+  refresh token is assumed one-time use, so the second request could only be answered with a
+  refusal that reads as a dead grant (`:reauthorization_required`), and a host persisting that
+  answer overwrote the winner's good credential with a spent one. The guard is a `:global`
+  name registered for the request (this node and connected ones), carrying a digest of the token
+  and unregistered however the caller exits, a kill included. It closes the overlap only, not a
+  caller that starts after the winner with a credential it read before, nor a node that is not
+  connected: the host still owns ordering.
+  Covered by `tick_an_credentials_test.exs`.
+
+### Fixed
+
+- **`vendor/websockex.ex` moduledoc said "exactly four" changes and "four marked changes" while
+  listing six, and its call-site markers used three numbering schemes.** Diffed in full against
+  `deps/websockex` 0.5.1: every other function body, `@spec` and callback is identical, and the
+  difference is exactly the six documented fixes. The moduledoc now says six and maps each marker
+  to its number. No behaviour change.
+- **`usage-rules.md` stated three things the code does not do.** It required `dp_exchange_core`
+  `~> 0.3.101` (it is `~> 0.3.109`); said `get_screener/2` drops an unnamed row and keeps the
+  survivors' ranks (it refuses the whole list, `{:unreadable_screener_row, rank}`); and said
+  `cancel_order/3` answers `:order_unconfirmed` like place and replace (a cancel keeps Core's plain
+  `{:exchange_error, :schwab, _}`, as `Core.Venue` specifies). It also said the Fake does not
+  provide `refresh_credentials/2` and the raw reads while another paragraph said it does; and an
+  undecodable `2xx` on a refresh is now documented as not safely retryable.
+
 ## [0.2.144] - 2026-10-19
 
 ### Changed — BREAKING

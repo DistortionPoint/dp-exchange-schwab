@@ -1,6 +1,6 @@
 # Design Documentation
 
-Welcome to the design documentation for `dp_exchange_core`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family and were adopted from `dp_crypto_management`.
+Welcome to the design documentation for `dp_exchange_schwab`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family (they originate in `dp_exchange_core`, adopted from `dp_crypto_management`); the templates under `templates/` and `workflow/` are generic and carry Phoenix-flavoured examples that do not apply to this library, which has no Phoenix, no Ecto and no database. `closed/` holds the completed plans (its README, named below, has not been carried into this repository).
 
 ## Design Workflow Process
 

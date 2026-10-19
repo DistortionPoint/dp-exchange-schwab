@@ -110,7 +110,12 @@ every seven days regardless of how often you refresh in between.
 **Persist the result of every refresh before using it.** Losing the returned token costs the
 grant, and recovering costs a person at a browser. `refresh_credentials/2` is never retried
 internally — it is at-most-once, because a retry after a timeout re-sends a token that may
-already have been spent.
+already have been spent. Refresh from **one process per credential**: while one refresh of a
+refresh token is in flight (on this node or a connected one), another of the same token
+answers `{:error, {:refresh_in_progress, :schwab}}` without sending anything (it cannot see a
+node that is not connected, or a caller holding a credential read before the winner finished). And a credential whose
+`:expires_at` has passed is refused locally, `{:error, {:credentials_expired, :schwab}}`,
+rather than sent to be answered `401`; nothing here refreshes or retries on a `401` for you.
 
 ```elixir
 credentials = %{

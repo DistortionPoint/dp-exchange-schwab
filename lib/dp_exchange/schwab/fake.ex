@@ -1199,10 +1199,12 @@ defmodule DpExchange.Schwab.Fake do
     if FakeInjection.credentials_bypassed?(:schwab) do
       :ok
     else
-      case Auth.headers(Keyword.get(opts, :credentials, %{})) do
-        {:ok, _headers} -> :ok
-        {:error, _reason} = refusal -> refusal
-      end
+      credentials = Keyword.get(opts, :credentials, %{})
+
+      # `Auth.check_unexpired/1` after `Auth.headers/2`, the order `Rest`'s `signed_headers/2`
+      # refuses in: a credential the real path would not send is not served here either.
+      with {:ok, _headers} <- Auth.headers(credentials),
+           do: Auth.check_unexpired(credentials)
     end
   end
 
@@ -1657,8 +1659,8 @@ defmodule DpExchange.Schwab.Fake do
 
   @doc """
   The credential after a refresh, as `DpExchange.Schwab.refresh_credentials/2` answers it:
-  both tokens replaced, `:expires_at` thirty minutes after `opts[:now]` (`as_of/0` by
-  default), and every other key of `credentials` kept.
+  both tokens replaced, `:expires_at` thirty minutes after `opts[:now]` (the real clock by
+  default, as `Auth.refresh/2`), and every other key of `credentials` kept.
 
   Refuses first what `DpExchange.Schwab.Auth.refresh/2` refuses before a request, through the
   same `Auth.validate_refresh_input/1`: a credential without a `:refresh_token`, `:client_id`
@@ -1681,8 +1683,11 @@ defmodule DpExchange.Schwab.Fake do
     with :ok <- Auth.validate_refresh_input(credentials),
          :ok <- Auth.check_now(opts),
          :ok <- Auth.check_secure_url(Auth.token_url(opts), opts) do
-      # `Config.opt/3`: a forwarded `now: nil` is silence, not a clock of `nil`.
-      now = Config.opt(opts, :now, @as_of)
+      # `Config.opt/3`: a forwarded `now: nil` is silence, not a clock of `nil`. The default is
+      # the real clock, as `Auth.refresh/2`'s is, not `as_of/0`: an expiry thirty minutes after
+      # the fake's fixed past instant is already over, and the fake (like the real path)
+      # refuses an expired credential, so the fake's own refresh answered an unusable one.
+      now = Config.opt(opts, :now, nil) || DateTime.utc_now()
 
       {:ok,
        Map.merge(credentials, %{

@@ -17,7 +17,7 @@ the top and carries its `legs`. An order with no `orderId` is refused rather tha
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.101`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.109`.
 
 ```elixir
 # before
@@ -196,15 +196,17 @@ can be much older than the book on the same row. A row without a usable `quoteTi
 `venue_time: nil`, as the streamed book does when a frame carries no quote time. (`get_price/2`
 is unchanged: a quote's price is dated by `tradeTime` first when the price is `lastPrice`.)
 
-## A screener row the venue did not name is dropped
+## A screener row the venue did not name refuses the list
 
-Also 0.2.30. `get_screener/2` used to publish such a row with `symbol: ""`, which satisfied
-the contract's non-nil requirement while saying nothing — and an empty string is worse than a
-`nil`, because a consumer keying coverage by symbol gets a live entry named `""`.
+`get_screener/2` used to publish such a row with `symbol: ""` (0.2.30 and before), which
+satisfied the contract's non-nil requirement while saying nothing — and an empty string is
+worse than a `nil`, because a consumer keying coverage by symbol gets a live entry named `""`.
+For a while after that the row was dropped and the survivors kept their positions.
 
-**A shorter list is not an error, and the venue's ranking is preserved**: a dropped row
-leaves a gap in `rank` rather than renumbering the survivors, because `rank` is the position
-the venue returned the row in.
+**It is now `{:error, {:unreadable_screener_row, rank}}` (`rank` is the row's 1-based position)
+and no list is returned**: a "top movers" list with a mover missing reads as complete, and a
+consumer ranking by it never sees the hole. `rank` is the position the venue returned the row
+in; nothing is re-ranked.
 
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
@@ -308,14 +310,33 @@ will not fix it. The `detail` is the venue's own text, bounded: longer than 2_04
 cut on a UTF-8 boundary and ends `… (N bytes)`; a shorter one is unchanged, and a `detail`
 that was not text arrives as its bounded `inspect/2` rendering.
 
-**Refresh from one process per credential.** `refresh_credentials/2` holds no lock and the
-refresh token is assumed one-time use (see below). Two processes refreshing the same credential at once get one
-success and one `{:refused, {:reauthorization_required, _, _}}` - the terminal answer, although
-the grant is intact and the winner holds its replacement - and if the loser's answer is the one
-you persist, the good credential is overwritten by a spent one. Serialise refreshes in your own
-code (one owner, persist before releasing), and treat a `:reauthorization_required` that
-arrives while another refresh of that credential was in flight as "re-read the stored
-credential", not as a dead grant.
+**An expired access token is not sent.** A credential whose `:expires_at` is a `DateTime` that
+has passed is refused by every REST call and every order write with `{:error,
+{:credentials_expired, :schwab}}`, before any request and before a rate-limit slot (or a
+throttled order write) is spent: the answer would only have been a `401`. The remedy is
+`refresh_credentials/2`. A credential with no `:expires_at` is signed as ever, and the venue
+judges it: a `401` comes back once as `{:refused, {:venue_error, 401, _}}` and **nothing in this
+package refreshes, retries or loops on it** - that is your call (`credential_failure?/1`, above).
+A token inside the refresh margin is still sent; `needs_refresh?/2` is where you renew early.
+`DpExchange.Schwab.Fake` refuses an expired credential the same way, and
+`Fake.refresh_credentials/2` dates its new token from the real clock (or `opts[:now]`), so the
+credential it returns is one the fake serves.
+
+**Refresh from one process per credential; the package refuses the overlap it can see.**
+While one `refresh_credentials/2` of a refresh token is in flight, on this node or a connected
+one, another call with the same token answers `{:error, {:refresh_in_progress, :schwab}}`
+**without sending anything** (a `:global` name held for the duration of the request, carrying a
+digest of the token and dropped however the caller exits). Wait for the first to finish and
+use the credential you stored; do not retry with the one you hold, which is about to be spent.
+**That closes the overlap, not the sequence, and not a node that is not connected**: the
+refresh token is assumed one-time use
+(see below), so a caller that refreshes after the winner finished, holding the credential it
+read before, sends a spent token and gets `{:refused, {:reauthorization_required, _, _}}` - the
+terminal answer, although the grant is intact and the winner holds its replacement - and if
+that answer is the one you persist, the good credential is overwritten by a spent one.
+Serialise refreshes in your own code (one owner, persist before releasing), and treat a
+`:reauthorization_required` that arrives while another refresh of that credential was in flight
+as "re-read the stored credential", not as a dead grant.
 
 **On the streaming side the same reactive signal arrives as a notice, and you must handle
 it.** `credential_failure?/1` covers a REST response you are holding; a live Streamer login
@@ -364,18 +385,24 @@ only that the refresh response carries a `refresh_token`.) So:
   storing costs the grant, and only a person at a browser can restore it.
 - **A `200` whose access token is missing, blank or unsendable is `{:error,
   :unexpected_response_shape}`**, never a credential to store: the rotated refresh token in
-  that body is not returned to you either, so treat it as a failed refresh.
+  that body is not returned to you either, so treat it as a failed refresh. **A `200` that is
+  not JSON at all is `{:error, {:undecodable_response, :schwab}}`** (a captive portal or a CDN
+  page): unlike the same answer on a read, it is not safely "worth retrying" blindly, because
+  if it did come from Schwab the token is spent - hold the credential you have, and if the
+  next refresh is refused, a person must log in again.
 - **Do not retry a refresh.** The package will not, deliberately. If a refresh times out, the
   token may already have been spent; try again with the credential you still hold, not the
   one you just sent.
-- **One process refreshes a given credential at a time.** This package holds no state, so it
-  cannot see that another caller is already refreshing the same refresh token. Two refreshes
-  racing on one token spend it twice: the venue honours the first, and the second is refused
-  `400`/`401`, which arrives as `{:refused, {:reauthorization_required, _, _}}` although the
-  grant is fine and the winner's result is the valid credential. Route every refresh through
-  one process (or a lock of your own), persist the result, and before treating
-  `:reauthorization_required` as terminal read your store again for a credential newer than
-  the one you sent.
+- **One process refreshes a given credential at a time.** The package refuses an overlapping
+  refresh of the same refresh token on connected nodes (`{:error, {:refresh_in_progress,
+  :schwab}}`, nothing sent). It cannot see a refresh on a node that is not connected, or a
+  caller that starts after the
+  winner finished with the credential it read before: two refreshes racing on one token spend
+  it twice, the venue honours the first, and the second is refused `400`/`401`, which arrives
+  as `{:refused, {:reauthorization_required, _, _}}` although the grant is fine and the
+  winner's result is the valid credential. Route every refresh through one process (or a lock
+  of your own), persist the result, and before treating `:reauthorization_required` as
+  terminal read your store again for a credential newer than the one you sent.
 - `{:refused, {:reauthorization_required, _status, _detail}}` is **terminal**. The refresh
   token's seven days elapsed, or the user reset their password. Send a person to the login
   page; do not retry.
@@ -591,7 +618,11 @@ venue names the id. The venue answers a write with only a `Location` header.
   before anything was sent (validation, a missing option or credential, our own rate limiter
   refusing, the venue's 429) stay plain `{:error, _}`; **every venue 4xx except 429 is
   `{:refused, _}`** (409, 415 and 422 included: writes are sent once, so a 4xx is always the
-  answer to the first attempt). `cancel_order/3` follows the same rule.
+  answer to the first attempt). `cancel_order/3` follows the 4xx rule and is sent once too,
+  but a timeout, transport failure or 5xx on a **cancel** stays Core's plain `{:error,
+  {:exchange_error, :schwab, message}}`, not `:order_unconfirmed` (`Core.Venue`: a cancel
+  keeps that tag): the order may or may not be cancelled, so read it with `get_order/3`
+  before cancelling again.
   A missing order (404) on `get_order/3`, `cancel_order/3` or `replace_order/4` is
   `{:refused, :not_found}`.
 
@@ -963,10 +994,14 @@ fake also narrows `get_orders/2` by `:max_results`, refuses an unreadable `:from
 `:to_date` on `get_option_chain/2`, and answers `{:refused, {:account_not_found, number}}`
 to a `get_positions/1` `:account_number` other than the one account it holds.
 
-**What the fake does not provide.** The facade's raw reads — `get_transaction/4`,
+**What the fake cannot make true.** The facade's raw reads — `get_transaction/4`,
 `get_account_summaries/2`, `get_symbol_quote/3`, `get_market/3`, `get_instrument/3`,
-`get_user_preference/2` — and `refresh_credentials/2` return the venue's own JSON, which a
-fake could only invent. Drive `DpExchange.Schwab.Rest` with your own `:plug` for those. The
+`get_user_preference/2` — and `refresh_credentials/2` are on the fake (above), but they return
+the vendor specification's example shapes filled with the fake's own values (a refresh returns
+`fake-access-token-rotated` and an `:expires_at` thirty minutes after `opts[:now]`, the real
+clock by default), which
+a fake could only invent. Do not read content from them: drive `DpExchange.Schwab.Rest` with
+your own `:plug` when you need a body you control. The
 static lists (`movers_universes/0`, `markets/0`, `transaction_types/0`,
 `equity_instructions/0`, `option_instructions/0`), `needs_refresh?/2`,
 `credential_failure?/1`, `wanted/1`, `status/1` and `update_credentials/2` are on the fake.
@@ -986,6 +1021,11 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
 - **A close frame with an invalid status code disconnects.** Upstream raised on it and
   crashed the socket before its reconnect logic ran. It now produces an ordinary
   `:link_down` and reconnect.
+
+The fork carries four more fixes of the same kind (a message or incomplete frame past 8 MiB is
+closed with code 1009; a raise or a missing `Sec-WebSocket-Accept` in the handshake ends the
+attempt rather than the process; a close frame that cannot be sent is a closed connection;
+the spawn glue enters the fork's own loop). Its moduledoc lists all six.
 
 **This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
 release's internals. If your application pins a different websockex version, dependency
@@ -1216,8 +1256,10 @@ have **received and acted on** the request before the connection broke. A retrie
 second order, and you see one call and one answer either way.
 
 So order-creating and order-changing calls here are sent once. A transport failure comes back
-to you as an error, and **the outcome of that attempt is genuinely unknown** — the order may
-or may not exist at the venue. Read your open orders before placing again; do not treat the
+to you as `{:error, {:order_unconfirmed, nil, reason}}` for `place_order/3` and
+`replace_order/4` (a plain `{:error, {:exchange_error, :schwab, _}}` for `cancel_order/3`),
+and **the outcome of that attempt is genuinely unknown** — the order may or may not exist at
+the venue. Read your open orders before placing again; do not treat the
 error as "it did not happen".
 
 This is not a blanket ban on retrying. It is a ban on repeating an action the venue cannot

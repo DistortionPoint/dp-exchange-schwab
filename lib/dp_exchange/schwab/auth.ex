@@ -85,18 +85,36 @@ defmodule DpExchange.Schwab.Auth do
   That is a real operational hazard rather than a style note, and it is why `refresh/2`
   returns the whole credential rather than mutating anything.
 
-  **Two callers must not refresh the same credential at once.** This module holds no state
-  and no lock, so it cannot serialise them, and on the one-time-use assumption above: when two
-  processes call `refresh/2` with the same credential, the venue honours the first and spends
-  the token, and the second is answered `400` or `401` and reported here as
+  **Two callers must not refresh the same credential at once, and the second is refused
+  rather than sent.** On the one-time-use assumption above, when two processes call
+  `refresh/2` with the same credential the venue honours the first and spends the token, and
+  the second would be answered `400` or `401` and reported as
   `{:refused, {:reauthorization_required, status, detail}}` - the terminal answer that sends
   a person to a browser - although the grant is intact and the winner holds its replacement.
   Worse, if the loser's answer is the one a host persists, it overwrites the winner's good
-  credential with a spent one. Only the host's own storage can order them: refresh from ONE
-  process (a single owner per credential), persist before releasing it, and treat a
+  credential with a spent one. So while one `refresh/2` of a refresh token is in flight, on
+  this node or any node connected to it, another of the same token answers `{:error,
+  {:refresh_in_progress, :schwab}}` **without sending anything**: a `:global` name registered
+  for the duration of the request (it carries a digest of the token, never the token, and is
+  unregistered however the caller exits). The loser holds a credential that is about to be
+  spent; the move is to wait for the winner and read the credential the host stored, not to
+  retry with this one.
+
+  **That closes the overlap, not the sequence.** A caller that refreshes AFTER the winner
+  finished, holding the credential it read BEFORE, still sends a spent token; nor does the
+  name reach a node that is not connected. Only the host's own storage can order those:
+  refresh from ONE process (a single owner per credential), persist before releasing it, and
+  treat a
   `:reauthorization_required` that arrives while another refresh of the same credential was
-  in flight as "re-read the stored credential", not as a dead grant. A host that polls
-  `needs_refresh?/2` from several workers is exactly the shape that hits this.
+  in flight as "re-read the stored credential", not as a dead grant.
+
+  **An access token the credential itself says is expired is not sent.** `Rest` refuses a
+  credential whose `:expires_at` has passed with `{:error, {:credentials_expired, :schwab}}`
+  (`check_unexpired/1`), before any request and before a rate-limit slot is spent: the venue's
+  answer would be a `401` the package already knows. A credential with no `:expires_at` is
+  signed as ever, and a `401` from the venue is returned once as `{:refused, {:venue_error,
+  401, _}}`; **nothing in this package refreshes on a `401`, retries after one, or loops** -
+  refreshing is the host's call (`credential_failure?/1`, `refresh/2`).
 
   Nothing is cached here. This module holds no state, writes nothing, and logs no token
   value; `refresh/2` returns the new credential to the caller, which owns storage.
@@ -211,6 +229,27 @@ defmodule DpExchange.Schwab.Auth do
   end
 
   @doc """
+  Whether `credentials` still holds a usable access token by its own `:expires_at`: `:ok`, or
+  `{:error, {:credentials_expired, :schwab}}` when `:expires_at` is a `DateTime` that is now or
+  past.
+
+  **Absent is not expired** (the same rule as `needs_refresh?/2`): a credential with no
+  `:expires_at`, or one that is not a `DateTime`, is `:ok` and is judged by the venue. This is
+  the edge only - a token inside the refresh margin is still sent; `needs_refresh?/2` is where
+  a host decides to renew ahead of expiry. `Rest` calls it before every request it signs, so
+  an expired token never spends a rate-limit slot (or a throttled order write) to be told
+  `401`.
+  """
+  @spec check_unexpired(term()) :: :ok | {:error, {:credentials_expired, :schwab}}
+  def check_unexpired(%{expires_at: %DateTime{} = expires_at}) do
+    if DateTime.compare(expires_at, DateTime.utc_now()) == :gt,
+      do: :ok,
+      else: {:error, {:credentials_expired, :schwab}}
+  end
+
+  def check_unexpired(_no_expiry), do: :ok
+
+  @doc """
   Whether a request carrying a credential may go to `url`.
 
   `:ok` for an `https://` URL. `{:error, {:insecure_url, :schwab}}` for anything else,
@@ -283,6 +322,9 @@ defmodule DpExchange.Schwab.Auth do
   - `{:error, {:invalid_option, :now, value}}` — `opts[:now]` is neither absent nor a
     `DateTime`. Nothing was sent: it is judged before the request (`check_now/1`) because it is
     read after it, when the refresh token is already spent.
+  - `{:error, {:refresh_in_progress, :schwab}}` — another `refresh/2` of this same refresh
+    token is in flight (on this node or a connected one). Nothing was sent and nothing is spent by this call; wait
+    for the other to finish and use the credential the host stored (see the moduledoc).
   - `{:error, {:insecure_url, :schwab}}` — an overridden `:token_url` that is not `https://`.
     Nothing was sent: the Basic client pair and the refresh token are not put on a clear
     channel.
@@ -299,9 +341,19 @@ defmodule DpExchange.Schwab.Auth do
   - `{:error, :unexpected_response_shape}` — a `2xx` JSON body with no `access_token`, or one
     that is blank, padded or contains control characters. Nothing is stored or signed with it;
     the refresh token sent is spent, so treat it like any failed refresh and do not retry.
+  - `{:error, {:undecodable_response, :schwab}}` — a `2xx` whose body is not JSON (a captive
+    portal or a CDN page answering `200 text/html`) or not an object. Nothing is stored. If
+    the answer did come from Schwab the refresh token is spent, so this is not the "retry
+    freely" answer it is on a read.
   - `{:error, {:exchange_error, :schwab, message}}` — a 5xx, or a 4xx that is not a
     rejection of the credential. The grant is probably intact; the caller may try again
-    with the credential it still holds.
+    with the credential it still holds. **A timeout or transport failure (`{:error,
+    reason}` with a string reason, nothing decoded) is the same shape of answer with a
+    sharper caveat**: the request may have reached the venue and spent the token, with the
+    replacement lost in the response nobody read. Trying again is the only way to find out,
+    and a `{:refused, {:reauthorization_required, _, _}}` that follows such a failure may be
+    that lost response rather than a lapsed grant - the remedy is the same (a person at a
+    browser), but the cause is not seven days.
   """
   @spec refresh(credentials(), keyword()) ::
           {:ok, credentials()} | {:error, term()} | {:refused, term()}
@@ -407,7 +459,47 @@ defmodule DpExchange.Schwab.Auth do
     # The Basic client pair and the refresh token ride this request, so an overridden
     # `:token_url` that is not https is refused before anything is sent. See `check_secure_url/2`.
     with :ok <- check_secure_url(token_url(opts), opts) do
-      post_refresh(credentials, headers, body, opts)
+      single_flight(refresh_token, opts, fn -> post_refresh(credentials, headers, body, opts) end)
+    end
+  end
+
+  # **One refresh of a refresh token at a time, across the connected nodes.** The token is
+  # spent by the first request to reach the venue, so a second concurrent one can only be
+  # answered with a refusal that reads as a dead grant (see the moduledoc). The loser is told
+  # so locally, before anything is sent.
+  #
+  # The guard is a `:global` NAME registered to this process for the length of the request,
+  # not a `:global` lock: a registered name is unregistered when its process exits however it
+  # exits (a kill included), so a caller that dies mid-request cannot leave the token refused
+  # for good. `register_name/3` answers `:no` at once when the name is taken. The resolver is
+  # `notify_all_name/3`, which kills nobody: the default resolver, run when two partitioned
+  # nodes each hold the name and reconnect, would exit one of them, and that is a refreshing
+  # caller's own process.
+  #
+  # The name carries a digest of the token, never the token: `:global.registered_names/0` and
+  # a crash report print names. `seam_scope/1` is `0` in production (no seam); in-process test
+  # seams (`:plug`, `:req_adapter`) scope the name to themselves so two async tests that happen
+  # to share a literal token do not refuse each other.
+  defp single_flight(refresh_token, opts, request) do
+    name = {:schwab_refresh, :erlang.md5(refresh_token), seam_scope(opts)}
+
+    case :global.register_name(name, self(), &:global.notify_all_name/3) do
+      :yes ->
+        try do
+          request.()
+        after
+          :global.unregister_name(name)
+        end
+
+      :no ->
+        {:error, {:refresh_in_progress, :schwab}}
+    end
+  end
+
+  defp seam_scope(opts) do
+    case {Config.opt(opts, :plug, nil), Config.opt(opts, :req_adapter, nil)} do
+      {nil, nil} -> 0
+      seam -> :erlang.phash2(seam)
     end
   end
 

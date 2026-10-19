@@ -76,7 +76,10 @@ defmodule DpExchange.Schwab do
   Only `:access_token` is needed to sign. The rest are needed to refresh, and **the result
   of a refresh must be persisted by the host** — treat the refresh token as one-time use
   (this package's safe assumption; no committed vendor document states it, see `Auth`), so
-  the one returned is the only way to refresh again.
+  the one returned is the only way to refresh again. A credential whose `:expires_at` has
+  passed is refused before anything is sent (`{:error, {:credentials_expired, :schwab}}`);
+  one with no `:expires_at` is judged by the venue, and nothing here refreshes or retries on
+  a `401` for you.
 
   ## Options
 
@@ -621,6 +624,10 @@ defmodule DpExchange.Schwab do
   - **`{:refused, {:client_credentials_rejected, status, detail}}`** means the venue said
     `invalid_client`: the app's client pair is wrong, not the grant. Fix the configuration.
   - Never retried by this call itself, and cannot be made to retry through `opts`.
+  - **`{:error, {:refresh_in_progress, :schwab}}`**: another refresh of the same refresh token
+    is in flight (on this node or a connected one), so nothing was sent. Wait for it and use the credential your
+    storage now holds; this one is about to be spent. It closes the overlap only - refresh
+    from one process per credential (see `usage-rules.md` §3).
 
   This was previously reachable only by calling `Auth.refresh/2` directly, which meant
   reaching past the facade — the exact thing this package's own `CLAUDE.md` says is a gap

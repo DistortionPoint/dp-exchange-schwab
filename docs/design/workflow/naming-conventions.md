@@ -194,12 +194,12 @@ YYYY-MM-DD_design-topic-name/
 
 #### Environment Files
 
-- **Format**: `.env.example`, `.env.development`, `.env.production`
+- **Format**: `.env.sample` only. In this repository `.env.sample` is the one committed
+  environment file (placeholders, never a real value); every real `.env.*` is local and
+  ignored, and `config/runtime.exs` is the only file that reads the environment.
 - **Examples**:
   ```
-  .env.user_auth_example
-  .env.portfolio_dashboard_dev
-  .env.price_notifications_prod
+  .env.sample
   ```
 
 #### Application Configuration

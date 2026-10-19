@@ -99,8 +99,15 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly four things** (the fourth, added 2026-10-14, is item 4 below), each marked
-  `## VENDORED FIX` at its call site below:
+  **Exactly six things** (the fourth was added 2026-10-14, the fifth and sixth in tick AM),
+  each marked `## VENDORED FIX` at its call site below. The markers carry two numbering
+  schemes for historical reasons - `(n of 3)` for the first three, `(4 of 4)` for the
+  message bound, and a bare `(5)` / `(6)` - and the numbers in this list are the ones that
+  count: 1 = the `FrameError` clause, 2 = `spawn_process/5` and `do_spawn/2`, 3 = the
+  handshake deadline, 4 = the message bound, 5 = the handshake rescue and the missing
+  `Sec-WebSocket-Accept` header, 6 = the close frame that cannot be sent. Diffed against
+  `deps/websockex/lib/websockex.ex` at 0.5.1 in tick AN (every other function body, `@spec`
+  and callback is identical), and the diff is exactly these six:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -149,8 +156,8 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
-  deadline. A handful of doc comments were additionally edited, never behaviour: the two
+  true size: the six changes listed above (three clauses, the `spawn_process/5`/`do_spawn/2`
+  glue, the handshake deadline and rescue, and the message bound). A handful of doc comments were additionally edited, never behaviour: the two
   self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Schwab.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
@@ -204,7 +211,7 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex` calls in `DpExchange.Schwab.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own four marked changes.
+  diffed here for anything beyond this file's own six marked changes.
 
   ---
 

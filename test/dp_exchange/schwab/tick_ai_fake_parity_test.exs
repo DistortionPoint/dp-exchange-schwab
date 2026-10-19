@@ -86,8 +86,13 @@ defmodule DpExchange.Schwab.TickAiFakeParityTest do
     end
 
     test "a forwarded now: nil is silence on the fake too" do
+      # Silence means the default clock, which is the real one (as `Auth.refresh/2`'s).
+      before = DateTime.utc_now()
       assert {:ok, renewed} = Fake.refresh_credentials(@refreshable, now: nil)
-      assert renewed.expires_at == DateTime.add(Fake.as_of(), 1800, :second)
+      after_call = DateTime.utc_now()
+
+      assert DateTime.compare(renewed.expires_at, DateTime.add(before, 1800, :second)) != :lt
+      assert DateTime.compare(renewed.expires_at, DateTime.add(after_call, 1800, :second)) != :gt
     end
 
     test "consults FakeInjection first" do
