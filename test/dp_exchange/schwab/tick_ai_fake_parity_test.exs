@@ -68,6 +68,28 @@ defmodule DpExchange.Schwab.TickAiFakeParityTest do
                {:error, {:missing_credentials, :schwab}}
     end
 
+    test "refuses a :now that is not a DateTime exactly as the real function does" do
+      for bad <- ["noon", 12, ~D[2026-09-01]] do
+        expected = {:error, {:invalid_option, :now, bad}}
+        assert Auth.refresh(@refreshable, now: bad) == expected
+        assert Fake.refresh_credentials(@refreshable, now: bad) == expected
+      end
+
+      # After the credential, before the token URL, as the real function judges them.
+      assert Fake.refresh_credentials(%{}, now: "noon") ==
+               {:error, {:missing_credentials, :schwab}}
+
+      insecure = [now: "noon", token_url: "http://insecure.invalid/t"]
+
+      assert Fake.refresh_credentials(@refreshable, insecure) ==
+               {:error, {:invalid_option, :now, "noon"}}
+    end
+
+    test "a forwarded now: nil is silence on the fake too" do
+      assert {:ok, renewed} = Fake.refresh_credentials(@refreshable, now: nil)
+      assert renewed.expires_at == DateTime.add(Fake.as_of(), 1800, :second)
+    end
+
     test "consults FakeInjection first" do
       FakeInjection.fail_always(:schwab, {:error, :injected})
       assert Fake.refresh_credentials(@refreshable) == {:error, :injected}

@@ -21,6 +21,7 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Schwab.{Socket, StreamerInfo}
+  alias DpExchange.Schwab.Vendor.WebSockex, as: VendoredWebSockex
 
   @moduletag :capture_log
 
@@ -31,6 +32,82 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
 
   # FIN + close, length 10, "bye-bye!!!": the first two bytes are no valid close code.
   @malformed_close_frame <<136, 10, 98, 121, 101, 45, 98, 121, 101, 33, 33, 33>>
+
+  # A client of the vendored module itself, to drive `handle_local_close/4` into a close frame
+  # that cannot be sent. `Conn.socket_send/2` calls `conn.conn_mod.send/2`, but `open_socket/1`
+  # only accepts `:gen_tcp` or `:ssl` as `conn_mod` (deps/websockex conn.ex `open_socket/1`
+  # clauses), so a stub transport cannot be injected; the send is made to fail with a real
+  # error instead. The peer resets the connection while the client has its socket passive (so
+  # the reset is not read as a remote close first). The first send after a reset answers
+  # `{:error, :closed}`, every later one `{:error, :enotconn}`: the client spends the first,
+  # and the close frame gets the second, which neither of upstream's two reasons matched.
+  # (Filling the send buffer until a send timed out was tried first and flaked: the close
+  # frame sometimes still fit.)
+  defmodule ResetClient do
+    @moduledoc false
+    use DpExchange.Schwab.Vendor.WebSockex
+
+    @impl true
+    def handle_connect(conn, test_pid), do: {:ok, %{test: test_pid, socket: conn.socket}}
+
+    @impl true
+    def handle_info(:go_passive, state) do
+      :ok = :inet.setopts(state.socket, active: false)
+      send(state.test, :passive)
+      {:ok, state}
+    end
+
+    def handle_info(:spend_then_close, state) do
+      send(state.test, {:spent, :gen_tcp.send(state.socket, "x")})
+      {:close, state}
+    end
+
+    @impl true
+    def handle_disconnect(status, state) do
+      send(state.test, {:disconnected, status.reason})
+      {:ok, state}
+    end
+  end
+
+  test "a close frame that cannot be sent is a closed connection, not a crash" do
+    {listen_socket, port} = listen()
+    test_pid = self()
+
+    serve(listen_socket, [
+      fn socket ->
+        upgrade(socket)
+        send(test_pid, {:server, self()})
+
+        receive do
+          :reset ->
+            :ok = :inet.setopts(socket, linger: {true, 0})
+            :ok = :gen_tcp.close(socket)
+            send(test_pid, :reset_done)
+        after
+          60_000 -> :ok
+        end
+      end
+    ])
+
+    conn = WebSockex.Conn.new("ws://127.0.0.1:#{port}/", @timeouts)
+    {:ok, client} = VendoredWebSockex.start(conn, ResetClient, self(), [])
+    on_exit(fn -> if Process.alive?(client), do: Process.exit(client, :kill) end)
+
+    send(client, :go_passive)
+    assert_receive :passive, 5_000
+
+    assert_receive {:server, server}, 5_000
+    send(server, :reset)
+    assert_receive :reset_done, 5_000
+    # The reset has to reach the client's stack before it sends.
+    Process.sleep(200)
+
+    send(client, :spend_then_close)
+
+    assert_receive {:spent, {:error, :closed}}, 5_000
+    # Upstream raised `CaseClauseError` here, before `handle_disconnect/2` could run.
+    assert_receive {:disconnected, {:remote, :closed}}, 5_000
+  end
 
   test "a start whose upgrade response trickles in fails at the deadline" do
     {listen_socket, port} = listen()
@@ -65,6 +142,49 @@ defmodule DpExchange.Schwab.SocketVendoredWebSockexTest do
     # make its next attempt: attempt 2 waits one second of backoff, so this lands at about
     # 1.5 s. Without the deadline it never arrives.
     assert_receive :third_connection, 10_000
+  end
+
+  test "an upgrade response with no Sec-WebSocket-Accept ends the attempt, not the process" do
+    # Upstream matched the header with `{_, res} = List.keyfind(...)`: a MatchError in the
+    # linked handshake task, which killed the socket and the caller's start with it.
+    {listen_socket, port} = listen()
+
+    serve(listen_socket, [
+      fn socket ->
+        {:ok, _request} = recv_until_headers_end(socket, "")
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+          )
+
+        read_until_closed(socket)
+      end
+    ])
+
+    assert {:error, %WebSockex.HandshakeError{response: nil}} =
+             Socket.start_link(socket_opts(port))
+  end
+
+  test "a malformed header line in the upgrade response ends the attempt, not the process" do
+    # `WebSockex.Conn.decode_headers/2` has no clause for a line `:erlang.decode_packet/3`
+    # calls an `:http_error`, so this raised in the linked handshake task.
+    {listen_socket, port} = listen()
+
+    serve(listen_socket, [
+      fn socket ->
+        {:ok, _request} = recv_until_headers_end(socket, "")
+
+        :ok =
+          :gen_tcp.send(socket, "HTTP/1.1 101 Switching Protocols\r\nnot a header line\r\n\r\n")
+
+        read_until_closed(socket)
+      end
+    ])
+
+    assert {:error, %WebSockex.ConnError{original: {:handshake_failed, _exception}}} =
+             Socket.start_link(socket_opts(port))
   end
 
   test "a malformed close frame disconnects cleanly instead of crashing the socket" do

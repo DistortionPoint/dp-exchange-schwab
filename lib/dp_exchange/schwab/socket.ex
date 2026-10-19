@@ -135,8 +135,11 @@ defmodule DpExchange.Schwab.Socket do
 
   ## A delayed quote is not delivered as a live one
 
-  An account without real-time entitlements is streamed "nfl/delayed quotes" (the LOGIN
-  table in `market-data-production.html`), and each such row says so: `"delayed": true`.
+  A row the venue flags `"delayed": true` is NFL data (`market-data-production.txt`, the
+  LEVELONE response fields): delayed, or real-time from only a subset of exchanges, so
+  "typically" an account without real-time entitlements. Either way it "does not represent
+  the most recent last or bid/ask", and the notice says what the vendor says, not which of
+  the two it was.
   `Core.Types.Quote` and `TopOfBook` have no field to carry that, so a delayed row decoded
   normally reached the consumer as the current price — a 15-minute-old book stamped
   `observed_at: now`. Found 2026-10-10 by reading the spec against `emit/5`. A delayed
@@ -144,6 +147,22 @@ defmodule DpExchange.Schwab.Socket do
   raises a `:degraded` notice naming the symbol and the reason, so a missing feed is
   explained rather than silent. `CHART_*` rows are still delivered: a candle carries its
   own bucket time, so a late one is late, not mislabelled.
+
+  ## What the socket says about itself
+
+  * **`:link_down` is closed by `:link_up`.** One `:link_down` per outage: a redial that
+    fails to connect, or a connection whose LOGIN is denied and closed again, is the same
+    outage and is not reported a second time. The next LOGIN that succeeds is the
+    `:link_up`, and arms the next report. The backoff and `link_reconnect_attempt` run on
+    every attempt regardless.
+  * **A venue refusing a subscription is a `:refusal`**, with `details.symbols` the keys of
+    the `SUBS`/`ADD`/`VIEW` it answered (`[]` when this socket no longer remembers the
+    command). A failed `UNSUBS` is `:degraded`.
+  * **A frame it cannot read is dropped and said once per session** as a `:data_quality`
+    notice (`details.reason` is `:unparseable_frame`, `:unrecognised_frame` or
+    `:unrecognised_notify`, with the size and never the content). Silence on this venue is
+    the normal overnight state, so a feed discarding everything it is sent must not look
+    like a quiet market.
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -212,6 +231,11 @@ defmodule DpExchange.Schwab.Socket do
   # before LOGIN is held, not dropped". `Feed` holds at most one per service.
   @max_held 64
   @max_delayed_reported 5_000
+
+  # The most commands remembered as sent-and-unanswered. A venue that never answers must not
+  # grow this process: past the cap a command is simply not remembered, and its refusal (if
+  # one comes) is reported without the symbols it was for.
+  @max_pending 256
 
   # A connection that ends sooner than this after it came up counts toward the reconnect
   # backoff, whether or not its LOGIN succeeded. See `handle_disconnect/2`. **Chosen, not
@@ -298,6 +322,14 @@ defmodule DpExchange.Schwab.Socket do
       # Symbols whose unreadable book frames this session has already reported (a dropped
       # frame is announced once). Cleared with the session.
       unreadable_reported: MapSet.new(),
+      # Whether a frame this package could not read has been announced this session.
+      undecodable_reported?: false,
+      # A `:link_down` has been raised and no `:link_up` has closed it. See `report_link_down/2`.
+      link_down_reported?: false,
+      # request id (as the venue echoes it, a string) => `{service, command, keys}` for the
+      # commands sent and not yet answered, so a refused SUBS can name the symbols it was
+      # for. Bounded by `@max_pending`; cleared with the session.
+      pending: %{},
       # Monotonic ms when the current connection came up (`nil` between connections), and how
       # many consecutive connections ended inside `@stable_session_ms`. Both feed
       # `handle_disconnect/2`'s backoff.
@@ -344,6 +376,10 @@ defmodule DpExchange.Schwab.Socket do
   def connection_opts(opts) do
     opts
     |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
+    # A forwarded `nil` is silence (as everywhere in this family): `put_new/3` keeps a PRESENT
+    # `socket_connect_timeout: nil`, which then reached the connect as its timeout and raised
+    # `badarg` inside the dial, instead of getting the deliberate default.
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
     |> Keyword.put(:ssl_options, tls_options(Keyword.get(opts, :ssl_options)))
@@ -639,12 +675,7 @@ defmodule DpExchange.Schwab.Socket do
   def handle_disconnect(%{reason: reason} = status, state) do
     bounded = Bound.reason(reason)
 
-    notify(
-      state,
-      Notice.new(:link_down, :schwab, details: %{reason: :connection_lost, message: bounded})
-    )
-
-    Telemetry.link_down(:schwab, bounded)
+    state = report_link_down(state, bounded)
 
     # See the moduledoc's "A rejected LOGIN is not a network blip" section. `websockex`
     # reconnects immediately with no delay of its own, and a socket presenting an access
@@ -714,7 +745,38 @@ defmodule DpExchange.Schwab.Socket do
        short_sessions: short_sessions
      })
      |> Map.put(:delayed_reported, MapSet.new())
-     |> Map.put(:unreadable_reported, MapSet.new())}
+     |> Map.put(:unreadable_reported, MapSet.new())
+     |> Map.put(:undecodable_reported?, false)
+     |> Map.put(:pending, %{})}
+  end
+
+  # **A `:link_down` is closed by a `:link_up`, so there is one per outage and not one per
+  # attempt.** `websockex` calls `handle_disconnect/2` after every connection that ends, and
+  # again after every redial that fails to connect (`attempt_number` climbing from 2). Each
+  # of those used to raise a `:link_down` notice and a `Telemetry.link_down/2` event for a
+  # link that was already down with no `:link_up` in between. A network outage produced a
+  # `:link_down` per backoff rung, then one every 30 seconds for as long as it lasted, and a
+  # token the venue keeps denying produced one per connect-LOGIN-denied-close cycle: a
+  # consumer's link gauge and notice handler were told "down" over and over, and every one
+  # of them was a `:link_down` that no `:link_up` had closed.
+  #
+  # `link_down_reported?` is set when one is raised and cleared only by a LOGIN that
+  # succeeded (`handle_response/2`, the `:link_up`). While it is set, a disconnect is part of
+  # the same outage and is not reported again; the backoff and the `link_reconnect_attempt`
+  # event that counts the redials still run on every attempt. A state that has never carried
+  # the flag (a socket that has not yet lost a connection) reports the first loss.
+  defp report_link_down(state, bounded) do
+    if Map.get(state, :link_down_reported?, false) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:link_down, :schwab, details: %{reason: :connection_lost, message: bounded})
+      )
+
+      Telemetry.link_down(:schwab, bounded)
+      Map.put(state, :link_down_reported?, true)
+    end
   end
 
   # The backoff wait, which still hears its parent stop it.
@@ -731,6 +793,12 @@ defmodule DpExchange.Schwab.Socket do
   # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
   # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
   # exit and waits the full delay, exactly as the sleep did.
+  #
+  # Note what this does NOT cover: the process does not trap exits unless something sets the
+  # flag (nothing in this package or the vendored loop does), so an exit signal from the
+  # parent is delivered as a message only when it is trapped, and otherwise either kills the
+  # socket at once (any reason but `:normal`) or is ignored (`:normal`). `Feed.terminate/2`
+  # closes the `:normal` case by shutting its socket down explicitly.
   defp wait_to_reconnect(_state, 0), do: :ok
 
   defp wait_to_reconnect(state, delay) do
@@ -828,18 +896,32 @@ defmodule DpExchange.Schwab.Socket do
            Keyword.put(opts, :request_id, state.request_id)
          ) do
       {:ok, request} ->
-        {:ok, request,
-         %{
-           state
-           | request_id: state.request_id + 1,
-             subscribed: record_subscription(state.subscribed, service, command, keys),
-             last_top: prune_last_top(state, service, command, keys)
-         }}
+        {:ok, request, sent(state, service, command, keys)}
 
       {:error, reason} ->
         notify_subscribe_refused(state, reason)
         {:none, state}
     end
+  end
+
+  # The state after a command went on the wire under `state.request_id`: the id spent, the
+  # session's subscription record updated, and the command remembered until it is answered.
+  defp sent(state, service, command, keys) do
+    %{
+      state
+      | request_id: state.request_id + 1,
+        subscribed: record_subscription(state.subscribed, service, command, keys),
+        last_top: prune_last_top(state, service, command, keys)
+    }
+    |> remember_pending(state.request_id, {service, command, keys})
+  end
+
+  defp remember_pending(state, request_id, command) do
+    pending = Map.get(state, :pending, %{})
+
+    if map_size(pending) < @max_pending,
+      do: Map.put(state, :pending, Map.put(pending, to_string(request_id), command)),
+      else: state
   end
 
   # `details.reason` is an atom; the builder's own term, bounded, is `details.message`.
@@ -865,12 +947,36 @@ defmodule DpExchange.Schwab.Socket do
     case Jason.decode(raw) do
       {:ok, frame} -> handle_decoded(frame, state)
       # A frame this package cannot parse is dropped rather than crashing the socket: one
-      # malformed message must not take down a live feed.
-      {:error, _reason} -> {:ok, state}
+      # malformed message must not take down a live feed. It is also SAID once per session
+      # (`report_undecodable/3`): a feed silently discarding every frame it is sent looks
+      # exactly like a quiet market, which on this venue is the normal overnight state.
+      {:error, _reason} -> {:ok, report_undecodable(state, :unparseable_frame, byte_size(raw))}
     end
   end
 
   def handle_frame(_other, state), do: {:ok, state}
+
+  # Dropped, but announced once per session with the size and never the content (a frame can
+  # be large, and nothing in it is known to be safe to log). The latch is one boolean, so a
+  # venue sending garbage on every tick cannot grow this process or bury the one fact.
+  defp report_undecodable(state, reason, bytes) do
+    if Map.get(state, :undecodable_reported?, false) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:data_quality, :schwab,
+          details: %{
+            reason: reason,
+            bytes: bytes,
+            message: "a Streamer frame could not be read and was dropped"
+          }
+        )
+      )
+
+      Map.put(state, :undecodable_reported?, true)
+    end
+  end
 
   defp handle_decoded(frame, state) do
     case StreamerProtocol.classify(frame) do
@@ -881,13 +987,25 @@ defmodule DpExchange.Schwab.Socket do
         {:ok, Enum.reduce(entries, state, &handle_data/2)}
 
       # Heartbeats. Not data, and reading one as a quote is a price that never traded.
-      {:ok, :notify, _notices} ->
-        {:ok, state}
+      # A notify entry that is not a heartbeat (the only shape the vendor documents) is an
+      # admin message this package cannot read, e.g. a `30 STOP_STREAMING` that is about to be
+      # followed by a severed connection. It is not data, and it is not silently discarded.
+      {:ok, :notify, notices} ->
+        if Enum.all?(notices, &heartbeat?/1) do
+          {:ok, state}
+        else
+          size = :erlang.external_size(notices)
+          {:ok, report_undecodable(state, :unrecognised_notify, size)}
+        end
 
+      # Neither a response, data nor a notify: not read as any of them, and said once.
       {:error, :unrecognised_frame} ->
-        {:ok, state}
+        {:ok, report_undecodable(state, :unrecognised_frame, :erlang.external_size(frame))}
     end
   end
+
+  defp heartbeat?(%{"heartbeat" => _at}), do: true
+  defp heartbeat?(_other), do: false
 
   # A failed LOGIN ends the connection from this side, whatever its code — see the
   # moduledoc's "A failed LOGIN always ends the connection" section.
@@ -985,13 +1103,7 @@ defmodule DpExchange.Schwab.Socket do
             Keyword.put(opts, :request_id, state.request_id)
           )
 
-        {[request | requests],
-         %{
-           state
-           | request_id: state.request_id + 1,
-             subscribed: record_subscription(state.subscribed, service, command, keys),
-             last_top: prune_last_top(state, service, command, keys)
-         }}
+        {[request | requests], sent(state, service, command, keys)}
       end)
 
     frame = Jason.encode!(StreamerProtocol.envelope(Enum.reverse(requests)))
@@ -1020,7 +1132,12 @@ defmodule DpExchange.Schwab.Socket do
 
       # Reset the streak. A success proves the access token this process currently holds
       # works, so the next disconnect — whatever causes it — is presumed innocent again.
-      %{state | logged_in?: true, login_failures: 0, logged_in_once?: true}
+      #
+      # The `:link_up` just sent closes the outage `report_link_down/2` opened, so the next
+      # lost connection is reported again.
+      state
+      |> Map.put(:link_down_reported?, false)
+      |> Map.merge(%{logged_in?: true, login_failures: 0, logged_in_once?: true})
     else
       # A rejected LOGIN still arrives as a response. Treating its arrival as success is how
       # a socket waits forever for data.
@@ -1065,17 +1182,10 @@ defmodule DpExchange.Schwab.Socket do
   end
 
   defp handle_response(response, state) when is_map(response) do
+    {sent, state} = take_pending(state, response["requestid"])
+
     unless StreamerProtocol.succeeded?(response) do
-      notify(
-        state,
-        Notice.new(:degraded, :schwab,
-          details: %{
-            service: Bound.text(response["service"]),
-            reason: :command_rejected,
-            message: Bound.text(StreamerProtocol.failure_message(response) || "command rejected")
-          }
-        )
-      )
+      notify(state, command_rejected(response, sent))
     end
 
     state
@@ -1085,6 +1195,45 @@ defmodule DpExchange.Schwab.Socket do
   # this process and dropped the connection. Found by mutating real frames, 2026-09-26.
   # There is nothing in it to act on, so it is skipped, like an unrecognised frame.
   defp handle_response(_unreadable, state), do: state
+
+  # The command this response answers, and the state without it. The venue echoes the
+  # `requestid` this socket sent as a string (`market-data-production.txt:112`); a response
+  # with none, or one this socket does not remember, answers `nil`.
+  defp take_pending(state, request_id) when is_binary(request_id) or is_integer(request_id) do
+    {sent, pending} = Map.pop(Map.get(state, :pending, %{}), to_string(request_id))
+    {sent, Map.put(state, :pending, pending)}
+  end
+
+  defp take_pending(state, _no_request_id), do: {nil, state}
+
+  # **A venue refusing a subscription is a `:refusal` carrying `details.symbols`**, not a
+  # `:degraded` ("a slower path is in use", `Core.Notice`'s kind rules). A `SUBS`, `ADD` or
+  # `VIEW` the venue answered with a failure code is exactly that, and `:degraded` left a
+  # consumer matching on kind unable to tell a refused symbol from a slow route. The symbols
+  # are the keys that command carried, when this socket still remembers it; `[]` says the
+  # command could not be attributed, not that it named no symbol. An `UNSUBS` or other command
+  # failing refuses nothing the consumer asked to receive, and stays `:degraded`.
+  defp command_rejected(response, sent) do
+    details = %{
+      service: Bound.text(response["service"]),
+      reason: :command_rejected,
+      message: Bound.text(StreamerProtocol.failure_message(response) || "command rejected")
+    }
+
+    if refusing_subscription?(response, sent) do
+      Notice.new(:refusal, :schwab, details: Map.put(details, :symbols, symbols_of(sent)))
+    else
+      Notice.new(:degraded, :schwab, details: details)
+    end
+  end
+
+  defp refusing_subscription?(_response, {_service, command, _keys}),
+    do: command in ["SUBS", "ADD", "VIEW"]
+
+  defp refusing_subscription?(response, nil), do: response["command"] in ["SUBS", "ADD", "VIEW"]
+
+  defp symbols_of({_service, _command, keys}), do: keys
+  defp symbols_of(nil), do: []
 
   defp handle_data(%{"service" => service, "content" => content}, state)
        when is_list(content) do
@@ -1155,7 +1304,9 @@ defmodule DpExchange.Schwab.Socket do
             symbol: Bound.text(symbol),
             service: Bound.text(service),
             reason: :delayed_quotes_withheld,
-            message: "delayed quotes withheld: the account has no real-time entitlement"
+            message:
+              "quotes withheld: the venue flagged this row delayed (NFL: delayed, or real-time " <>
+                "from a subset of exchanges only), so it is not the current price"
           }
         )
       )

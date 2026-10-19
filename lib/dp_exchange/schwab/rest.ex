@@ -1315,7 +1315,12 @@ defmodule DpExchange.Schwab.Rest do
   description "To return movers with the specified directions of up or down" against an
   integer enum defaulting to `0` - a description that does not fit the values. An earlier
   version of this doc stated it as a number of minutes; that was a reading, not a statement,
-  and is withdrawn. It is passed through unchanged and its meaning is not claimed.
+  and is withdrawn. It is passed through unchanged and its meaning is not claimed for REST.
+
+  The Streamer's `SCREENER_*` documentation (`market-data-production.txt`, "Screener
+  Common") gives the same values `0, 1, 5, 10, 30, 60` as "minutes (0 is for all day)", and
+  its `sortField` additionally lists `AVERAGE_PERCENT_VOLUME`, which REST's `sort` enum does
+  not. That is the Streamer's statement about the Streamer; this function does not borrow it.
   """
   @movers_sorts ~w(VOLUME TRADES PERCENT_CHANGE_UP PERCENT_CHANGE_DOWN)
   @movers_frequencies [0, 1, 5, 10, 30, 60]

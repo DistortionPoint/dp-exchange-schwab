@@ -26,8 +26,10 @@ entirely — which is what happened the first time.
 ## The two that carry design weight
 
 **05** establishes that the refresh token arrives with the initial access token and must be
-stored. It does **not** give the 7-day lifetime or the one-time-use rule — those are in
-`../documentation/accounts-and-trading-production.txt`.
+stored. It does **not** give the 7-day lifetime — that is in
+`../documentation/accounts-and-trading-production.txt`. **No committed document states a
+one-time-use rule** for the refresh token (the README here once said the documentation did);
+`Auth` assumes it as the safe direction and says so.
 
 **16** is the document that draws this package's auth boundary. Refresh handles an expired
 or lost `access_token`. A full three-legged restart is required when the `refresh_token` is

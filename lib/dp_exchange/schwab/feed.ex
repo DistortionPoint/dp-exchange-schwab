@@ -499,9 +499,20 @@ defmodule DpExchange.Schwab.Feed do
   @doc """
   Whether the feed is delivering, on which route, and what it last failed on.
 
+  The same keys on every route: `route` (`:stream`, `:internal_poll` or `nil`), `delivering`
+  (boolean: at least one symbol has arrived), `wanted` and `covered` (counts), `failures_since_ok`
+  (consecutive failed polls; 0 on the Streamer) and `last_error`.
+
   Reachable through the facade as `DpExchange.Schwab.status/1`.
   """
-  @spec status(GenServer.server()) :: map()
+  @spec status(GenServer.server()) :: %{
+          route: :stream | :internal_poll | nil,
+          delivering: boolean(),
+          wanted: non_neg_integer(),
+          covered: non_neg_integer(),
+          failures_since_ok: non_neg_integer(),
+          last_error: term()
+        }
   def status(feed), do: GenServer.call(feed, :status, @call_timeout)
 
   @doc "Register `opts[:to]` for this package's own notices."
@@ -678,6 +689,11 @@ defmodule DpExchange.Schwab.Feed do
           :retry_attempts,
           :rate_limit_blocking
         ])
+        # A forwarded `nil` is silence. `put_new/3` keeps a PRESENT `rate_limit_blocking: nil`,
+        # which `Rest` then drops as silence too, so the default below was never applied and
+        # the fallback poll ran fail-fast: the 87-of-87-to-8-of-87 collapse it exists to
+        # prevent, from a config lookup that resolved to nothing.
+        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
         |> Keyword.put_new(:rate_limit_blocking, true),
       # The in-flight Streamer bootstrap, or `nil`. `%{ref: reference(), waiting: [from]}`.
       #
@@ -848,7 +864,7 @@ defmodule DpExchange.Schwab.Feed do
     {reply, state} =
       poller_read(
         state,
-        fn -> poller |> PollingFeed.status() |> Map.put(:route, :internal_poll) end,
+        fn -> poller |> PollingFeed.status() |> poll_status(state) end,
         unresponsive_status(state)
       )
 
@@ -861,13 +877,10 @@ defmodule DpExchange.Schwab.Feed do
     # that never subscribes must not find a socket open" section — where `state.route` is
     # `nil` and reporting `:stream` here would be exactly the plausible-wrong-answer this
     # family refuses: a route that was never dialled, claimed as the live one.
-    {:reply,
-     %{
-       route: state.route,
-       delivering: map_size(state.delivering),
-       wanted: MapSet.size(state.wanted),
-       last_error: state.last_error
-     }, state}
+    covered = map_size(state.delivering)
+
+    {:reply, status_shape(state.route, covered > 0, state.wanted, covered, 0, state.last_error),
+     state}
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
@@ -1204,6 +1217,23 @@ defmodule DpExchange.Schwab.Feed do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # **A feed that stops normally takes its socket and poller with it.** `Socket` and the
+  # poller are LINKED to this process, not supervised by it, and neither traps exits
+  # (`WebSockex` does not, nor does a `GenServer` started without the flag). An exit signal
+  # with reason `:normal` does not kill a linked process that is not trapping, so a feed
+  # stopped with `GenServer.stop/1` left its Streamer socket running unowned: reconnecting
+  # forever, and holding the venue's ONE Streamer connection per user against every later
+  # feed. Abnormal exits and a supervisor's `:shutdown` already killed them through the link;
+  # this closes the normal one. `terminate/2` runs here because this process traps exits.
+  @impl true
+  def terminate(_reason, state) do
+    for pid <- [Map.get(state, :socket), Map.get(state, :poller)], is_pid(pid) do
+      Process.exit(pid, :shutdown)
+    end
+
+    :ok
+  end
 
   # `apply_symbols/1`'s answer was discarded here. It returns `:ok`, `{:error, :no_route}`,
   # or whatever `PollingFeed.update_symbols/2` returns, and a periodic re-assert is the only
@@ -2224,16 +2254,36 @@ defmodule DpExchange.Schwab.Feed do
   # `status/1`'s fallback needs a shape, and every field in it is chosen to avoid claiming
   # health we did not observe: `delivering: false` and an explicit `last_error` say plainly
   # that this answer came from a poller that did not respond, rather than from a poll.
-  # `symbols` is the one figure that is still genuinely known — it is this `Feed`'s own
+  # `wanted` is the one figure that is still genuinely known — it is this `Feed`'s own
   # wanted set, not the poller's.
-  defp unresponsive_status(state) do
+  defp unresponsive_status(state),
+    do: status_shape(:internal_poll, false, state.wanted, 0, 0, :poller_unresponsive)
+
+  # The poller's own status, in the one shape every route answers.
+  defp poll_status(polled, state) do
+    status_shape(
+      :internal_poll,
+      polled.delivering,
+      state.wanted,
+      polled.covered,
+      polled.failures_since_ok,
+      polled.last_error
+    )
+  end
+
+  # **One shape on every route**, so a consumer cannot tell how data reaches the package:
+  # `delivering` is a boolean (`Core.PollingFeed.status/1`'s type), `wanted` and `covered`
+  # are counts, and `failures_since_ok` counts consecutive failed polls (always 0 on the
+  # Streamer, which polls nothing). `delivering` used to be a count on the Streamer and a
+  # boolean on the poll.
+  defp status_shape(route, delivering?, wanted, covered, failures, last_error) do
     %{
-      delivering: false,
-      symbols: MapSet.size(state.wanted),
-      covered: 0,
-      failures_since_ok: 0,
-      last_error: :poller_unresponsive,
-      route: :internal_poll
+      route: route,
+      delivering: delivering?,
+      wanted: MapSet.size(wanted),
+      covered: covered,
+      failures_since_ok: failures,
+      last_error: last_error
     }
   end
 

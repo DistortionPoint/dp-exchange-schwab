@@ -74,8 +74,9 @@ defmodule DpExchange.Schwab do
       }
 
   Only `:access_token` is needed to sign. The rest are needed to refresh, and **the result
-  of a refresh must be persisted by the host** — the refresh token is one-time use, so the
-  one returned is the only way to refresh again.
+  of a refresh must be persisted by the host** — treat the refresh token as one-time use
+  (this package's safe assumption; no committed vendor document states it, see `Auth`), so
+  the one returned is the only way to refresh again.
 
   ## Options
 
@@ -473,7 +474,10 @@ defmodule DpExchange.Schwab do
   replacement is a `PUT` order write, the same throttled category as a placement.
 
   The order id is checked first (`{:error, {:invalid_order_id, value}}` for `nil`, a
-  non-string, a blank or a padded string), then the request, the account option, the order
+  non-string, a blank or a padded string), then the request (a non-map or an EMPTY map is
+  `{:error, {:invalid_order_request, value}}`, since a replace that changes nothing is not a
+  replace; Schwab sends the map as a whole new order, so every field of it is then judged as
+  `place_order/3` judges it), the account option, the order
   ceiling and the credential. An unconfirmed write is `{:error, {:order_unconfirmed, nil,
   reason}}` as for `place_order/3`. **A replacement the venue applied whose read-back failed is
   `{:error, {:replace_accepted_unread, new_id, reason}}`**: the old order is gone and `new_id`
@@ -483,7 +487,7 @@ defmodule DpExchange.Schwab do
   def replace_order(credentials, order_id, request, opts \\ []) do
     with :ok <- Orders.check_order_id(order_id),
          :ok <- Options.check(:replace_order, opts),
-         {:ok, payload} <- Orders.build(request, opts),
+         {:ok, payload} <- Orders.build_replacement(request, opts),
          {:ok, hash} <- account_hash(opts),
          :ok <- ensure_order_limit_declared(opts),
          {:ok, new_id} <-
@@ -811,10 +815,15 @@ defmodule DpExchange.Schwab do
   @doc """
   Whether the feed is delivering, on which route, and what it last failed on.
 
-  On the Streamer route this carries `route: :stream`, how many symbols are currently
-  `delivering`, how many are `wanted`, and `last_error` from the most recent bootstrap
-  failure, if any. On the fallback route it is `Core.PollingFeed.status/1`'s own map with
-  `route: :internal_poll` merged in. Neither shape promises anything `coverage/1` and
+  **One shape on every route**, because a consumer must not be able to tell how data reaches
+  the package: `route` (`:stream`, `:internal_poll`, or `nil` before the first subscribe),
+  `delivering` (a boolean, `Core.PollingFeed.status/1`'s type: some symbol has arrived),
+  `wanted` and `covered` (counts of symbols asked for and symbols that have arrived),
+  `failures_since_ok` (consecutive failed polls, always 0 on the Streamer) and `last_error`
+  (the most recent bootstrap or poll failure, if any). A poller that did not answer the read
+  is `delivering: false, covered: 0, last_error: :poller_unresponsive`. `delivering` used to
+  be a count on the Streamer route and a boolean on the poll; the count is now `covered`.
+  Neither value promises anything `coverage/1` and
   `coverage_by_kind/1` do not already say more precisely per symbol; this is the
   feed-wide summary a health check or a log line reaches for instead of assembling one
   from those two.

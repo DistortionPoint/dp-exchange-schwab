@@ -36,6 +36,15 @@ defmodule DpExchange.Schwab.Auth do
   A refresh **spends** the token it was given. The old string is dead the moment the
   request succeeds, and the response's `refresh_token` is its replacement.
 
+  **That one-time-use rule is this package's ASSUMPTION, not a vendor statement.** Nothing in
+  the committed documentation says it (`accounts-and-trading-production.txt` and the portal's
+  user guides were read for it: the refresh response is documented as carrying a
+  `refresh_token` "Valid for 7 days", and no sentence says the previous one stops working).
+  It is assumed because it is the safe direction to be wrong in: treating a token as spent
+  costs nothing if it was not, while treating it as reusable loses the grant if it was spent.
+  Hence every consequence below (a success without a replacement is an error, no retry,
+  persist before use) holds either way, and a host should not read "one-time use" as measured.
+
   **What the seven days measures is a vendor claim this package states verbatim, not one it
   has tested or extended.** The vendor's own documentation says it three times, in the same
   words each time: *"A Trader API refresh token is valid for 7 days after creation. Upon
@@ -76,13 +85,30 @@ defmodule DpExchange.Schwab.Auth do
   That is a real operational hazard rather than a style note, and it is why `refresh/2`
   returns the whole credential rather than mutating anything.
 
+  **Two callers must not refresh the same credential at once.** This module holds no state
+  and no lock, so it cannot serialise them, and on the one-time-use assumption above: when two
+  processes call `refresh/2` with the same credential, the venue honours the first and spends
+  the token, and the second is answered `400` or `401` and reported here as
+  `{:refused, {:reauthorization_required, status, detail}}` - the terminal answer that sends
+  a person to a browser - although the grant is intact and the winner holds its replacement.
+  Worse, if the loser's answer is the one a host persists, it overwrites the winner's good
+  credential with a spent one. Only the host's own storage can order them: refresh from ONE
+  process (a single owner per credential), persist before releasing it, and treat a
+  `:reauthorization_required` that arrives while another refresh of the same credential was
+  in flight as "re-read the stored credential", not as a dead grant. A host that polls
+  `needs_refresh?/2` from several workers is exactly the shape that hits this.
+
   Nothing is cached here. This module holds no state, writes nothing, and logs no token
   value; `refresh/2` returns the new credential to the caller, which owns storage.
 
   ## What ends a grant for good
 
-  Two things: the refresh token's seven days, or the user resetting their Schwab password.
-  Both return `{:refused, {:reauthorization_required, status, detail}}`, which names the
+  The refresh token's seven days, or the user resetting their Schwab password (the two causes
+  the Accounts and Trading documentation names), and, per the portal's "OAuth Restart vs.
+  Refresh Token" guide (`docs/reference/schwab/user-guides/16-...`): the user revoking access
+  or changing their credentials or two-factor setup, an OAuth flow started and aborted after
+  its first step (which invalidates the current token), a policy change that needs fresh
+  consent, or a compromised refresh token. The response does not say which. All return `{:refused, {:reauthorization_required, status, detail}}`, which names the
   remedy — a person, at a browser — rather than an error a caller would retry against a
   credential that can never succeed.
 
@@ -254,6 +280,9 @@ defmodule DpExchange.Schwab.Auth do
 
   - `{:error, {:missing_credentials, :schwab}}` — no refresh token, or no client
     credentials to authenticate the refresh with. Nothing was sent, and nothing is spent.
+  - `{:error, {:invalid_option, :now, value}}` — `opts[:now]` is neither absent nor a
+    `DateTime`. Nothing was sent: it is judged before the request (`check_now/1`) because it is
+    read after it, when the refresh token is already spent.
   - `{:error, {:insecure_url, :schwab}}` — an overridden `:token_url` that is not `https://`.
     Nothing was sent: the Basic client pair and the refresh token are not put on a clear
     channel.
@@ -279,7 +308,8 @@ defmodule DpExchange.Schwab.Auth do
   def refresh(credentials, opts \\ [])
 
   def refresh(credentials, opts) do
-    with :ok <- validate_refresh_input(credentials) do
+    with :ok <- validate_refresh_input(credentials),
+         :ok <- check_now(opts) do
       do_refresh(
         credentials,
         credentials.refresh_token,
@@ -337,6 +367,28 @@ defmodule DpExchange.Schwab.Auth do
   end
 
   def validate_refresh_input(_incomplete), do: {:error, {:missing_credentials, :schwab}}
+
+  @doc """
+  Judges `opts[:now]` for `refresh/2` without sending anything: `:ok` when it is absent (or a
+  forwarded `nil`, which is silence) or a `DateTime`, else `{:error, {:invalid_option, :now,
+  value}}`.
+
+  **Decided before the request, because it is read after it.** `:now` dates the new token's
+  `:expires_at`, and it is read only once the venue has answered, by which point the refresh
+  token sent is spent. A `now: nil` (`Keyword.get_lazy/3` returns a present `nil`) or a value
+  that is not a `DateTime` raised in `DateTime.add/3` inside the caller's process, AFTER the
+  one-time refresh token had been spent and BEFORE the rotated one was returned: the grant lost
+  to an option typo. `refresh/2` and `DpExchange.Schwab.Fake.refresh_credentials/2` both call
+  this, in the same place, so they cannot drift.
+  """
+  @spec check_now(keyword()) :: :ok | {:error, {:invalid_option, :now, term()}}
+  def check_now(opts) do
+    case Config.opt(opts, :now, nil) do
+      nil -> :ok
+      %DateTime{} -> :ok
+      other -> {:error, {:invalid_option, :now, other}}
+    end
+  end
 
   defp do_refresh(credentials, refresh_token, client_id, client_secret, opts) do
     # Basic auth over the client pair, per the venue's documented example. This is the
@@ -416,7 +468,9 @@ defmodule DpExchange.Schwab.Auth do
   defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
 
   defp merge_checked_tokens(credentials, access, response, opts) do
-    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    # `check_now/1` has already refused anything but a `DateTime` or an absent value, before
+    # the request: a `nil` forwarded here is silence, not a clock of `nil`.
+    now = Config.opt(opts, :now, nil) || DateTime.utc_now()
 
     renewed =
       %{access_token: access}

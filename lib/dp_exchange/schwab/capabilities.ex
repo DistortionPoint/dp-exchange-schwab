@@ -318,6 +318,12 @@ defmodule DpExchange.Schwab.Capabilities do
       # `quote` block correctly. `EQUITY` maps to `:spot`: a share bought outright is a
       # spot instrument.
       #
+      # **These two are readable, not orderable.** The vendor states "Order entry will only be
+      # available for the assetType 'EQUIT' and 'OPTION' as of this time"
+      # (`accounts-and-trading-production.txt:128`), and `Orders.build/2` refuses
+      # `:mutual_fund` and `:cash_equivalent` as `{:unsupported_instrument_type, _}`. The list
+      # declares what quotes and positions can route, not what `place_order/3` sends.
+      #
       # Genuinely supporting the still-dropped types is a feature, not a defect fix
       # (deferred, sweep §3): it needs `SymbolFormat` taught the venue's non-equity
       # grammars — `/` + root + month code + year code for futures, `BASE/QUOTE` for

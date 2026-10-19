@@ -64,6 +64,32 @@ defmodule DpExchange.Schwab.FeedTest do
   # strike * 1000 padded to 8 digits — matching `SymbolFormat.option?/1`'s pattern.
   @option_symbol "AAPL  260116C00250000"
 
+  describe "a feed that stops normally takes its socket with it" do
+    test "GenServer.stop/1 ends the linked socket, which does not trap exits" do
+      socket = fake_socket()
+      ref = Process.monitor(socket)
+      feed = start_feed(socket: socket)
+
+      assert :ok = GenServer.stop(feed, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^socket, :shutdown}, 5_000
+    end
+  end
+
+  describe "a forwarded nil :rate_limit_blocking is silence, so the fallback poll still blocks" do
+    # `Keyword.put_new/3` keeps a present `nil`, and `Rest` drops a `nil` as silence, so the
+    # `true` default never applied and the poll ran fail-fast.
+    test "nil gets the default; an explicit false is still honoured" do
+      assert {:ok, silent} = Feed.init(rate_limit_blocking: nil)
+      assert silent.request_opts[:rate_limit_blocking] == true
+
+      assert {:ok, explicit} = Feed.init(rate_limit_blocking: false)
+      assert explicit.request_opts[:rate_limit_blocking] == false
+
+      assert {:ok, absent} = Feed.init([])
+      assert absent.request_opts[:rate_limit_blocking] == true
+    end
+  end
+
   describe ":interval_ms is validated at init, not at the first tick" do
     # `interval_ms` reaches `Core.PollingFeed` and ends up in `Process.send_after/3`, which
     # accepts neither a negative nor a fractional delay — but not until the first tick, in
@@ -114,7 +140,18 @@ defmodule DpExchange.Schwab.FeedTest do
       assert_receive {:dp_exchange, :schwab, %Types.Quote{}}, 5_000
 
       assert Feed.coverage(feed) == %{"AAPL" => :stream}
-      assert %{route: :stream} = Feed.status(feed)
+
+      assert %{route: :stream, delivering: true, wanted: 1, covered: 1, failures_since_ok: 0} =
+               stream_status = Feed.status(feed)
+
+      # One shape on every route: the poll route answers the same keys with the same types.
+      poll = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
+      :ok = Feed.subscribe(poll, ["AAPL"])
+      assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+      poll_status = Feed.status(poll)
+
+      assert %{route: :internal_poll, delivering: false, wanted: 1, covered: 0} = poll_status
+      assert Enum.sort(Map.keys(poll_status)) == Enum.sort(Map.keys(stream_status))
     end
 
     test "a bootstrap that fails falls back to the poll and SAYS so" do
@@ -249,7 +286,9 @@ defmodule DpExchange.Schwab.FeedTest do
       # `status/1` is a synchronous call — it only returns once every message queued
       # ahead of it (including any `init/1`-time continue, were one still wired) has been
       # processed, so this is a real fence, not a race against `Process.sleep/1`.
-      assert %{route: nil, delivering: 0, wanted: 1, last_error: nil} = Feed.status(feed)
+      assert %{route: nil, delivering: false, wanted: 1, covered: 0, last_error: nil} =
+               Feed.status(feed)
+
       assert Feed.coverage(feed) == %{}
       assert Feed.coverage_by_kind(feed) == %{}
       refute_received :unexpected_venue_call
@@ -1033,7 +1072,10 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.coverage_by_kind(feed) == %{quotes: %{}}
 
       status = Feed.status(feed)
-      refute status.delivering
+      assert status.delivering == false
+      assert status.wanted == 1
+      assert status.covered == 0
+      assert status.failures_since_ok == 0
       assert status.last_error == :poller_unresponsive
       assert status.route == :internal_poll
 

@@ -100,8 +100,9 @@ credential *use* — signing, session refresh, token rotation — belongs here.
 | `access_token` | 30 minutes | `DpExchange.Schwab.refresh_credentials/2` |
 | `refresh_token` | 7 days after creation | `refresh_credentials/2` — every call mints a new one |
 
-**The refresh token is one-time use.** A refresh spends the token it was given and returns
-its replacement. The vendor documents the refresh token itself as valid seven days after
+**Treat the refresh token as one-time use.** A refresh spends the token it was given and
+returns its replacement (an assumption this package makes as the safe direction; no committed
+vendor document states it). The vendor documents the refresh token itself as valid seven days after
 creation and does not say whether refreshing before expiry resets that clock — see
 `DpExchange.Schwab.Auth`'s moduledoc. Plan for a person to re-authenticate at least once
 every seven days regardless of how often you refresh in between.

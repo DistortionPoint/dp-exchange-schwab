@@ -381,6 +381,15 @@ defmodule DpExchange.SchwabTest do
     end
   end
 
+  @idle_status %{
+    route: nil,
+    delivering: false,
+    wanted: 0,
+    covered: 0,
+    failures_since_ok: 0,
+    last_error: nil
+  }
+
   describe "the feed routes, and reports only what arrived" do
     setup do
       unique = System.unique_integer([:positive])
@@ -421,12 +430,12 @@ defmodule DpExchange.SchwabTest do
     test "an unrouted feed reports no route, not a stream", %{feed: feed} do
       # Nothing has dialled anything yet, so `route: :stream` here would be a route that was
       # never established, claimed as the live one.
-      assert Feed.status(feed) == %{route: nil, delivering: 0, wanted: 0, last_error: nil}
+      assert Feed.status(feed) == @idle_status
     end
 
     test "status/1 delegates to the named feed, and is empty when no feed is running",
          %{name: name} do
-      assert Schwab.status(feed: name) == %{route: nil, delivering: 0, wanted: 0, last_error: nil}
+      assert Schwab.status(feed: name) == @idle_status
       assert Schwab.status(feed: :no_such_feed) == %{}
     end
 

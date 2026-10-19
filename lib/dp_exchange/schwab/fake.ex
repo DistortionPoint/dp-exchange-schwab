@@ -677,7 +677,7 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_replace_order(credentials, order_id, request, opts) do
     with :ok <- Orders.check_order_id(order_id),
-         {:ok, payload} <- Orders.build(request, opts),
+         {:ok, payload} <- Orders.build_replacement(request, opts),
          {:ok, _hash} <- require_account(opts),
          :ok <- OrderLimit.ensure_declared(opts),
          :ok <- require_credentials(credentials: credentials),
@@ -1053,28 +1053,29 @@ defmodule DpExchange.Schwab.Fake do
   end
 
   @doc """
-  The feed-wide summary, in the shape `DpExchange.Schwab.status/1` answers on the Streamer
-  route (`route: :stream`, the route `coverage/1` reports here): `delivering` and `wanted` are
-  COUNTS, as the real feed's are, and `last_error` is `nil` because the fake delivers
-  synchronously and has no error to report.
-
-  This used to be a hybrid of the two real shapes (`delivering` a boolean, plus the poll
-  route's `symbols`, `covered` and `failures_since_ok`) that matched neither, so a consumer
-  reading `status.delivering > 0` or `status.wanted` passed on the real feed and failed here.
+  The feed-wide summary, in the one shape `DpExchange.Schwab.status/1` answers on every route
+  (`route: :stream`, the route `coverage/1` reports here): `delivering` is a boolean (some
+  symbol has arrived), `wanted` and `covered` are counts, `failures_since_ok` is 0 and
+  `last_error` is `nil` because the fake delivers synchronously and has no error to report.
   """
   @spec status(keyword()) :: %{
           route: :stream,
-          delivering: non_neg_integer(),
+          delivering: boolean(),
           wanted: non_neg_integer(),
+          covered: non_neg_integer(),
+          failures_since_ok: 0,
           last_error: nil
         }
   def status(opts \\ []) do
     :ok = Options.check!(:status, opts)
+    covered = length(subscribed())
 
     %{
       route: :stream,
-      delivering: length(subscribed()),
+      delivering: covered > 0,
       wanted: length(wanted_symbols()),
+      covered: covered,
+      failures_since_ok: 0,
       last_error: nil
     }
   end
@@ -1662,8 +1663,9 @@ defmodule DpExchange.Schwab.Fake do
   Refuses first what `DpExchange.Schwab.Auth.refresh/2` refuses before a request, through the
   same `Auth.validate_refresh_input/1`: a credential without a `:refresh_token`, `:client_id`
   and `:client_secret` is `{:error, {:missing_credentials, :schwab}}`, a padded one
-  `{:error, {:invalid_credentials, :schwab}}`; then a non-https `:token_url`
-  `{:error, {:insecure_url, :schwab}}`. This call judges the credential itself, so
+  `{:error, {:invalid_credentials, :schwab}}`; then a `:now` that is not a `DateTime`
+  `{:error, {:invalid_option, :now, value}}` (`Auth.check_now/1`); then a non-https
+  `:token_url` `{:error, {:insecure_url, :schwab}}`. This call judges the credential itself, so
   `FakeInjection.bypass_credentials/1` does not apply to it. The new tokens are the fake's,
   and nothing is sent anywhere.
   """
@@ -1677,8 +1679,10 @@ defmodule DpExchange.Schwab.Fake do
 
   defp do_refresh_credentials(credentials, opts) do
     with :ok <- Auth.validate_refresh_input(credentials),
+         :ok <- Auth.check_now(opts),
          :ok <- Auth.check_secure_url(Auth.token_url(opts), opts) do
-      now = Keyword.get(opts, :now, @as_of)
+      # `Config.opt/3`: a forwarded `now: nil` is silence, not a clock of `nil`.
+      now = Config.opt(opts, :now, @as_of)
 
       {:ok,
        Map.merge(credentials, %{

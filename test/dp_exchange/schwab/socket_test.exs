@@ -481,8 +481,12 @@ defmodule DpExchange.Schwab.SocketTest do
       once = subscribe.(state(%{logged_in?: true}), ["SYM0", "AAPL"])
       many = Enum.reduce(1..500, once, fn n, acc -> subscribe.(acc, ["SYM#{n}", "AAPL"]) end)
 
-      assert :erts_debug.flat_size(%{many | request_id: 0}) ==
-               :erts_debug.flat_size(%{once | request_id: 0})
+      # `pending` remembers each sent command until its response pops it (none arrive here),
+      # and is capped, so it is held to its cap rather than to the size of one call.
+      assert map_size(many.pending) == 256
+
+      assert :erts_debug.flat_size(%{many | request_id: 0, pending: %{}}) ==
+               :erts_debug.flat_size(%{once | request_id: 0, pending: %{}})
     end
 
     test "an invalid subscribe is reported rather than sent" do
@@ -664,7 +668,160 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, new_state} = Socket.handle_frame(frame(response), state(%{logged_in?: true}))
 
       assert new_state.logged_in?
+
+      # A venue refusing a subscription is a `:refusal` with `details.symbols`, not `:degraded`.
+      # This socket never sent the command (the state is hand-built), so it cannot say which
+      # symbols: an empty list is "not attributable", and the venue's text rides in `message`.
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{
+                         kind: :refusal,
+                         details: %{
+                           symbols: [],
+                           reason: :command_rejected,
+                           message: "not entitled"
+                         }
+                       }}
+    end
+
+    test "a refused SUBS names the symbols that command carried" do
+      {:reply, {:text, _frame}, sent_state} =
+        Socket.handle_cast(
+          {:subscribe_all, [{"LEVELONE_EQUITIES", "SUBS", ~w(AAPL TSLA), []}]},
+          state(%{logged_in?: true})
+        )
+
+      assert [{request_id, {"LEVELONE_EQUITIES", "SUBS", ["AAPL", "TSLA"]}}] =
+               Map.to_list(sent_state.pending)
+
+      response = %{
+        "response" => [
+          %{
+            "service" => "LEVELONE_EQUITIES",
+            "command" => "SUBS",
+            "requestid" => request_id,
+            "content" => %{"code" => 21, "msg" => "not entitled"}
+          }
+        ]
+      }
+
+      assert {:ok, answered} = Socket.handle_frame(frame(response), sent_state)
+
+      assert answered.pending == %{}
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :refusal, details: %{symbols: ["AAPL", "TSLA"]}}}
+    end
+
+    test "a failed UNSUBS refuses nothing the consumer asked for, and stays :degraded" do
+      {:reply, {:text, _frame}, sent_state} =
+        Socket.handle_cast(
+          {:subscribe_all, [{"LEVELONE_EQUITIES", "UNSUBS", ~w(AAPL), []}]},
+          state(%{logged_in?: true, subscribed: %{"LEVELONE_EQUITIES" => ["AAPL"]}})
+        )
+
+      assert [{request_id, {"LEVELONE_EQUITIES", "UNSUBS", ["AAPL"]}}] =
+               Map.to_list(sent_state.pending)
+
+      failed = %{
+        "response" => [
+          %{
+            "service" => "LEVELONE_EQUITIES",
+            "command" => "UNSUBS",
+            "requestid" => request_id,
+            "content" => %{"code" => 9, "msg" => "unknown failure"}
+          }
+        ]
+      }
+
+      assert {:ok, answered} = Socket.handle_frame(frame(failed), sent_state)
+      assert answered.pending == %{}
       assert_received {:dp_exchange, :schwab, %Notice{kind: :degraded}}
+    end
+  end
+
+  describe "a frame that cannot be read is dropped and said once" do
+    test "an unparseable frame raises one :data_quality notice per session, never its content" do
+      assert {:ok, first} = Socket.handle_frame({:text, "{not json"}, state())
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{
+                         kind: :data_quality,
+                         details: %{reason: :unparseable_frame, bytes: 9}
+                       }}
+
+      assert {:ok, _second} = Socket.handle_frame({:text, "{still not json"}, first)
+      refute_received {:dp_exchange, :schwab, _notice}
+    end
+
+    test "an unrecognised frame shape is said once, and the latch clears with the session" do
+      assert {:ok, first} =
+               Socket.handle_frame(frame(%{"something" => []}), state(%{logged_in?: true}))
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :data_quality, details: %{reason: :unrecognised_frame}}}
+
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, first)
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
+
+      assert {:ok, _again} = Socket.handle_frame(frame(%{"something" => []}), dropped)
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :data_quality, details: %{reason: :unrecognised_frame}}}
+    end
+  end
+
+  describe "a notify that is not a heartbeat is said, not discarded" do
+    test "an admin notify raises a :data_quality notice once; a heartbeat raises nothing" do
+      heartbeat = %{"notify" => [%{"heartbeat" => "1668715930582"}]}
+
+      admin = %{
+        "notify" => [
+          %{"service" => "ADMIN", "content" => %{"code" => 30, "msg" => "Stop streaming"}}
+        ]
+      }
+
+      assert {:ok, quiet} = Socket.handle_frame(frame(heartbeat), state(%{logged_in?: true}))
+      refute_received {:dp_exchange, :schwab, _notice}
+
+      assert {:ok, said} = Socket.handle_frame(frame(admin), quiet)
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :data_quality, details: %{reason: :unrecognised_notify}}}
+
+      assert {:ok, _again} = Socket.handle_frame(frame(admin), said)
+      refute_received {:dp_exchange, :schwab, _notice}
+    end
+  end
+
+  describe "a :link_down is closed by a :link_up, so a failed redial is not a second one" do
+    test "only the first disconnect of an outage raises :link_down, until a LOGIN succeeds" do
+      login = %{
+        "response" => [%{"service" => "ADMIN", "command" => "LOGIN", "content" => %{"code" => 0}}]
+      }
+
+      assert {:reconnect, down} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
+
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
+
+      # The redials that fail to connect, and a connection whose LOGIN is then denied and
+      # closed, are the same outage: nothing has closed the first `:link_down`.
+      assert {:reconnect, still_down} =
+               Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 2}, down)
+
+      assert {:reconnect, denied_down} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, still_down)
+
+      refute_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
+
+      # A LOGIN that succeeds is the `:link_up`; the next lost connection is reported.
+      assert {:ok, up} = Socket.handle_frame(frame(login), denied_down)
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_up}}
+
+      assert {:reconnect, _down_again} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, up)
+
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :link_down}}
     end
   end
 
@@ -1030,9 +1187,12 @@ defmodule DpExchange.Schwab.SocketTest do
       assert {:ok, _state} = Socket.handle_frame({:text, "not json"}, state())
     end
 
-    test "an unrecognised frame shape is ignored" do
+    test "an unrecognised frame shape is never read as data, and is said once" do
       assert {:ok, _state} =
                Socket.handle_frame(frame(%{"something" => []}), state(%{logged_in?: true}))
+
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :data_quality, details: %{reason: :unrecognised_frame}}}
 
       refute_received {:dp_exchange, :schwab, _anything}
     end
@@ -1078,6 +1238,13 @@ defmodule DpExchange.Schwab.SocketTest do
 
       assert Keyword.fetch!(recv_override, :socket_recv_timeout) == 100
       assert Keyword.fetch!(recv_override, :socket_connect_timeout) == 3_000
+    end
+
+    test "a forwarded nil timeout is silence and gets the default, not a connect timeout of nil" do
+      opts = Socket.connection_opts(socket_connect_timeout: nil, socket_recv_timeout: nil)
+
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 3_000
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 2_000
     end
 
     test "unrelated opts never leak into the connection options" do

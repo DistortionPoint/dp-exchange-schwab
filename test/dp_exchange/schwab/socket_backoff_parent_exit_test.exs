@@ -2,8 +2,11 @@ defmodule DpExchange.Schwab.SocketBackoffParentExitTest do
   @moduledoc """
   A socket in its reconnect backoff still hears its parent stop it.
 
-  `WebSockex` traps exits and learns that its parent has gone from an `{:EXIT, parent, reason}`
-  message that only its own loops read. `Socket.handle_disconnect/2` waits out the backoff
+  A process that traps exits learns that its parent has gone from an `{:EXIT, parent, reason}`
+  message that only its own loops read. (The vendored `WebSockex` does not itself set the trap
+  flag, so in production an abnormal parent exit kills the socket outright and a `:normal` one
+  is closed by `Feed.terminate/2`; this clause is what keeps the wait honest for any process
+  that does trap, and the test below traps in its own process.) `Socket.handle_disconnect/2` waits out the backoff
   (up to 30s) inside the callback, and that wait was a bare `Process.sleep/1`: a socket
   stopped by `Feed` (or orphaned by a `Feed` restart) slept the whole delay, then dialled the
   Streamer once more before it noticed. The venue allows one Streamer connection per user, so

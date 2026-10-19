@@ -51,8 +51,10 @@ when the frame includes it. Otherwise `venue_time` is `nil` beside a real `obser
 is not a gap — it is the fact the split exists to state, and before 0.2.0 this package put
 the frame's arrival time in a field documented as the venue's own.
 
-**A delayed quote is never delivered.** An account without real-time entitlements is
-streamed delayed rows (`"delayed": true`), and neither `Quote` nor `TopOfBook` can say so.
+**A delayed quote is never delivered.** The venue flags a row `"delayed": true` when it is
+NFL data: delayed, or real-time from only a subset of exchanges (typically an account without
+real-time entitlements). Neither `Quote` nor `TopOfBook` can say so, and the vendor says such a
+row does not represent the most recent last or bid/ask.
 Those `LEVELONE_*` and `*_BOOK` rows are withheld, and the first one per symbol per
 Streamer session raises a `:degraded` `Core.Notice` with `details.symbol`, `details.service`
 and the reason. A symbol that is subscribed and never delivers, with that notice, is an
@@ -112,8 +114,28 @@ lists only equities that quote a book, so it never answers it.
 Streamer), `:route_crashed`, `:poller_unresponsive`, `:streamer_unreachable` (`:degraded`,
 with `fallback: :internal_poll`), `:login_rejected`, `:command_rejected`,
 `:subscription_not_sent`, `:held_commands_full`, `:delayed_quotes_withheld`,
-`:frame_unreadable`, `:login_unanswered` and `:silent_connection`. Code that matched the
+`:frame_unreadable`, `:login_unanswered`, `:silent_connection`, and the frame-level
+`:unparseable_frame`, `:unrecognised_frame` and `:unrecognised_notify`. Code that matched the
 old free-text `details.reason` string must read `details.message`.
+
+**The Streamer's `:link_down` is one per outage.** A redial that fails to connect, or a
+connection whose LOGIN is denied and closed again, is the same outage: no second `:link_down`
+is raised until a LOGIN has succeeded (the `:link_up`). It used to be raised again on every
+backoff rung. A consumer that counted `:link_down` notices as reconnect attempts must read the
+`link_reconnect_attempt` telemetry event instead.
+
+**A venue refusing a subscription is a `:refusal`**, with `details.symbols` (the keys of the
+`SUBS`/`ADD`/`VIEW` it answered; `[]` when that command is no longer remembered),
+`details.service`, `details.reason: :command_rejected` and the venue's text in
+`details.message`. It was `:degraded` (a **breaking change of the notice kind**): `:degraded`
+means a slower path is in use, not a refused symbol. A failed `UNSUBS` stays `:degraded`.
+
+**A Streamer frame this package cannot read is announced, once per session**, as a
+`:data_quality` notice with `details.reason` `:unparseable_frame` (not JSON),
+`:unrecognised_frame` (JSON that is not a `response`, `data` or `notify`) or
+`:unrecognised_notify` (a `notify` entry that is not a heartbeat, e.g. an admin
+`STOP_STREAMING`), and `details.bytes`. The content is never included. These frames used to be
+dropped silently, which on a venue that is quiet every night looked like a quiet market.
 
 **A `:link_down` from this package's feed is closed by a `:link_up`.** When the poll route's
 read does not answer, or a crashed route falls back to the poll, the first good poll after it
@@ -286,6 +308,15 @@ will not fix it. The `detail` is the venue's own text, bounded: longer than 2_04
 cut on a UTF-8 boundary and ends `… (N bytes)`; a shorter one is unchanged, and a `detail`
 that was not text arrives as its bounded `inspect/2` rendering.
 
+**Refresh from one process per credential.** `refresh_credentials/2` holds no lock and the
+refresh token is assumed one-time use (see below). Two processes refreshing the same credential at once get one
+success and one `{:refused, {:reauthorization_required, _, _}}` - the terminal answer, although
+the grant is intact and the winner holds its replacement - and if the loser's answer is the one
+you persist, the good credential is overwritten by a spent one. Serialise refreshes in your own
+code (one owner, persist before releasing), and treat a `:reauthorization_required` that
+arrives while another refresh of that credential was in flight as "re-read the stored
+credential", not as a dead grant.
+
 **On the streaming side the same reactive signal arrives as a notice, and you must handle
 it.** `credential_failure?/1` covers a REST response you are holding; a live Streamer login
 is refused asynchronously, with no call of yours to return it to. When that happens this
@@ -325,8 +356,9 @@ was unsubscribed before the crash, nothing is redialled until the next `subscrib
 `update_symbols/2`. The same holds for a bootstrap still in flight: if the last symbol was
 unsubscribed while it ran, the route it just created is closed on settling rather than kept.
 
-**The refresh token is one-time use.** Every refresh spends the old one and returns a new
-one. So:
+**Treat the refresh token as one-time use.** Every refresh spends the old one and returns a new
+one. (That rule is this package's safe assumption: no committed vendor document states it,
+only that the refresh response carries a `refresh_token`.) So:
 
 - **Persist the returned credential before using it.** Refreshing and then crashing before
   storing costs the grant, and only a person at a browser can restore it.
@@ -565,6 +597,10 @@ venue names the id. The venue answers a write with only a `Location` header.
 
 `cancel_order/3` returns `{:ok, :cancelled}`.
 
+A request that is not a map is `{:error, {:invalid_order_request, value}}` on all three, and so is
+an EMPTY change map on `replace_order/4` (a replace that changes nothing is not a replace; the map
+is sent as a whole new order, so it is not partial on this venue).
+
 **What a request must say.** `place_order/3`, `preview_order/3` and `replace_order/4` require
 `:symbol`, `:side` (`:buy`/`:sell`, or `"buy"`/`"sell"` in any case; or the option `:instruction`),
 `:quantity` (a Decimal, an integer or a numeric string; **a float is refused**),
@@ -613,11 +649,15 @@ the family where delivering nothing is the normal overnight state.
 not a fault. `DpExchange.Schwab.wanted/1` is the other half — what was asked for — so
 comparing the two tells "not yet arrived" apart from "never subscribed," which `coverage/1`
 alone cannot. `DpExchange.Schwab.status/1` is the feed-wide summary a health check reaches
-for instead of assembling one from `coverage/1` and `coverage_by_kind/1`. Its shape depends
-on the route: on the Streamer it is `%{route: :stream, delivering: count, wanted: count,
-last_error: term | nil}`; on the fallback poll it is `Core.PollingFeed.status/1`'s map with
-`route: :internal_poll`; before the first `subscribe/2` it is `route: nil` with zero counts;
-and with no feed started it is `%{}`.
+for instead of assembling one from `coverage/1` and `coverage_by_kind/1`. **Its shape is the
+same on every route**: `%{route: :stream | :internal_poll | nil, delivering: boolean,
+wanted: count, covered: count, failures_since_ok: count, last_error: term | nil}`. `delivering`
+is true when some symbol has arrived (`covered > 0`); `failures_since_ok` counts consecutive
+failed polls and is always 0 on the Streamer. A poller that did not answer a read is
+`delivering: false, covered: 0, last_error: :poller_unresponsive`. Before the first
+`subscribe/2` it is `route: nil` with zero counts, and with no feed started it is `%{}`.
+**Breaking:** `delivering` used to be a count on the Streamer (it is `covered` now) and the poll
+route's `symbols` is `wanted`.
 
 ## 9. The Streamer, and what arrives only there
 
@@ -902,9 +942,9 @@ call with a real success path is wired, including `get_positions/1`, `get_option
 it has nothing to inject into.)
 
 **The fake models the normal route.** `Fake.coverage/1` reports `:stream` and
-`Fake.status/1` is `%{route: :stream, delivering: count, wanted: count, last_error: nil}`, the
-real feed's shape once the Streamer bootstraps (the `:internal_poll` fallback is not
-modelled). `Fake.subscribe_notices/1` judges `:to`
+`Fake.status/1` is `%{route: :stream, delivering: boolean, wanted: count, covered: count,
+failures_since_ok: 0, last_error: nil}`, the real feed's one shape once the Streamer bootstraps
+(the `:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` judges `:to`
 (`{:invalid_subscriber, _}`) and sends nothing, as the real feed sends no notice on
 registration; the fake emits no notices at all. `Fake.update_symbols/2` ignores
 `:to`, as the real one does.

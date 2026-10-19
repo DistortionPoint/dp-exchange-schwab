@@ -52,17 +52,18 @@ defmodule DpExchange.Schwab.OrdersTest do
   end
 
   describe "the leg's assetType follows the stated instrument, not the ticker's spelling" do
-    test "a mutual fund order is sent as MUTUAL_FUND, not as a share order" do
-      # `SWPPX` and `AAPL` are spelled alike; every non-option order went out as EQUITY.
+    test "a mutual fund or cash-equivalent order is refused, never sent as a share order" do
+      # `SWPPX` and `AAPL` are spelled alike, so sending the fund as EQUITY would be a share
+      # order for a different instrument. The vendor's order samples state "Order entry will
+      # only be available for the assetType 'EQUIT[Y]' and 'OPTION' as of this time"
+      # (accounts-and-trading-production.txt:128), so MUTUAL_FUND and CASH_EQUIVALENT are not
+      # sent either: refused locally, before a throttled write is spent.
       fund = Map.merge(@buy, %{symbol: "SWPPX", quantity: 1, instrument_type: :mutual_fund})
 
-      assert {:ok, payload} = Orders.build(fund)
-      assert [%{"instrument" => %{"assetType" => "MUTUAL_FUND"}}] = payload["orderLegCollection"]
+      assert Orders.build(fund) == {:error, {:unsupported_instrument_type, :mutual_fund}}
 
-      assert {:ok, cash} =
-               Orders.build(%{fund | symbol: "SNSXX", instrument_type: :cash_equivalent})
-
-      assert [%{"instrument" => %{"assetType" => "CASH_EQUIVALENT"}}] = cash["orderLegCollection"]
+      assert Orders.build(%{fund | symbol: "SNSXX", instrument_type: :cash_equivalent}) ==
+               {:error, {:unsupported_instrument_type, :cash_equivalent}}
     end
 
     test "no stated type is EQUITY, and an unsendable one is refused rather than guessed" do

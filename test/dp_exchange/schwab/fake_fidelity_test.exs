@@ -422,11 +422,27 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
 
       assert Enum.sort(Fake.wanted()) == ["AAPL", "TSLA"]
       assert Map.keys(Fake.coverage()) == ["AAPL"]
-      assert Fake.status() == %{route: :stream, wanted: 2, delivering: 1, last_error: nil}
+
+      assert Fake.status() == %{
+               route: :stream,
+               wanted: 2,
+               delivering: true,
+               covered: 1,
+               failures_since_ok: 0,
+               last_error: nil
+             }
 
       :ok = Fake.unsubscribe(["AAPL"])
       assert Fake.wanted() == ["TSLA"]
-      assert Fake.status() == %{route: :stream, wanted: 1, delivering: 0, last_error: nil}
+
+      assert Fake.status() == %{
+               route: :stream,
+               wanted: 1,
+               delivering: false,
+               covered: 0,
+               failures_since_ok: 0,
+               last_error: nil
+             }
 
       :ok = Fake.update_symbols(["MSFT"])
       assert Fake.wanted() == ["MSFT"]
@@ -646,6 +662,37 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       for {window, reason} <- windows do
         assert Fake.get_transactions(@creds, opts ++ window) == {:error, reason}
         assert Rest.check_transactions(opts ++ window) == {:error, reason}
+      end
+    end
+  end
+
+  describe "replace_order/4 and preview_order/3 request discipline (conformance group 50)" do
+    test "an empty or non-map change map is {:invalid_order_request, v}, facade and fake alike" do
+      for bad <- [%{}, nil, "price", [price: "1"]], opts <- [[], [account_hash: "H"]] do
+        refused = {:error, {:invalid_order_request, bad}}
+
+        assert Schwab.replace_order(@creds, "1", bad, opts) == refused
+        assert Fake.replace_order(@creds, "1", bad, opts) == refused
+      end
+    end
+
+    test "a non-empty change map is still judged field by field" do
+      assert {:error, {:invalid_symbol, nil}} =
+               Fake.replace_order(@creds, "1", %{price: "1"}, account_hash: "H")
+
+      assert Fake.replace_order(@creds, "1", %{price: "1"}, account_hash: "H") ==
+               Schwab.replace_order(@creds, "1", %{price: "1"}, account_hash: "H")
+    end
+
+    test "preview_order/3 answers place_order/3's refusal for a bad request" do
+      for bad <- [%{}, nil, "price", [price: "1"], %{@buy | side: :hold}] do
+        opts = [account_hash: "H"]
+        refused = Schwab.place_order(@creds, bad, opts)
+
+        assert {:error, _reason} = refused
+        assert Schwab.preview_order(@creds, bad, opts) == refused
+        assert Fake.preview_order(@creds, bad, opts) == refused
+        assert Fake.place_order(@creds, bad, opts) == refused
       end
     end
   end

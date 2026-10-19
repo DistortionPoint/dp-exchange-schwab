@@ -134,6 +134,18 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
      through the same `handle_close({:local, ...})` path the two 1002 protocol violations
      already use, so `handle_disconnect/2` runs and the reconnect is the ordinary one. Added
      2026-10-14.
+  5. **A raise in the opening handshake ends the attempt, not the process.** The handshake
+     runs in a task linked to this process, which does not trap exits, so a raise there (an
+     upgrade response without `Sec-WebSocket-Accept` was a `MatchError`; a malformed header
+     line is a `CaseClauseError` in the real `WebSockex.Conn`) killed the socket with no
+     `handle_disconnect/2` and no backoff. The task now rescues and answers a
+     `ConnError`, and a missing accept header is a `HandshakeError`, so both take the
+     ordinary start and reconnect paths. Added in tick AM.
+  6. **A close frame that cannot be sent, for any reason, is a closed connection.**
+     `handle_local_close/4` matched only `:closed` and `:einval`; any other send failure
+     (`:epipe`, `:enotconn`, `:timeout`) was a `CaseClauseError` that killed the socket from
+     the `{:close, state}` this package returns to end a failed or silent connection. Added
+     in tick AM.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -1232,6 +1244,17 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
 
       {:error, %WebSockex.ConnError{original: reason}} when reason in [:closed, :einval] ->
         handle_close({:remote, :closed}, parent, debug, state)
+
+      # ## VENDORED FIX (6) - upstream matched only the two reasons above, so a close frame
+      # that could not be sent for any other reason (`:epipe`, `:enotconn`, `:timeout` on a
+      # half-dead path) was a `CaseClauseError` that killed the socket from the very
+      # `{:close, state}` this package returns to END a connection (a refused LOGIN, an
+      # unanswered LOGIN, a silent connection). The connection is unusable whatever the
+      # reason, so it is the same unexpected remote close, and `handle_disconnect/2` runs.
+      # The socket is closed here first: unlike a peer-closed one, it may still be open.
+      {:error, _send_failed} ->
+        closed = %{state | conn: WebSockex.Conn.close_socket(state.conn)}
+        handle_close({:remote, :closed}, parent, debug, closed)
     end
   end
 
@@ -1385,24 +1408,40 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
         conn.socket_recv_timeout
 
     task =
-      Task.async(fn ->
-        with {:ok, conn} <- WebSockex.Conn.open_socket(conn),
-             key <- :crypto.strong_rand_bytes(16) |> Base.encode64(),
-             {:ok, request} <- WebSockex.Conn.build_request(conn, key),
-             :ok <- WebSockex.Conn.socket_send(conn, request),
-             {:ok, headers} <- WebSockex.Conn.handle_response(conn, my_pid),
-             :ok <- validate_handshake(headers, key) do
-          :ok = WebSockex.Conn.controlling_process(conn, my_pid)
-          :ok = WebSockex.Conn.set_active(conn)
-          {:ok, %{conn | resp_headers: headers}}
-        end
-      end)
+      Task.async(fn -> rescued_handshake(conn, my_pid) end)
 
     open_loop(
       parent,
       debug,
       state |> Map.put(:task, task) |> Map.put(:handshake_deadline, deadline)
     )
+  end
+
+  # ## VENDORED FIX (5) - the task is linked to this process, which does not trap
+  # exits, so ANY raise in the handshake (the real `WebSockex.Conn`'s header decoding
+  # matches only the shapes a well-behaved server sends: a malformed header line or
+  # a half-received status line is a `CaseClauseError` there) killed the socket and
+  # skipped `handle_disconnect/2` and its backoff. It is the attempt that failed, so
+  # it ends as a `ConnError` through the ordinary paths.
+  defp rescued_handshake(conn, my_pid) do
+    handshake(conn, my_pid)
+  rescue
+    exception -> {:error, %WebSockex.ConnError{original: {:handshake_failed, exception}}}
+  end
+
+  # The opening handshake, run in the task `open_connection/3` starts. Upstream's body,
+  # moved out of the task closure unchanged so the closure can carry the vendored `rescue`.
+  defp handshake(conn, my_pid) do
+    with {:ok, conn} <- WebSockex.Conn.open_socket(conn),
+         key <- :crypto.strong_rand_bytes(16) |> Base.encode64(),
+         {:ok, request} <- WebSockex.Conn.build_request(conn, key),
+         :ok <- WebSockex.Conn.socket_send(conn, request),
+         {:ok, headers} <- WebSockex.Conn.handle_response(conn, my_pid),
+         :ok <- validate_handshake(headers, key) do
+      :ok = WebSockex.Conn.controlling_process(conn, my_pid)
+      :ok = WebSockex.Conn.set_active(conn)
+      {:ok, %{conn | resp_headers: headers}}
+    end
   end
 
   # Other State Functions
@@ -1529,7 +1568,18 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
   defp validate_handshake(headers, key) do
     challenge = :crypto.hash(:sha, key <> @handshake_guid) |> Base.encode64()
 
-    {_, res} = List.keyfind(headers, "Sec-Websocket-Accept", 0)
+    # ## VENDORED FIX (5) - upstream matched `{_, res} = List.keyfind(...)`, so an upgrade
+    # response with no `Sec-WebSocket-Accept` header (a proxy or captive portal answering
+    # `101` without it) raised `MatchError` inside the handshake task. The task is linked to
+    # this process, which does not trap exits, so the raise killed the socket instead of
+    # ending the attempt: no `handle_disconnect/2`, no backoff of its own, a crash for `Feed`
+    # to isolate. A missing header is now the same `HandshakeError` a wrong one is, which the
+    # existing start and reconnect paths already handle.
+    res =
+      case List.keyfind(headers, "Sec-Websocket-Accept", 0) do
+        {_header, value} -> value
+        nil -> nil
+      end
 
     if challenge == res do
       :ok

@@ -140,13 +140,14 @@ defmodule DpExchange.Schwab.Orders do
     (`{:invalid_instruction, value}`, naming the value given)
   - `:instrument_type` names an asset this builder cannot send
 
-  **`:instrument_type` sets the leg's `assetType`.** Nothing in a ticker tells a mutual fund
-  from a share (`SWPPX` and `AAPL` are spelled alike, and `capabilities/0` declares both),
-  so every non-option order went out as `EQUITY` — a fund order sent as a share order.
-  `:mutual_fund` sends `MUTUAL_FUND` and `:cash_equivalent` sends `CASH_EQUIVALENT`, the
-  Trader API's own `assetType` values; `:equity`/`:spot` (or none) sends `EQUITY`, and an
-  option symbol is `OPTION` whatever is said. Anything else is
-  `{:error, {:unsupported_instrument_type, value}}` rather than a guessed `EQUITY`.
+  **`:instrument_type` sets the leg's `assetType`, and only EQUITY and OPTION are orderable.**
+  Nothing in a ticker tells a mutual fund from a share (`SWPPX` and `AAPL` are spelled alike),
+  so sending every non-option order as `EQUITY` made a fund order a share order. The vendor
+  states that order entry is available only for `EQUITY` and `OPTION`
+  (`accounts-and-trading-production.txt:128`), so `:mutual_fund` and `:cash_equivalent` are
+  `{:error, {:unsupported_instrument_type, value}}` (they were sent as `MUTUAL_FUND` and
+  `CASH_EQUIVALENT` before). `:equity`/`:spot` (or none) sends `EQUITY`, and an option symbol
+  is `OPTION` whatever is said. Anything else is refused too, never a guessed `EQUITY`.
   """
   @spec build(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def build(request, opts \\ [])
@@ -195,6 +196,22 @@ defmodule DpExchange.Schwab.Orders do
        |> maybe_put("stopPriceLinkBasis", request[:stop_price_link_basis])
        |> maybe_put("stopPriceLinkType", request[:stop_price_link_type])}
     end
+  end
+
+  @doc """
+  Builds the order a `replace_order/4` sends: `build/2`, except that an EMPTY map is refused first.
+
+  Schwab replaces an order by `PUT`ting a whole new one, so the change map is built as a whole
+  order. A replace that changes nothing is not a replace (`Core.Venue.replace_order/4`), and
+  `%{}` used to fall through to `build/2`'s symbol check, answering `{:invalid_symbol, nil}`.
+  A non-map, a struct or an empty map is `{:error, {:invalid_order_request, value}}`; anything
+  else is judged by `build/2`.
+  """
+  @spec build_replacement(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def build_replacement(request, opts \\ []) do
+    if request == %{},
+      do: {:error, {:invalid_order_request, request}},
+      else: build(request, opts)
   end
 
   @doc """
@@ -661,8 +678,11 @@ defmodule DpExchange.Schwab.Orders do
   end
 
   defp stated_asset_type(type) when type in [nil, :equity, :spot], do: {:ok, "EQUITY"}
-  defp stated_asset_type(:mutual_fund), do: {:ok, "MUTUAL_FUND"}
-  defp stated_asset_type(:cash_equivalent), do: {:ok, "CASH_EQUIVALENT"}
+  # **Order entry is EQUITY and OPTION only**: "Order entry will only be available for the
+  # assetType 'EQUIT' and 'OPTION' as of this time" (`accounts-and-trading-production.txt:128`,
+  # the document's own typo). `:mutual_fund` and `:cash_equivalent` used to be sent as
+  # `MUTUAL_FUND` and `CASH_EQUIVALENT`, asset types the vendor says it does not accept; they
+  # are refused like any other type this builder cannot send.
   defp stated_asset_type(other), do: {:error, {:unsupported_instrument_type, other}}
 
   defp maybe_put(payload, _key, nil), do: payload

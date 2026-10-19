@@ -31,6 +31,111 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **A venue refusing a Streamer subscription is a `:refusal` notice, not `:degraded`.** A
+  `SUBS`, `ADD` or `VIEW` the venue answers with a failure code (for example `19
+  REACHED_SYMBOL_LIMIT`, `21 BAD_COMMAND_FORMAT`) now raises `Core.Notice` kind `:refusal` with
+  `details.symbols` (the keys that command carried, remembered by request id and bounded at 256
+  commands; `[]` when the socket no longer remembers it), `details.service`,
+  `details.reason: :command_rejected` and the venue's text in `details.message`. `:degraded` means
+  a slower path is in use (`Core.Notice` kind rules). A failed `UNSUBS` stays `:degraded`.
+- **The Streamer's `:link_down` is one per outage.** `handle_disconnect/2` raised a
+  `:link_down` notice and a `Telemetry.link_down/2` event for every redial that failed to
+  connect, and for every connect-LOGIN-denied-close cycle, none of which a `:link_up` had
+  closed. It now raises one, and re-arms on the next LOGIN that succeeds. Count redials with the
+  `link_reconnect_attempt` event, which still fires on every attempt.
+- **Order entry is EQUITY and OPTION only: `instrument_type: :mutual_fund` and `:cash_equivalent`
+  are refused.** `Orders.build/2` sent them as `MUTUAL_FUND` and `CASH_EQUIVALENT`, but the
+  vendor states "Order entry will only be available for the assetType 'EQUIT' and 'OPTION' as of
+  this time" (`accounts-and-trading-production.txt:128`, `spec-facts.md` section 10: "the
+  tradable set is two"). Both are now `{:error, {:unsupported_instrument_type, type}}` before a
+  throttled write is spent. They stay in `capabilities().supported_instrument_types`: that list
+  is what quotes and positions route, and the comment beside it now says so.
+- **`replace_order/4` given an empty change map answers `{:error, {:invalid_order_request,
+  %{}}}`** (conformance group 50), on the facade and the Fake. It used to answer
+  `{:invalid_symbol, nil}` from building the empty map as a whole order. A non-map was already
+  `{:invalid_order_request, v}`; `preview_order/3` already answers `place_order/3`'s refusal
+  (now pinned by a test). New `Orders.build_replacement/2`.
+- **`status/1` has one shape on every route.** `delivering` was a count on the Streamer route
+  and a boolean (`Core.PollingFeed.status/1`'s type) on the fallback poll, which let a consumer
+  tell how data reaches the package. It is now a boolean everywhere (some symbol has arrived).
+  The count moved to `covered`, the poll route's `symbols` is `wanted`, and `failures_since_ok`
+  (0 on the Streamer) is on both. Keys on every route: `route`, `delivering`, `wanted`,
+  `covered`, `failures_since_ok`, `last_error`. `Fake.status/1` and a poller that did not answer
+  (`delivering: false, covered: 0, last_error: :poller_unresponsive`) follow the same shape.
+
+### Fixed
+
+- **A feed stopped normally left its Streamer socket running.** `Socket` and the poller are
+  linked to `Feed`, not supervised, and neither traps exits, so a `:normal` exit did not reach
+  them: the socket reconnected forever, holding the venue's one Streamer connection per user.
+  `Feed.terminate/2` now shuts both down.
+- **Vendored websockex (`DpExchange.Schwab.Vendor.WebSockex`), two more fixes.** (5) A raise in
+  the opening handshake (an upgrade response without `Sec-WebSocket-Accept` was a `MatchError`;
+  a malformed header line is a `CaseClauseError` in the real `WebSockex.Conn`) killed the socket
+  through the linked handshake task, skipping `handle_disconnect/2` and its backoff; it is now a
+  `HandshakeError` / `ConnError` through the ordinary paths. (6) A close frame that could not be
+  sent for any reason but `:closed`/`:einval` was a `CaseClauseError` from the very
+  `{:close, state}` this package returns to end a failed or silent connection; it is now a
+  closed connection (socket closed first) and `handle_disconnect/2` runs.
+
+- **A Streamer frame the socket could not read was dropped in silence.** Unparseable JSON, a
+  JSON frame that is not a `response`, `data` or `notify`, and a `notify` entry that is not a
+  heartbeat (the vendor's `30 STOP_STREAMING` is an admin message) now raise one `:data_quality`
+  notice per session, `details.reason` `:unparseable_frame`, `:unrecognised_frame` or
+  `:unrecognised_notify` with `details.bytes`, never the content. On a venue that is quiet
+  every night, a feed discarding everything looked like a quiet market.
+- **`refresh_credentials/2` could raise after the refresh token was spent.** `opts[:now]` is read
+  only once the venue has answered, and `now: nil` (a forwarded unset option; `Keyword.get_lazy/3`
+  returns a present `nil`) or a value that is not a `DateTime` raised in `DateTime.add/3` in
+  the caller's process, losing the rotated token with the one-time token already gone. A
+  forwarded `nil` is now silence (the clock), and any other non-`DateTime` is
+  `{:error, {:invalid_option, :now, value}}` before anything is sent (`Auth.check_now/1`,
+  shared with `Fake.refresh_credentials/2`, judged after the credential and before the token
+  URL).
+- **A forwarded `nil` `:socket_connect_timeout` or `:socket_recv_timeout` reached the dial as
+  its timeout** (`Keyword.put_new/3` keeps a present `nil`), raising `badarg` inside the connect.
+  It now gets the deliberate default.
+- **A forwarded `nil` `:rate_limit_blocking` turned the fallback poll fail-fast.** The `true`
+  default was `put_new`, so a present `nil` kept the key and `Rest` then dropped it as silence;
+  the poll ran with Core's fail-fast `check/3`, the "87 of 87 symbols delivering collapses to 8
+  of 87" failure the default exists to prevent. `nil` now gets the default; an explicit `false`
+  is still honoured.
+
+### Documentation
+
+- The refresh token's "one-time use" rule is now labelled as this package's safe ASSUMPTION in
+  `Auth`'s moduledoc, `README.md` and `usage-rules.md`: no committed vendor document states it
+  (the user-guides README said the accounts-and-trading document did; it does not, and now
+  says so). `Auth`'s "what ends a grant" now lists the causes the portal's OAuth restart guide
+  gives (revocation, credential or two-factor change, an aborted flow, policy change) beyond the
+  seven days and a password reset. `Rest.get_movers/3`'s doc cites the Streamer's `SCREENER_*`
+  reading of `frequency` as minutes without borrowing it for REST. The `orders_window_schema`
+  fixture no longer carries `"closeTime": null` (the schema types it a date-time string).
+- The facade (`lib/dp_exchange/schwab.ex`) labels the one-time-use refresh sentence as an
+  assumption too. `coverage-matrix.md`'s Streamer section is rewritten to the code
+  (`streamable` is `[:quotes, :top_of_book, :candles]`, depth and `ACCT_ACTIVITY` decoded but
+  never subscribed, `get_order_book/2` `:unsupported`), the earlier wrong statements kept only
+  as dated history lines, and `negative-claims.md`'s "No REST order book" row says
+  this package does not subscribe depth. The Socket backoff test's comment no longer claims the
+  vendored socket traps exits.
+- Tests: the vendored close-frame send failure (`handle_local_close`) is exercised by filling
+  the socket's send buffer against a server that never reads.
+- `Auth`'s moduledoc and `usage-rules.md` section 3 state that two processes refreshing the
+  same credential at once get one success and one `:reauthorization_required` that is not a
+  dead grant, and that a host must refresh from a single owner.
+- The delayed-quote notice and docs now say what the vendor says (`"delayed": true` is NFL data:
+  delayed, or real-time from only a subset of exchanges), not that the account has no
+  real-time entitlement.
+- Audited and found consistent with `docs/reference/schwab`, no change: every Streamer field
+  table in `StreamerFields` (LEVELONE equities, options, futures, futures options, forex, books,
+  chart equity and futures), the REST quote, candle, chain, expiration, balance, position, order
+  and user-preference readers, and every `Fake` body and refusal order against the facade.
+  The vendor's generic Streamer example (`market-data-production.txt:112`) numbers its
+  `LEVELONE_EQUITIES` fields one higher than the field table from field 12; the table is
+  still the one followed (see `test/fixtures/spec_examples/README.md`).
+
 ## [0.2.143] - 2026-10-18
 
 ### Changed — BREAKING

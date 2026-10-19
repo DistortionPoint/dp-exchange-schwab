@@ -184,6 +184,28 @@ defmodule DpExchange.Schwab.AuthTest do
       refute Auth.needs_refresh?(renewed, now)
     end
 
+    test "a :now that is not a DateTime is refused BEFORE the refresh token is spent" do
+      # `:now` is read after the venue answers, when the one-time refresh token is already
+      # spent; `now: "noon"` raised in `DateTime.add/3` there, in the caller's process, and the
+      # rotated token in the response was lost with it.
+      exploding = fn _conn -> raise "a bad :now must not reach the venue" end
+
+      for bad <- ["noon", 12, ~D[2026-08-31], :now] do
+        assert Auth.refresh(@creds, plug: exploding, now: bad) ==
+                 {:error, {:invalid_option, :now, bad}}
+      end
+    end
+
+    test "a forwarded now: nil is silence, and the expiry is dated from the clock" do
+      body = %{"access_token" => "at-2", "refresh_token" => "rt-2", "expires_in" => 1_800}
+
+      assert {:ok, renewed} =
+               Auth.refresh(@creds, plug: responding(body), retry_attempts: 0, now: nil)
+
+      assert %DateTime{} = renewed.expires_at
+      assert DateTime.diff(renewed.expires_at, DateTime.utc_now(), :second) in 1_700..1_800
+    end
+
     test "every refresh mints a new refresh token, and it replaces the old one" do
       # The token sent is SPENT by this call. The one returned is its only replacement, which
       # is why losing this value costs the grant. Whether the replacement also carries a
