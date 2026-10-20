@@ -47,7 +47,7 @@ defmodule DpExchange.Schwab.TickAjRobustnessTest do
   describe "a non-keyword opts on the facade" do
     test "is refused by name on every call that reads it" do
       for bad <- [%{credentials: @creds}, :bad, "opts", [1, 2]] do
-        refusal = {:error, {:invalid_options, bad}}
+        refusal = {:error, {:invalid_options, echoed(bad)}}
 
         assert Schwab.get_price("AAPL", bad) == refusal
         assert Schwab.get_top_of_book("AAPL", bad) == refusal
@@ -118,7 +118,7 @@ defmodule DpExchange.Schwab.TickAjRobustnessTest do
       ]
 
       for bad <- [%{credentials: @creds}, :bad, "opts"], {fun, args} <- calls do
-        refusal = {:error, {:invalid_options, bad}}
+        refusal = {:error, {:invalid_options, echoed(bad)}}
 
         assert apply(Schwab, fun, args ++ [bad]) == refusal, "facade #{fun}"
         assert apply(Fake, fun, args ++ [bad]) == refusal, "fake #{fun}"
@@ -249,4 +249,9 @@ defmodule DpExchange.Schwab.TickAjRobustnessTest do
       end
     end
   end
+
+  # What the refusal echoes: the value as given, with a `:credentials` entry redacted
+  # (`Core.Options.check/2`, Core 0.3.113), so the token never reaches a logged tuple.
+  defp echoed(%{credentials: _creds} = bad), do: %{bad | credentials: :redacted}
+  defp echoed(bad), do: bad
 end

@@ -28,6 +28,9 @@ defmodule DpExchange.SchwabContractTest do
     # `DpExchange.Schwab.Vendor.WebSockex`). The scanning assertions are written for this
     # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
     package_root: "lib/dp_exchange",
+    # Conformance group 51: the supervisor, feed, ledger and a connected socket, each holding a
+    # canary credential, rendered the way a crash report would print them.
+    process_probe: {DpExchange.Schwab.ProcessProbe, :start},
     credentials: %{access_token: "test-token"},
     # Conformance group 42: the REAL `Schwab.place_order/3` (through `Orders.build/2` and
     # `Rest.place_order/4`), not the fake, answering a 503 to the only attempt an order write

@@ -31,6 +31,13 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Dependencies
+
+- **Requires `dp_exchange_core ~> 0.3.114`** (was `~> 0.3.111`). The conformance suite now runs
+  group 51 against this package: its supervisor, feed, ledger and socket are started with
+  canary credentials (`test/support/process_probe.ex`) and `:sys.get_status/2` of each must
+  not print one. 0.3.114 also refuses an improper-list `opts` instead of raising.
+
 ### Security
 
 - **The `:global` name that guards a refresh no longer carries an MD5 of the refresh token.**
