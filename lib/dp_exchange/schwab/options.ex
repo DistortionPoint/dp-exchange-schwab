@@ -19,6 +19,10 @@ defmodule DpExchange.Schwab.Options do
 
   ## What is allowed
 
+  Every function also accepts `:name`, the `name:` its tree was started with: the limiter, the
+  order record and the feed are named from it unless `:limiter`, `:order_limit` or `:feed` says
+  otherwise.
+
   A key is allowed on a function only when that function reads it. A key holding `nil` is
   still a key. Two kinds of function:
 
@@ -165,12 +169,17 @@ defmodule DpExchange.Schwab.Options do
   The option keys `function` accepts on the real facade, the transport keys included.
   """
   @spec allowed(atom()) :: [atom()]
-  def allowed(:get_option_chain), do: allowed_chain()
+  # `:name` is read by every call here: each addresses a process (the limiter, the order record
+  # or the feed) whose name is derived from the tree's `name:` unless given explicitly. See
+  # `DpExchange.Schwab.Supervisor.limiter_name/1`.
+  def allowed(function), do: [:name | allowed_without_name(function)]
 
-  def allowed(function) when function in @no_request,
+  defp allowed_without_name(:get_option_chain), do: allowed_chain()
+
+  defp allowed_without_name(function) when function in @no_request,
     do: [:credentials | Map.fetch!(@own, function)]
 
-  def allowed(function), do: transport(function) ++ Map.fetch!(@own, function)
+  defp allowed_without_name(function), do: transport(function) ++ Map.fetch!(@own, function)
 
   @doc """
   The extra keys only `DpExchange.Schwab.Fake` reads for `function`, as test seams.

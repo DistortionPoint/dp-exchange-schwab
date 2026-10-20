@@ -169,7 +169,8 @@ defmodule DpExchange.Schwab do
     opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
 
     %{
-      id: Keyword.get(opts, :name, __MODULE__),
+      # `Config.opt/3`: a forwarded `name: nil` is silence, so it is the default id.
+      id: Config.opt(opts, :name, __MODULE__),
       start: {__MODULE__, :start_link, [opts]},
       type: :supervisor
     }

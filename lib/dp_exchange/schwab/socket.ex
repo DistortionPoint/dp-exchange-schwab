@@ -166,7 +166,15 @@ defmodule DpExchange.Schwab.Socket do
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
-  alias DpExchange.Schwab.{Bound, Credentials, StreamerDecode, StreamerFields, StreamerProtocol}
+
+  alias DpExchange.Schwab.{
+    Auth,
+    Bound,
+    Credentials,
+    StreamerDecode,
+    StreamerFields,
+    StreamerProtocol
+  }
 
   # `use`, `start_link/4` and `cast/2` go to this package's vendored fork, never the real
   # `WebSockex`, whose `open_loop/3` has no handshake deadline and whose `websocket_loop/3`
@@ -263,11 +271,31 @@ defmodule DpExchange.Schwab.Socket do
 
   `:subscriber` receives decoded values and `Core.Notice` events. The socket URL comes from
   `info` and is **not** a constant — see `StreamerInfo`.
+
+  An `access_token` that cannot travel as sent is refused before anything is dialled, by
+  `DpExchange.Schwab.Auth.check_token/1`'s answer (`{:error, {:missing_credentials, :schwab}}`
+  or `{:error, {:invalid_credentials, :schwab}}`), and is never echoed: a token that is not
+  valid UTF-8 would otherwise make the LOGIN's JSON encoding raise with the whole value in the
+  exception message.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     info = fetch_opt!(opts, :streamer_info)
+    subscriber = fetch_opt!(opts, :subscriber)
 
+    # Judged before the socket exists, and never echoed. A token that is not valid UTF-8 made
+    # `Jason.encode!/1` raise in the LOGIN, and that exception's message prints the whole
+    # binary; one with a control byte could not travel as sent. `Feed` already judges the
+    # token it passes, so this is for a caller of `start_link/1` that did not.
+    with {:ok, token} <- opts |> fetch_opt!(:access_token) |> check_access_token() do
+      start_socket(opts, info, subscriber, token)
+    end
+  end
+
+  defp check_access_token(token) when is_binary(token), do: Auth.check_token(token)
+  defp check_access_token(_not_a_token), do: {:error, {:missing_credentials, :schwab}}
+
+  defp start_socket(opts, info, subscriber, token) do
     state = %{
       info: info,
       # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
@@ -278,8 +306,8 @@ defmodule DpExchange.Schwab.Socket do
       # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the
       # token for as long as the Streamer connection is up, and a WebSockex crash
       # prints its state via the same OTP crash report `Feed`'s does.
-      credentials: opts |> fetch_opt!(:access_token) |> Credentials.wrap_token(),
-      subscriber: fetch_opt!(opts, :subscriber),
+      credentials: Credentials.wrap_token(token),
+      subscriber: subscriber,
       # Optional `:tag`. When given, every payload reaches the subscriber wrapped as
       # `{:dp_exchange, :schwab, {:from_socket, tag, payload}}`, so a subscriber that replaces
       # sockets can tell a late message from a dead one apart from the current one's. Absent,
@@ -462,8 +490,15 @@ defmodule DpExchange.Schwab.Socket do
   """
   @spec update_access_token(pid(), String.t()) :: :ok | {:error, term()}
   def update_access_token(socket, access_token) when is_binary(access_token) do
-    VendoredWebSockex.cast(socket, {:update_access_token, access_token})
-    :ok
+    # Judged here, and WRAPPED before it is sent. A cast sits in the socket's mailbox until it
+    # is handled, and OTP prints a crashing process's mailbox in its crash report, so a bare
+    # string there is a token in a log. The wrapped struct prints redacted. A token that
+    # cannot travel as sent (blank, padded, a control byte, not UTF-8) is refused rather than
+    # stored for the next LOGIN, where encoding it would raise with the value in the message.
+    with {:ok, token} <- Auth.check_token(access_token) do
+      VendoredWebSockex.cast(socket, {:update_access_token, Credentials.wrap_token(token)})
+      :ok
+    end
   catch
     :exit, _reason -> {:error, :send_timeout}
   end
@@ -825,8 +860,18 @@ defmodule DpExchange.Schwab.Socket do
   end
 
   @impl true
-  def handle_cast({:update_access_token, access_token}, state),
-    do: {:ok, %{state | credentials: Credentials.wrap_token(access_token)}}
+  def handle_cast({:update_access_token, %Credentials{access_token: token}}, state)
+      when is_binary(token),
+      do: handle_cast({:update_access_token, token}, state)
+
+  # A bare token is wrapped on the way in. One that cannot travel as sent is dropped, and the
+  # token the next LOGIN presents stays what it was: storing it would make that LOGIN raise.
+  def handle_cast({:update_access_token, access_token}, state) when is_binary(access_token) do
+    case Auth.check_token(access_token) do
+      {:ok, token} -> {:ok, %{state | credentials: Credentials.wrap_token(token)}}
+      {:error, _unsendable} -> {:ok, state}
+    end
+  end
 
   # Held until LOGIN succeeds, not dropped — see the moduledoc's "A command sent before
   # LOGIN is held, not dropped" section. Validated now so a command that could never be

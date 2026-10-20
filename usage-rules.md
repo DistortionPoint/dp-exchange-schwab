@@ -426,6 +426,17 @@ atom other than `nil`, `true`, `false`). Anything else — a string, an integer,
 records nothing; symbols are judged first. Register a process and pass its pid. A feed itself
 may be registered under `{:global, _}` or `{:via, _, _}` and passed as `feed:`.
 
+**Two trees in one VM (two accounts) need only distinct `name:`s.** Start each tree with a
+different atom `name:` and its limiter, order record and feed are named from it
+(`Module.concat(name, RateLimiter)`, `OrderLimit`, `Feed`); pass the same `name:` to each
+facade call meant for that tree, and every call addresses that tree's processes. A tree started
+with no `name:` (or `nil`, which is silence) keeps the fixed names `DpExchange.Schwab.Supervisor`,
+`DpExchange.Schwab.RateLimiter`, `DpExchange.Schwab.OrderLimit` and `DpExchange.Schwab.Feed`,
+and an explicit `:feed`, `:limiter` or `:order_limit` always wins over the derived name. A
+`name:` that is not an atom (`{:global, _}`, `{:via, _, _}`) derives nothing: name the three
+yourself. Nothing else in the package is named or global per VM: the refresh guard's `:global`
+name is derived from the credential, so two accounts never contend.
+
 **If you hold a running feed (you called `subscribe/2` or started this package supervised),
 also call `DpExchange.Schwab.update_credentials/2` with the refreshed credential.** The
 Streamer is meant to stay up far longer than one 30-minute access token, and a feed's

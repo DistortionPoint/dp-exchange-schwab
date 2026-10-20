@@ -95,8 +95,9 @@ defmodule DpExchange.Schwab.Auth do
   credential with a spent one. So while one `refresh/2` of a refresh token is in flight, on
   this node or any node connected to it, another of the same token answers `{:error,
   {:refresh_in_progress, :schwab}}` **without sending anything**: a `:global` name registered
-  for the duration of the request (it carries a digest of the token, never the token, and is
-  unregistered however the caller exits). The loser holds a credential that is about to be
+  for the duration of the request (it carries an HMAC-SHA256 of the token keyed with the client
+  secret, never the token or a bare hash of it, so a name read off the cluster cannot confirm a
+  guessed token; it is unregistered however the caller exits). The loser holds a credential that is about to be
   spent; the move is to wait for the winner and read the credential the host stored, not to
   retry with this one.
 
@@ -459,7 +460,9 @@ defmodule DpExchange.Schwab.Auth do
     # The Basic client pair and the refresh token ride this request, so an overridden
     # `:token_url` that is not https is refused before anything is sent. See `check_secure_url/2`.
     with :ok <- check_secure_url(token_url(opts), opts) do
-      single_flight(refresh_token, opts, fn -> post_refresh(credentials, headers, body, opts) end)
+      single_flight(refresh_token, client_secret, opts, fn ->
+        post_refresh(credentials, headers, body, opts)
+      end)
     end
   end
 
@@ -477,11 +480,21 @@ defmodule DpExchange.Schwab.Auth do
   # caller's own process.
   #
   # The name carries a digest of the token, never the token: `:global.registered_names/0` and
-  # a crash report print names. `seam_scope/1` is `0` in production (no seam); in-process test
-  # seams (`:plug`, `:req_adapter`) scope the name to themselves so two async tests that happen
-  # to share a literal token do not refuse each other.
-  defp single_flight(refresh_token, opts, request) do
-    name = {:schwab_refresh, :erlang.md5(refresh_token), seam_scope(opts)}
+  # a crash report print names, and `:global` names are visible to every connected node.
+  #
+  # **The digest is keyed, and the key is the client secret.** A bare hash of a refresh token
+  # (this was MD5) lets anyone who can list the cluster's names confirm a guessed or leaked
+  # token by hashing it and looking for the name. HMAC-SHA256 keyed with the client secret
+  # (which no name carries and a name-reader does not hold) cannot be used that way, and it is
+  # the same on every node for the same credential, which is what makes the guard reach the
+  # connected nodes. A per-node random key would not: two nodes would derive two names for
+  # one token and both would send it.
+  #
+  # `seam_scope/1` is `0` in production (no seam); in-process test seams (`:plug`,
+  # `:req_adapter`) scope the name to themselves so two async tests that happen to share a
+  # literal token do not refuse each other.
+  defp single_flight(refresh_token, client_secret, opts, request) do
+    name = {:schwab_refresh, flight_digest(refresh_token, client_secret), seam_scope(opts)}
 
     case :global.register_name(name, self(), &:global.notify_all_name/3) do
       :yes ->
@@ -495,6 +508,9 @@ defmodule DpExchange.Schwab.Auth do
         {:error, {:refresh_in_progress, :schwab}}
     end
   end
+
+  defp flight_digest(refresh_token, client_secret),
+    do: :crypto.mac(:hmac, :sha256, client_secret, refresh_token)
 
   defp seam_scope(opts) do
     case {Config.opt(opts, :plug, nil), Config.opt(opts, :req_adapter, nil)} do

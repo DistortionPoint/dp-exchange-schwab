@@ -112,8 +112,16 @@ defmodule DpExchange.Schwab.Supervisor do
     # `Credentials`) would otherwise leave the raw map in this supervisor's init args, which
     # OTP prints with the supervisor's state if it ever terminates.
     opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
-    Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
   end
+
+  @doc """
+  The name this tree's supervisor is registered under: `opts[:name]`, or this module's own name
+  when it is absent. A forwarded `nil` is silence (as everywhere in this family), so it is the
+  default name too, never an unnamed supervisor.
+  """
+  @spec supervisor_name(keyword()) :: atom() | {:global, term()} | {:via, module(), term()}
+  def supervisor_name(opts), do: Config.opt(opts, :name, __MODULE__)
 
   @impl true
   def init(opts) do
@@ -135,11 +143,31 @@ defmodule DpExchange.Schwab.Supervisor do
 
   @doc "The limiter this venue meters against."
   @spec limiter_name(keyword()) :: atom()
-  def limiter_name(opts), do: Config.opt(opts, :limiter, DpExchange.Schwab.RateLimiter)
+  def limiter_name(opts), do: process_name(opts, :limiter, DpExchange.Schwab.RateLimiter)
+
+  # **Two trees in one VM need no more than two `name:`s.** An explicit `:limiter`, `:feed` or
+  # `:order_limit` wins. Otherwise a tree started with a non-default atom `name:` derives its
+  # processes' names from it (`Module.concat(name, Feed)`, `RateLimiter`, `OrderLimit`), and
+  # every facade call that addresses one resolves the same name from the `name:` it is given.
+  # The default tree (no `name:`, or this module's own name) keeps the fixed names it always
+  # had. A `name:` that is not an atom (`{:global, _}`, `{:via, _, _}`) cannot be extended and
+  # derives nothing.
+  defp process_name(opts, key, default) do
+    case Config.opt(opts, key, nil) do
+      nil -> derived_name(Config.opt(opts, :name, nil), default)
+      explicit -> explicit
+    end
+  end
+
+  defp derived_name(name, default)
+       when is_atom(name) and name not in [nil, true, false, __MODULE__],
+       do: Module.concat(name, default |> Module.split() |> List.last())
+
+  defp derived_name(_default_tree, default), do: default
 
   @doc "This venue's feed process."
   @spec feed_name(keyword()) :: atom()
-  def feed_name(opts), do: Config.opt(opts, :feed, Feed)
+  def feed_name(opts), do: process_name(opts, :feed, Feed)
 
   @doc """
   The process recording whether `:order_limit_per_minute` was stated — see `OrderLimit`.
@@ -148,7 +176,7 @@ defmodule DpExchange.Schwab.Supervisor do
   the limiter meters a number, this records whether that number was ever a real claim.
   """
   @spec order_limit_name(keyword()) :: atom()
-  def order_limit_name(opts), do: Config.opt(opts, :order_limit, OrderLimit)
+  def order_limit_name(opts), do: process_name(opts, :order_limit, OrderLimit)
 
   @doc """
   The limits this tree meters with.

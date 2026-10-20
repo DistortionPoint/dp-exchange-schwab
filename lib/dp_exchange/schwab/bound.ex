@@ -10,7 +10,9 @@ defmodule DpExchange.Schwab.Bound do
   venue in the family bounds such text the same way; this is that rule, in one place.
 
   - A binary is cut to #{2_048} bytes on a valid UTF-8 boundary and marked with its full
-    size, so a truncated value never reads as complete. A short binary comes out unchanged.
+    size, so a truncated value never reads as complete. A short binary comes out unchanged
+    in value, and as a copy of its own (see `text/1`), so it never pins the document it was
+    sliced from.
   - Any other term is rendered with `inspect(term, limit: 50, printable_limit: 2_048)`.
   - `reason/1` is the same for the reason terms of a disconnect or crash
     (`limit: 50, printable_limit: 1_024`).
@@ -26,7 +28,13 @@ defmodule DpExchange.Schwab.Bound do
   @spec text(term()) :: String.t() | nil
   def text(nil), do: nil
 
-  def text(value) when is_binary(value) and byte_size(value) <= @max_bytes, do: value
+  # **Copied, not returned as it came.** A string decoded out of a JSON document is a
+  # sub-binary that points INTO that document, so a 30-byte `detail` held the whole response
+  # body (up to the HTTP cap, megabytes) and a service name in a notice held the whole
+  # Streamer frame, for as long as anything held the error tuple or the notice. A copy of at
+  # most #{@max_bytes} bytes frees the document the moment it has been handled.
+  def text(value) when is_binary(value) and byte_size(value) <= @max_bytes,
+    do: :binary.copy(value)
 
   def text(value) when is_binary(value) do
     excerpt(binary_part(value, 0, @max_bytes), 3) <> "… (#{byte_size(value)} bytes)"

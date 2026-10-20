@@ -579,7 +579,9 @@ defmodule DpExchange.SchwabTest do
       assert Schwab.update_credentials(new_credentials, feed: name) == :ok
 
       assert_receive {:relayed_to_socket,
-                      {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
+                      {:"$websockex_cast",
+                       {:update_access_token,
+                        %DpExchange.Schwab.Credentials{access_token: "fresh-token"}}}},
                      5_000
     end
 

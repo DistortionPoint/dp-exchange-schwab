@@ -951,7 +951,9 @@ defmodule DpExchange.Schwab.FeedTest do
       assert Feed.update_credentials(feed, new_credentials) == :ok
 
       assert_receive {:relayed_to_socket,
-                      {:"$websockex_cast", {:update_access_token, "fresh-token"}}},
+                      {:"$websockex_cast",
+                       {:update_access_token,
+                        %DpExchange.Schwab.Credentials{access_token: "fresh-token"}}}},
                      5_000
     end
 
@@ -971,7 +973,10 @@ defmodule DpExchange.Schwab.FeedTest do
       # earlier unusable one would have arrived before it.
       assert Feed.update_credentials(feed, Map.put(credentials(), :access_token, "fresh")) == :ok
 
-      assert_receive {:relayed_to_socket, {:"$websockex_cast", {:update_access_token, "fresh"}}},
+      assert_receive {:relayed_to_socket,
+                      {:"$websockex_cast",
+                       {:update_access_token,
+                        %DpExchange.Schwab.Credentials{access_token: "fresh"}}}},
                      5_000
 
       refute_received {:relayed_to_socket, {:"$websockex_cast", {:update_access_token, "  "}}}

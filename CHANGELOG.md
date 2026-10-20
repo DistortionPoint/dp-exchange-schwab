@@ -31,6 +31,61 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Security
+
+- **The `:global` name that guards a refresh no longer carries an MD5 of the refresh token.**
+  `Auth.refresh/2` registered `{:schwab_refresh, md5(refresh_token), scope}`, and
+  `:global.registered_names/0` lists that to every connected node, so anyone able to read the
+  cluster's names could confirm a guessed or leaked refresh token by hashing it. The name now
+  carries `HMAC-SHA256(client_secret, refresh_token)`: it confirms nothing without the client
+  secret, which no name carries, and it is still identical on every node for the same credential,
+  which is what makes the guard reach the connected nodes (a per-node random key would give two
+  nodes two names for one token). Behaviour is otherwise unchanged: the second overlapping refresh
+  of a token still answers `{:error, {:refresh_in_progress, :schwab}}`, unsent.
+- **The Streamer access token is judged before the socket exists, and travels wrapped.**
+  `Socket.start_link/1` refuses a token that cannot be sent as it is (blank, padded, a control
+  byte, or not valid UTF-8) as `{:error, {:missing_credentials, :schwab}}` or `{:error,
+  {:invalid_credentials, :schwab}}`; a token that is not valid UTF-8 made the LOGIN's
+  `Jason.encode!/1` raise with the whole binary in the exception message. `update_access_token/2`
+  makes the same judgement and casts the token as a `Credentials` struct rather than a bare
+  string, because OTP prints a crashing process's mailbox in its crash report; a cast carrying a
+  token that fails the judgement is ignored and the token the next LOGIN presents stays as it
+  was. `Feed` already judged the token it pushed, so this closes the direct callers.
+
+### Fixed
+
+- **A string of 64 bytes or more cut out of a large document no longer keeps the whole document
+  alive.** A decoded JSON string of that size is a sub-binary that points into the response or
+  Streamer frame it came from (shorter ones are already copied by the runtime on OTP 27+).
+  `Bound.text/1` (the venue's `detail` and `message` in error tuples, and the `service` and
+  `symbol` text in notices) returned one as it came, so a long error detail held the whole
+  response body, and a notice held the whole many-row Streamer frame, for as long as anything
+  held the tuple or the notice. It now returns a copy. The same copy is made for an option
+  chain's contract text fields and its `underlying` and a position's `symbol`, venue text whose
+  length the package does not control.
+
+- `Feed`'s "Streamer still unreachable" debug line is built lazily, so the reason is no longer
+  inspected on every retry when debug logging is off.
+
+### Changed
+
+- **Two trees in one VM need only distinct `name:`s.** A tree started with a non-default atom
+  `name:` and no explicit `:feed`, `:limiter` or `:order_limit` now names those processes
+  `Module.concat(name, Feed)`, `RateLimiter` and `OrderLimit`; before, a second tree on the
+  defaults failed with `already_started` unless all four names were passed. The default tree
+  keeps its fixed names exactly, and an explicit name wins. Every facade function now accepts
+  `name:` (all of them address the limiter, the order record or the feed) and resolves the same
+  derived names from it; `Supervisor.limiter_name/1`, `feed_name/1` and `order_limit_name/1` do
+  the derivation. A `name:` that is not an atom derives nothing.
+- **A forwarded `name: nil` is the default name,** not an unnamed supervisor
+  (`Supervisor.start_link/1`, `Schwab.child_spec/1`). `Feed.start_link/1` keeps `name: nil` as
+  "start unnamed", the seam a standalone feed (and the test suite) uses.
+
+### Documentation
+
+- `usage-rules.md` states the two-tree rule above, and that the refresh guard needs nothing,
+  being derived from the credential.
+
 ## [0.2.145] - 2026-10-19
 
 ### Dependencies

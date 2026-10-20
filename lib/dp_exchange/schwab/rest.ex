@@ -1540,7 +1540,7 @@ defmodule DpExchange.Schwab.Rest do
   defp chain_underlying(nil, underlying), do: {:ok, underlying}
 
   defp chain_underlying(symbol, _underlying) when is_binary(symbol) and symbol != "",
-    do: {:ok, symbol}
+    do: {:ok, :binary.copy(symbol)}
 
   defp chain_underlying(_unreadable, _underlying), do: {:error, :unexpected_response_shape}
 
@@ -1658,7 +1658,11 @@ defmodule DpExchange.Schwab.Rest do
   # `OptionContract` types these three descriptive fields `String.t() | nil`. A number, an
   # object or a list in one of them is not text and is not carried as if it were: it is "not
   # stated", the same reading `boolean_or_nil/1` gives a flag that is not a boolean.
-  defp text_or_nil(value) when is_binary(value) and value != "", do: value
+  #
+  # **Copied out of the response.** A decoded string is a sub-binary that points into the body,
+  # and a chain body is megabytes: a consumer keeping one `OptionContract` (or one symbol of
+  # many) would otherwise keep the whole reply alive with it.
+  defp text_or_nil(value) when is_binary(value) and value != "", do: :binary.copy(value)
   defp text_or_nil(_other), do: nil
 
   # A multiplier, an underlying price: a positive finite number or "not stated". Zero or a
@@ -2099,7 +2103,8 @@ defmodule DpExchange.Schwab.Rest do
   # this family exists to refuse.
   defp build_position(row, instrument, side, quantity) do
     %Position{
-      symbol: instrument["symbol"],
+      # Copied out of the account body, which is larger than the position and not worth keeping.
+      symbol: :binary.copy(instrument["symbol"]),
       side: side,
       quantity: quantity,
       instrument_type: position_instrument(instrument["assetType"]),

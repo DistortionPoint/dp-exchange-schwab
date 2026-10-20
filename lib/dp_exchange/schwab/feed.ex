@@ -1606,10 +1606,11 @@ defmodule DpExchange.Schwab.Feed do
   # fallback still stands. Only `last_error` moves, so `status/1` and the next tick see the
   # latest reason.
   defp stay_on_poll(state, reason) do
-    Logger.debug(
+    # Lazy: the reason is inspected only if debug logging is on.
+    Logger.debug(fn ->
       "[Schwab Feed] Streamer still unreachable (#{Bound.reason(reason)}); staying on the " <>
         "fallback poll until the next attempt"
-    )
+    end)
 
     %{state | last_error: reason}
   end
