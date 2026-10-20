@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.147] - 2026-10-20
+
 ### Dependencies
 
 - **Requires `dp_exchange_core ~> 0.3.116`** (was `~> 0.3.114`). Its conformance groups
