@@ -139,7 +139,7 @@ defmodule DpExchange.Schwab.InvalidSubscriberTest do
       refute_received {:dp_exchange, :schwab, _any}
       assert Fake.subscribe_notices(to: self()) == :ok
       # The real feed sends nothing on registration, so neither does the fake.
-      refute_receive {:dp_exchange, :schwab, %DpExchange.Core.Notice{}}, 100
+      refute_receive {:dp_exchange, :schwab, %DpExchange.Core.Notice{}}, 500
     end
   end
 end

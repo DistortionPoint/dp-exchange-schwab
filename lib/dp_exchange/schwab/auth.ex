@@ -109,8 +109,13 @@ defmodule DpExchange.Schwab.Auth do
   `:reauthorization_required` that arrives while another refresh of the same credential was
   in flight as "re-read the stored credential", not as a dead grant.
 
+  **`refresh/2` runs in the caller's process, so a caller that dies or abandons it after the
+  request went out loses the rotated token with it** - nothing here can hand it back, because
+  storage is the host's. It is dated from the instant the request was sent, so `:expires_at`
+  can only run early.
+
   **An access token the credential itself says is expired is not sent.** `Rest` refuses a
-  credential whose `:expires_at` has passed with `{:error, {:credentials_expired, :schwab}}`
+  credential whose `:expires_at` has passed (or is within five seconds of passing) with `{:error, {:credentials_expired, :schwab}}`
   (`check_unexpired/1`), before any request and before a rate-limit slot is spent: the venue's
   answer would be a `401` the package already knows. A credential with no `:expires_at` is
   signed as ever, and a `401` from the venue is returned once as `{:refused, {:venue_error,
@@ -146,6 +151,12 @@ defmodule DpExchange.Schwab.Auth do
   # produces a 401 the caller cannot distinguish from a revoked grant, and the request
   # has already been sent by then.
   @refresh_margin_seconds 120
+
+  # The edge below which a token is not SENT at all (`check_unexpired/1`). Much smaller than
+  # the refresh margin: that one says "renew soon", this one says "this cannot arrive alive".
+  # Chosen, not measured: the venue states no clock-skew tolerance, and a request can spend
+  # a few seconds in the HTTP client's connect and retry path before it is signed off.
+  @expiry_skew_seconds 5
 
   @typedoc """
   What the host supplies.
@@ -231,8 +242,9 @@ defmodule DpExchange.Schwab.Auth do
 
   @doc """
   Whether `credentials` still holds a usable access token by its own `:expires_at`: `:ok`, or
-  `{:error, {:credentials_expired, :schwab}}` when `:expires_at` is a `DateTime` that is now or
-  past.
+  `{:error, {:credentials_expired, :schwab}}` when `:expires_at` is a `DateTime` that is past or
+  within #{@expiry_skew_seconds} seconds of now (see `check_unexpired_at/2`: the skew makes a
+  token count as dead slightly early, never late).
 
   **Absent is not expired** (the same rule as `needs_refresh?/2`): a credential with no
   `:expires_at`, or one that is not a `DateTime`, is `:ok` and is judged by the venue. This is
@@ -243,12 +255,27 @@ defmodule DpExchange.Schwab.Auth do
   """
   @spec check_unexpired(term()) :: :ok | {:error, {:credentials_expired, :schwab}}
   def check_unexpired(%{expires_at: %DateTime{} = expires_at}) do
-    if DateTime.compare(expires_at, DateTime.utc_now()) == :gt,
-      do: :ok,
-      else: {:error, {:credentials_expired, :schwab}}
+    check_unexpired_at(expires_at, DateTime.utc_now())
   end
 
   def check_unexpired(_no_expiry), do: :ok
+
+  @doc """
+  `check_unexpired/1` against an explicit `now`, so the skew edge can be tested without a clock.
+
+  `{:error, {:credentials_expired, :schwab}}` when `expires_at` is within
+  #{@expiry_skew_seconds} seconds of `now` or past it, else `:ok`. The skew runs toward
+  **earlier**: a token with two seconds left is spent before the request reaches the venue,
+  and the venue's clock is not ours, so it is treated as already dead rather than sent to be
+  answered `401`.
+  """
+  @spec check_unexpired_at(DateTime.t(), DateTime.t()) ::
+          :ok | {:error, {:credentials_expired, :schwab}}
+  def check_unexpired_at(%DateTime{} = expires_at, %DateTime{} = now) do
+    if DateTime.diff(expires_at, now, :second) > @expiry_skew_seconds,
+      do: :ok,
+      else: {:error, {:credentials_expired, :schwab}}
+  end
 
   @doc """
   Whether a request carrying a credential may go to `url`.
@@ -308,7 +335,9 @@ defmodule DpExchange.Schwab.Auth do
   Exchange a refresh token for a new access token.
 
   Returns `{:ok, credentials}` carrying **both** new tokens plus an `:expires_at` derived
-  from the venue's own `expires_in`, merged over whatever the caller passed in so the
+  from the venue's own `expires_in` and dated from the instant the request was **sent**
+  (never from when the reply was read, which would credit the token with the round trip),
+  merged over whatever the caller passed in so the
   host's own bookkeeping survives the round trip.
 
   **The caller must persist the result before using it.** The refresh token passed in has
@@ -520,10 +549,19 @@ defmodule DpExchange.Schwab.Auth do
   end
 
   defp post_refresh(credentials, headers, body, opts) do
+    # **The expiry is dated from BEFORE the request goes out, not from when the answer is read.**
+    # The venue mints the access token while it handles the request, so its 30 minutes begin
+    # somewhere between the send and the reply. Dating from the reply (this used to read the
+    # clock after the response had arrived) added the whole round trip - up to the HTTP timeout
+    # on a slow venue - to a lifetime the token does not have, which is the unsafe direction:
+    # `expires_at` ran late, `check_unexpired/1` and `needs_refresh?/2` kept saying "fine", and
+    # the first sign was a `401`. Dated from the send, `expires_at` can only run early.
+    requested_at = Config.opt(opts, :now, nil) || DateTime.utc_now()
+
     case HttpClient.request(:post, token_url(opts), headers, body, request_opts(opts)) do
       {:ok, %{status: status, body: response}} when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(response),
-             do: merge_tokens(credentials, decoded, opts)
+             do: merge_tokens(credentials, decoded, requested_at)
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
         refused_refresh(status, refusal_body(response))
@@ -565,24 +603,24 @@ defmodule DpExchange.Schwab.Auth do
   # refresh had worked, then every request failed locally in `headers/2`. The same
   # `check_token/1` every other credential path uses judges it here; a token that fails it
   # is a malformed response, not a grant to keep.
-  defp merge_tokens(credentials, %{"access_token" => access} = response, opts)
+  defp merge_tokens(credentials, %{"access_token" => access} = response, requested_at)
        when is_binary(access) do
     case check_token(access) do
-      {:ok, access} -> merge_checked_tokens(credentials, access, response, opts)
+      {:ok, access} -> merge_checked_tokens(credentials, access, response, requested_at)
       {:error, _unusable} -> {:error, :unexpected_response_shape}
     end
   end
 
-  defp merge_tokens(_credentials, _response, _opts), do: {:error, :unexpected_response_shape}
+  defp merge_tokens(_credentials, _response, _requested_at),
+    do: {:error, :unexpected_response_shape}
 
-  defp merge_checked_tokens(credentials, access, response, opts) do
-    # `check_now/1` has already refused anything but a `DateTime` or an absent value, before
-    # the request: a `nil` forwarded here is silence, not a clock of `nil`.
-    now = Config.opt(opts, :now, nil) || DateTime.utc_now()
-
+  # `requested_at` is the instant the request was sent (see `post_refresh/4`): `check_now/1`
+  # has already refused anything but a `DateTime` or an absent value, before the request, so a
+  # forwarded `nil` was silence and the clock was read.
+  defp merge_checked_tokens(credentials, access, response, requested_at) do
     renewed =
       %{access_token: access}
-      |> put_expiry(response["expires_in"], now)
+      |> put_expiry(response["expires_in"], requested_at)
       |> put_rotated_refresh(response["refresh_token"])
 
     # The old `:expires_at` goes with the old token. Merged over, a response with no expiry

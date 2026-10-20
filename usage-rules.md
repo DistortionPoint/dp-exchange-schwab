@@ -114,7 +114,8 @@ lists only equities that quote a book, so it never answers it.
 Streamer), `:route_crashed`, `:poller_unresponsive`, `:streamer_unreachable` (`:degraded`,
 with `fallback: :internal_poll`), `:login_rejected`, `:command_rejected`,
 `:subscription_not_sent`, `:held_commands_full`, `:delayed_quotes_withheld`,
-`:frame_unreadable`, `:login_unanswered`, `:silent_connection`, and the frame-level
+`:frame_unreadable`, `:login_unanswered`, `:silent_connection`, `:credentials_expiring` and
+`:credentials_expired` (kind `:credentials_expiring`, see section 3), and the frame-level
 `:unparseable_frame`, `:unrecognised_frame` and `:unrecognised_notify`. Code that matched the
 old free-text `details.reason` string must read `details.message`.
 
@@ -317,7 +318,11 @@ throttled order write) is spent: the answer would only have been a `401`. The re
 `refresh_credentials/2`. A credential with no `:expires_at` is signed as ever, and the venue
 judges it: a `401` comes back once as `{:refused, {:venue_error, 401, _}}` and **nothing in this
 package refreshes, retries or loops on it** - that is your call (`credential_failure?/1`, above).
-A token inside the refresh margin is still sent; `needs_refresh?/2` is where you renew early.
+"Passed" includes the last five seconds: a token with five seconds or less left is refused too,
+because it cannot reach the venue alive and the venue's clock is not yours. A token inside the
+refresh margin (120 seconds) but beyond that is still sent; `needs_refresh?/2` is where you
+renew early. A refreshed credential's `:expires_at` is dated from the instant the refresh
+request was **sent**, not when the reply was read, so it can only run early.
 `DpExchange.Schwab.Fake` refuses an expired credential the same way, and
 `Fake.refresh_credentials/2` dates its new token from the real clock (or `opts[:now]`), so the
 credential it returns is one the fake serves.
@@ -355,6 +360,28 @@ retries the same rejected credential until you replace it, so a host that ignore
 has a feed that reconnects forever and never logs in. This also covers what
 `needs_refresh?/2` structurally cannot: a token the venue stops accepting *early* — revoked,
 or rotated by something else — which no clock check can predict.
+
+**A running feed tells you its token is dying, before the reconnect that needs it.** The venue
+checks the access token at LOGIN only, so a Streamer session that is up keeps running on a token
+that lapsed; the denial would arrive at the next reconnect. Every minute the feed compares the
+credential's own `:expires_at` with the clock and emits, once per credential generation
+(`update_credentials/2` re-arms it):
+
+```elixir
+%DpExchange.Core.Notice{kind: :credentials_expiring, details: %{reason: :credentials_expiring}}
+%DpExchange.Core.Notice{kind: :credentials_expiring, details: %{reason: :credentials_expired}}
+```
+
+the first when the token is inside the refresh margin, the second (`severity: :error`) once it
+has lapsed. A credential with no `:expires_at` says nothing. Treat both as "refresh now". This
+package still never refreshes for you. (That the venue checks the token at LOGIN only is read
+from its response text, `Login Denied.: token is invalid or has expired`; whether it also
+severs a live session at expiry is not documented and not measured.)
+
+**`refresh_credentials/2` runs in the calling process.** A caller that is killed, or abandons
+the call after the request went out, loses the rotated refresh token with it - there is nothing
+in this package that can hand it back, because storage is yours. Do not wrap it in a timeout
+shorter than the HTTP timeout, and run it from a process you do not kill mid-flight.
 
 **A login refused for a non-credential reason stays `:degraded`, deliberately.** The vendor's
 response-code table answers `3 LOGIN_DENIED` with *"reconnect and re-login with new token"*,
@@ -1231,13 +1258,22 @@ caps.measured_against  # what they checked: which documents, which endpoints, li
 
 **`measured_against` is the one that matters when you are deciding how much to trust a
 claim.** It distinguishes a figure measured live against the venue's API from one read off a
-documentation page and never probed — and this package's own declarations contain both
-kinds, stated per claim rather than as one blanket sentence.
+documentation page and never probed. This package's declaration contains only the second kind,
+and says so (see below).
 
 A claim read from documentation is not worse, it is *different*: it is what the vendor says
 it will do, which is the right basis for a ceiling you must not exceed and a weaker basis for
 behaviour you are about to depend on. If your decision turns on the difference, read the
 field rather than assuming.
+
+**For this package the answer is uniform: every claim is documented-only.** Nothing here was
+measured against the live venue (no sandbox exists and the repository holds no credential); the
+one live observation on record is an unauthenticated `401` from `/marketdata/v1/quotes` on
+2026-08-28, which confirms the base URL and path shape and nothing else. `measured_at` is the
+date the committed documents were read, not a probe date. Numbers in the code that are neither
+from those documents nor measured (the 5-second expiry skew, the 120-second refresh margin, the
+10-second stable-session threshold, the 30-second LOGIN deadline)
+are labelled "chosen" beside their definition.
 
 `measured_at` going stale is a real thing that happens — venues change, and a declaration is
 a claim about a real venue. `script/check_doc_sources.sh` reports the age on its weekly run

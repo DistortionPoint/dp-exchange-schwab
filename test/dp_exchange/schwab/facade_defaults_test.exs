@@ -47,9 +47,11 @@ defmodule DpExchange.Schwab.FacadeDefaultsTest do
     end
 
     test "the reads that judge their arguments first still refuse without a request" do
-      assert {:error, _reason} = Schwab.get_all_orders(%{})
-      assert {:error, _reason} = Schwab.get_symbol_quote("AAPL", %{})
-      assert {:error, _reason} = Schwab.get_market("equity", %{})
+      # Named, not "any error": with no plug a request that did leave would also answer an error
+      # (a transport failure), so only the specific local refusal proves nothing was sent.
+      assert Schwab.get_all_orders(%{}) == {:error, {:from_and_to_required, :schwab}}
+      assert Schwab.get_symbol_quote("AAPL", %{}) == {:error, {:missing_credentials, :schwab}}
+      assert Schwab.get_market("equity", %{}) == {:error, {:missing_credentials, :schwab}}
     end
   end
 end

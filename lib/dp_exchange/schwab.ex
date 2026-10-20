@@ -77,7 +77,7 @@ defmodule DpExchange.Schwab do
   of a refresh must be persisted by the host** — treat the refresh token as one-time use
   (this package's safe assumption; no committed vendor document states it, see `Auth`), so
   the one returned is the only way to refresh again. A credential whose `:expires_at` has
-  passed is refused before anything is sent (`{:error, {:credentials_expired, :schwab}}`);
+  passed (or is within five seconds of passing) is refused before anything is sent (`{:error, {:credentials_expired, :schwab}}`);
   one with no `:expires_at` is judged by the venue, and nothing here refreshes or retries on
   a `401` for you.
 
@@ -854,6 +854,11 @@ defmodule DpExchange.Schwab do
     cannot fix its own token, so it backs off and retries the same rejected credential
     until `refresh_credentials/2` and `update_credentials/2` replace it. See
     `usage-rules.md` §3.
+  - `:credentials_expiring`, from `DpExchange.Schwab.Feed`, once per credential generation:
+    `details.reason: :credentials_expiring` when the access token is inside the refresh
+    margin, `:credentials_expired` (`severity: :error`) once it has lapsed. The venue checks
+    the token at LOGIN only, so a live session otherwise learns nothing until a reconnect.
+    Treat it as "refresh now". `DpExchange.Schwab.Fake` emits no notices.
   - `:link_up` and `:link_down`, from `DpExchange.Schwab.Socket`, as a session is
     established and lost. `:link_up` follows the *login* response, not merely a reconnected
     socket.

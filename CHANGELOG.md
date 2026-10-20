@@ -31,6 +31,63 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refreshed token's `:expires_at` is dated from when the request was sent, not when the
+  reply was read.** `Auth.refresh/2` read the clock after the response had arrived, crediting the
+  token with the whole round trip (up to the HTTP timeout on a slow venue): `:expires_at` ran
+  late, the unsafe direction, so `check_unexpired/1` and `needs_refresh?/2` kept saying "fine"
+  and the first sign was a `401`. Dated from the send it can only run early. `opts[:now]` is
+  unchanged. Tested in `tick_ap_time_test.exs` with a plug that records when the venue saw the
+  request and answers slowly.
+- **`Auth.check_unexpired/1` has a five-second skew toward earlier.** A token with five seconds
+  or less left is refused locally (`{:error, {:credentials_expired, :schwab}}`) instead of sent
+  to arrive dead or be answered `401`; the edge was exactly "now". New
+  `Auth.check_unexpired_at/2` takes the clock so the edge is testable. The 120-second refresh
+  margin (`needs_refresh?/2`) is unchanged.
+- **A feed that outlives its access token now says so.** The venue checks the token at LOGIN
+  only, so a live Streamer session keeps running on a lapsed token and the first sign was a
+  denied LOGIN on the next reconnect, possibly hours later. The feed's minute tick now compares
+  the credential's own `:expires_at` with the clock and emits a `:credentials_expiring` notice
+  (`details.reason: :credentials_expiring` inside the refresh margin, `:credentials_expired`
+  with `severity: :error` once lapsed), once per credential generation; `update_credentials/2`
+  re-arms it. A credential with no `:expires_at` says nothing. The package still never
+  refreshes by itself.
+- `Feed` records a delivery's arrival mark on the monotonic clock, not the wall clock (the value
+  is only compared with other marks, and a stepped wall clock would reorder them).
+
+### Documentation
+
+- `Auth`'s moduledoc, `usage-rules.md` and the facade now state that `refresh/2` runs in the
+  caller's process (a caller killed after the request went out loses the rotated refresh token,
+  and nothing in the package can hand it back), the five-second skew, and the new notice.
+- **`usage-rules.md` said this package's declarations contain both measured and documented-only
+  claims, "stated per claim".** They are all documented-only, in one blanket `measured_against`
+  sentence (the one live observation is an unauthenticated `401`). It now says so, and lists the
+  chosen (neither documented nor measured) numbers. The notice-reason list gains
+  `:credentials_expiring` and `:credentials_expired`; `subscribe_notices/1`'s doc names the new kind.
+
+### Tests
+
+- `feed_test.exs` "subscribing is what actually dials": the `refute_received` before the first
+  subscribe ran with no fence, so a dial still queued behind `init/1` could not have failed it; a
+  `Feed.status/1` call now fences it.
+- `market_data_review_test.exs` "every listed value is sent" asserted only `{:ok, _}` from a plug
+  that answers anything, so a dropped `sort`/`frequency` passed; it now reads the query the venue
+  received.
+- The new notice is checked against Core's `Notice.conformance_faults/1`, and the Fake's
+  agreement on the expiry edge is pinned.
+- `feed_test.exs` "a blank or padded token is kept out of the socket's LOGIN": its two
+  `refute_received` were shaped on a bare string, but the cast carries a `Credentials` struct, so
+  they could never match and could never fail; they now match the struct and the unusable tokens.
+- `socket_test.exs` "an unrelated message is ignored" now pins the state as unchanged rather than
+  accepting any `{:ok, _}`.
+- `facade_defaults_test.exs` asserts the exact local refusals instead of any error;
+  `path_and_window_test.exs` asserts `{:unknown_transaction_types, [type]}` for a bad type.
+- `invalid_subscriber_test.exs` and `argument_order_test.exs`: the `refute_receive` windows guarding
+  a negative are raised to 500 ms. `fake_injection_test.exs`: two `assert_receive` margins raised
+  to 5000 ms.
+
 ## [0.2.146] - 2026-10-20
 
 ### Dependencies

@@ -1165,7 +1165,7 @@ defmodule DpExchange.Schwab.Feed do
       report_reassert(apply_symbols(state), state)
     end
 
-    {:noreply, state}
+    {:noreply, check_credentials_expiry(state)}
   end
 
   # The live socket reconnected and its new LOGIN succeeded, so the venue carries nothing
@@ -1187,7 +1187,7 @@ defmodule DpExchange.Schwab.Feed do
 
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
-    {:noreply, maybe_upgrade(state, :tick)}
+    {:noreply, state |> check_credentials_expiry() |> maybe_upgrade(:tick)}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -1266,6 +1266,59 @@ defmodule DpExchange.Schwab.Feed do
     end
 
     :ok
+  end
+
+  # **A long-lived feed outlives its access token, and says so.** The token lives 30 minutes;
+  # a Streamer session is meant to stay up for days. The venue checks the token at LOGIN only
+  # (`3 Login Denied: token is invalid or has expired`), so a session that is up keeps running,
+  # and the first sign of a lapsed token used to be the NEXT reconnect's `LOGIN_DENIED`, or a
+  # poll turning into `credentials_expired` refusals - possibly hours after the token died,
+  # with nothing said in between. This package does not refresh on its own (the host owns
+  # the refresh token's storage), so what it can do is tell the host while there is still
+  # time: each tick compares the credential's own `:expires_at` with the clock and raises one
+  # `:credentials_expiring` notice when the token is inside the refresh margin, and one more
+  # when it has lapsed. Latched per credential generation: `update_credentials/2` re-arms it.
+  # A credential with no `:expires_at` says nothing, as `Auth.needs_refresh?/2` does.
+  defp check_credentials_expiry(state) do
+    level = credentials_expiry_level(state.credentials)
+    key = {state.credentials_generation, level}
+
+    if is_nil(level) or Map.get(state, :expiry_reported) == key do
+      state
+    else
+      notify(state, credentials_expiry_notice(level, state.credentials))
+      Map.put(state, :expiry_reported, key)
+    end
+  end
+
+  defp credentials_expiry_level(credentials) do
+    cond do
+      match?({:error, _expired}, Auth.check_unexpired(credentials)) -> :expired
+      Auth.needs_refresh?(credentials) -> :expiring
+      true -> nil
+    end
+  end
+
+  defp credentials_expiry_notice(:expired, _credentials) do
+    Notice.new(:credentials_expiring, :schwab,
+      severity: :error,
+      message:
+        "the access token has expired - the next reconnect's LOGIN will be denied until the " <>
+          "host refreshes and calls update_credentials/2",
+      details: %{reason: :credentials_expired}
+    )
+  end
+
+  defp credentials_expiry_notice(:expiring, %{expires_at: %DateTime{} = expires_at}) do
+    Notice.new(:credentials_expiring, :schwab,
+      message:
+        "the access token expires soon - refresh it and call update_credentials/2 before the " <>
+          "next reconnect needs it",
+      details: %{
+        reason: :credentials_expiring,
+        expires_in_s: DateTime.diff(expires_at, DateTime.utc_now(), :second)
+      }
+    )
   end
 
   # `apply_symbols/1`'s answer was discarded here. It returns `:ok`, `{:error, :no_route}`,
@@ -2245,7 +2298,9 @@ defmodule DpExchange.Schwab.Feed do
   defp record_delivery(state, %{symbol: symbol} = value) when is_binary(symbol) do
     state = %{
       state
-      | delivering: Map.put(state.delivering, symbol, :os.system_time(:millisecond))
+      | # Monotonic: this is an arrival mark to be compared with other marks, never a calendar
+        # time, and a wall clock that steps would reorder them. Only its presence is read today.
+        delivering: Map.put(state.delivering, symbol, System.monotonic_time(:millisecond))
     }
 
     record_kind(state, symbol, value)

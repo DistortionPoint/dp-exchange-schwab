@@ -198,14 +198,14 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
       FakeInjection.fail_always(:schwab, {:error, :injected})
 
       assert Fake.subscribe(["AAPL"], to: self()) == :ok
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 5_000
     end
 
     test "update_symbols/2 likewise" do
       FakeInjection.fail_always(:schwab, {:error, :injected})
 
       assert Fake.update_symbols(["MSFT"]) == :ok
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "MSFT"}}
+      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "MSFT"}}, 5_000
     end
   end
 

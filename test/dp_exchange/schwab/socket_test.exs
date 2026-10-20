@@ -87,7 +87,8 @@ defmodule DpExchange.Schwab.SocketTest do
     end
 
     test "an unrelated message is ignored" do
-      assert {:ok, _state} = Socket.handle_info(:tick, state())
+      unchanged = state()
+      assert {:ok, ^unchanged} = Socket.handle_info(:tick, unchanged)
     end
   end
 

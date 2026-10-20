@@ -224,7 +224,9 @@ defmodule DpExchange.Schwab.PathAndWindowTest do
 
     test "a transaction type outside TransactionType is refused before any request" do
       for type <- ["trade", :TRADE, "ALL", ""] do
-        assert {:error, _reason} =
+        # The named refusal, not "any error": a request that did go out would also end in an
+        # error tuple, and only this reason proves the type was judged locally.
+        assert {:error, {:unknown_transaction_types, [^type]}} =
                  Rest.get_transactions(
                    @creds,
                    "HASH",

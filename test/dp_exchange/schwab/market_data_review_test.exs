@@ -310,9 +310,14 @@ defmodule DpExchange.Schwab.MarketDataReviewTest do
                  Rest.get_movers("NASDAQ", @creds,
                    sort: sort,
                    frequency: freq,
-                   plug: responding(%{"screeners" => []}),
+                   plug: capturing(%{"screeners" => []}),
                    retry_attempts: 0
                  )
+
+        # "Sent" is the claim: the value reaches the venue in the query, not only past the check.
+        assert_receive {:request, _path, query}, 5_000
+        assert %{"sort" => ^sort, "frequency" => frequency} = URI.decode_query(query)
+        assert frequency == Integer.to_string(freq)
       end
     end
 

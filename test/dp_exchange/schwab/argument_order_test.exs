@@ -95,7 +95,7 @@ defmodule DpExchange.Schwab.ArgumentOrderTest do
       assert state.route == nil
       assert state.route_bootstrap == nil
       assert state.socket == nil
-      refute_receive {:bootstrap_request, _path}, 200
+      refute_receive {:bootstrap_request, _path}, 500
     end
   end
 

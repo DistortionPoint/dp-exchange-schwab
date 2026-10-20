@@ -303,6 +303,10 @@ defmodule DpExchange.Schwab.FeedTest do
       end
 
       feed = start_feed(plug: plug, retry_attempts: 0)
+
+      # A synchronous call is the fence: without it the negative below is checked before
+      # anything queued behind `init/1` has run, and could not fail.
+      assert %{route: nil} = Feed.status(feed)
       refute_received :venue_call
 
       :ok = Feed.subscribe(feed, ["AAPL"])
@@ -773,12 +777,15 @@ defmodule DpExchange.Schwab.FeedTest do
 
       :ok = Feed.subscribe(feed, ["AAPL"])
       assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded}}, 5_000
+      poller = :sys.get_state(feed).poller
 
       send(feed, :resubscribe)
       Feed.coverage(feed)
 
+      # The tick neither replaces the poller nor re-plans its symbols: both stay as they were.
       assert %{route: :internal_poll} = Feed.status(feed)
-      assert Process.alive?(feed)
+      assert :sys.get_state(feed).poller == poller
+      assert Feed.wanted(feed) == ["AAPL"]
     end
   end
 
@@ -979,10 +986,16 @@ defmodule DpExchange.Schwab.FeedTest do
                         %DpExchange.Schwab.Credentials{access_token: "fresh"}}}},
                      5_000
 
-      refute_received {:relayed_to_socket, {:"$websockex_cast", {:update_access_token, "  "}}}
+      # The cast carries a `Credentials` struct, never a bare string, so a refute shaped on the
+      # string could not match anything and could not fail. Match the struct, and the tokens.
+      refute_received {:relayed_to_socket,
+                       {:"$websockex_cast",
+                        {:update_access_token, %DpExchange.Schwab.Credentials{access_token: "  "}}}}
 
       refute_received {:relayed_to_socket,
-                       {:"$websockex_cast", {:update_access_token, " padded-token "}}}
+                       {:"$websockex_cast",
+                        {:update_access_token,
+                         %DpExchange.Schwab.Credentials{access_token: " padded-token "}}}}
     end
 
     test "a route with no live socket (the poll route) is not sent anything, and does not crash" do
