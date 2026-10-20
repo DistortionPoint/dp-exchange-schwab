@@ -300,7 +300,17 @@ defmodule DpExchange.Schwab.Feed do
 
   alias DpExchange.Core.{Config, Fanout, Notice, PollingFeed, Telemetry}
   alias DpExchange.Core.Types.{Candle, Quote, TopOfBook}
-  alias DpExchange.Schwab.{Auth, Bound, Credentials, Rest, Socket, StreamerInfo, SymbolFormat}
+
+  alias DpExchange.Schwab.{
+    Auth,
+    Bound,
+    Credentials,
+    Ledger,
+    Rest,
+    Socket,
+    StreamerInfo,
+    SymbolFormat
+  }
 
   require Logger
 
@@ -752,7 +762,10 @@ defmodule DpExchange.Schwab.Feed do
       # reading `delivering`'s shape had to change to add this.
       kinds: %{},
       last_error: nil,
-      config_snapshot: snapshot
+      config_snapshot: snapshot,
+      # The per-tree `Ledger` holding this feed's durable intent, or `nil` for a feed started
+      # alone. See `restore_intent/2`.
+      ledger: Config.opt(opts, :ledger, nil)
     }
 
     # No `{:continue, :connect}` — this process dials nothing until the first
@@ -760,7 +773,25 @@ defmodule DpExchange.Schwab.Feed do
     # the moduledoc's "A consumer that never subscribes must not find a socket open"
     # section for why an eager dial here used to happen anyway, and what depended on it
     # (nothing did).
-    {:ok, state}
+    #
+    # The one continue is `:restore`, and it reads a local ledger rather than the network, so
+    # it never dials: it only re-establishes what consumers had already asked for. A feed with
+    # no ledger has nothing to restore.
+    if state.ledger, do: {:ok, state, {:continue, :restore}}, else: {:ok, state}
+  end
+
+  # **A restarted feed picks up where the crashed one was.** A crash restarted this process from
+  # the supervisor's static start options, so every consumer's `subscribe/2`, `wanted`, notice
+  # registration and the credential pushed by `update_credentials/2` were gone, and nobody was
+  # told: consumers sat subscribed to a feed that remembered none of them. Every ACCEPTED change
+  # is now written to the tree's `Ledger` (never a refused one), and the restarted feed reads it
+  # back here, not in `init/1`, so the supervisor is not held up.
+  @impl true
+  def handle_continue(:restore, state) do
+    case Ledger.fetch(state.ledger) do
+      %{} = intent -> {:noreply, restore_intent(state, intent)}
+      _nothing_remembered -> {:noreply, state}
+    end
   end
 
   @impl true
@@ -795,7 +826,7 @@ defmodule DpExchange.Schwab.Feed do
           wanted: MapSet.union(state.wanted, MapSet.new(symbols))
       }
 
-      settle_route(state, from)
+      settle_route(remember(state), from)
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
@@ -892,7 +923,7 @@ defmodule DpExchange.Schwab.Feed do
             monitors: Fanout.watch(subscriber, state.monitors)
         }
 
-        {:reply, :ok, state}
+        {:reply, :ok, remember(state)}
 
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -909,7 +940,7 @@ defmodule DpExchange.Schwab.Feed do
     }
 
     true = :ets.insert(state.credentials_cell, {:credentials, state.credentials})
-    {:reply, :ok, maybe_upgrade(state, :credentials_changed)}
+    {:reply, :ok, state |> remember() |> maybe_upgrade(:credentials_changed)}
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
@@ -1031,6 +1062,8 @@ defmodule DpExchange.Schwab.Feed do
         notice_subscribers: MapSet.delete(state.notice_subscribers, pid),
         monitors: Fanout.forget(pid, state.monitors)
     }
+
+    state = remember(state)
 
     if was_data_subscriber? and MapSet.size(state.subscribers) == 0 do
       {:noreply, release_subscribed_symbols(state)}
@@ -2001,7 +2034,7 @@ defmodule DpExchange.Schwab.Feed do
     # here told a consumer that unsubscribed before ever subscribing that its call had
     # been refused.
     reply = if state.route == nil, do: :ok, else: apply_symbols(state)
-    {reply, state}
+    {reply, remember(state)}
   end
 
   defp release_subscribed_symbols(state) do
@@ -2041,7 +2074,104 @@ defmodule DpExchange.Schwab.Feed do
         kinds: Map.take(state.kinds, symbols)
     }
 
-    settle_route(state, from)
+    settle_route(remember(state), from)
+  end
+
+  # Writes the durable intent to the tree's ledger: what consumers asked for, who is listening,
+  # and the credential in force. Called only after a change was ACCEPTED, so a refused call
+  # leaves the ledger as it was. A cast: a ledger that is gone costs the next restart its
+  # memory, never this feed its reply. The credential stays inside its redacting struct.
+  defp remember(state) do
+    case Map.get(state, :ledger) do
+      nil ->
+        state
+
+      ledger ->
+        Ledger.put(ledger, %{
+          wanted: MapSet.to_list(state.wanted),
+          subscribers: MapSet.to_list(state.subscribers),
+          notice_subscribers: MapSet.to_list(state.notice_subscribers),
+          credentials: state.credentials
+        })
+
+        state
+    end
+  end
+
+  # What a restarted feed takes back from the ledger: the wanted set, the subscribers
+  # (re-monitored, and dropped if dead), and the credential last pushed in. A route is then
+  # dialled for the wanted set, and every subscriber is told with the family's
+  # `:coverage_change` notice (`reason: :feed_restarted`, `symbols`) that its coverage was
+  # reset. The link_down/link_up telemetry pairing is kept: the `:link_up` that follows once
+  # the route delivers again closes it.
+  defp restore_intent(state, intent) do
+    subscribers = intent |> Map.get(:subscribers, []) |> live_subscribers()
+    notice_subscribers = intent |> Map.get(:notice_subscribers, []) |> live_subscribers()
+
+    wanted = MapSet.new(Map.get(intent, :wanted, []))
+    watched = Enum.reduce(subscribers ++ notice_subscribers, state.monitors, &Fanout.watch/2)
+
+    restored = %{
+      state
+      | wanted: MapSet.union(state.wanted, wanted),
+        subscribers: MapSet.union(state.subscribers, MapSet.new(subscribers)),
+        notice_subscribers:
+          MapSet.union(state.notice_subscribers, MapSet.new(notice_subscribers)),
+        monitors: watched
+    }
+
+    restored
+    |> restore_credentials(Map.get(intent, :credentials))
+    |> redial_restored()
+  end
+
+  defp restore_credentials(state, %Credentials{} = credentials) do
+    true = :ets.insert(state.credentials_cell, {:credentials, credentials})
+    %{state | credentials: credentials}
+  end
+
+  defp restore_credentials(state, _none), do: state
+
+  defp live_subscribers(subscribers) do
+    Enum.filter(subscribers, fn
+      pid when is_pid(pid) -> node(pid) == node() and Process.alive?(pid)
+      name -> is_atom(name)
+    end)
+  end
+
+  defp redial_restored(state) do
+    if MapSet.size(state.wanted) == 0 do
+      state
+    else
+      state |> announce_restart() |> dial_restored()
+    end
+  end
+
+  # A socket handed in at start (the injection seam) IS the route, as in `settle_route/2`.
+  defp dial_restored(%{socket: socket} = state) when is_pid(socket) do
+    state = %{state | route: :stream}
+    apply_symbols(state)
+    state
+  end
+
+  defp dial_restored(state), do: start_route_bootstrap(state, [])
+
+  defp announce_restart(state) do
+    notify(
+      state,
+      Notice.new(:coverage_change, :schwab,
+        severity: :warning,
+        message: "feed restarted — subscriptions restored, reconnecting",
+        details: %{
+          reason: :feed_restarted,
+          symbols: Enum.sort(state.wanted),
+          symbol_count: MapSet.size(state.wanted),
+          message: "the feed process restarted; its wanted symbols were restored"
+        }
+      )
+    )
+
+    emit_link_down(%{state | link_down_open: true}, :feed_restarted)
   end
 
   # **The wanted set holds the spelling the venue delivers under.** `validate/1` trims and

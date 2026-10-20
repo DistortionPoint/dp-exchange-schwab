@@ -67,6 +67,20 @@ an acceptable changelog line.
 - `Feed`'s "Streamer still unreachable" debug line is built lazily, so the reason is no longer
   inspected on every retry when debug logging is off.
 
+- **A crashed `Feed` no longer comes back empty and silent.** It restarted from the supervisor's
+  static start options, which carry none of what consumers did afterwards, so every `subscribe/2`,
+  the wanted set, every notice registration and the credential pushed by `update_credentials/2`
+  were gone, with no notice: consumers sat subscribed to a feed that remembered none of them. The
+  tree now starts a `DpExchange.Schwab.Ledger` (an `Agent`, named per tree from `name:` like the
+  other processes) before the feed. The feed writes its wanted symbols, subscribers and credential
+  (kept in the redacting `Credentials` struct) to it on every ACCEPTED change, never on a refused
+  one; a restarted feed reads it back in `handle_continue/2` (not `init/1`), re-monitors live
+  subscribers, restores the wanted set and credential, redials and resubscribes, and sends each
+  subscriber a `:coverage_change` notice (severity `:warning`, `details.reason: :feed_restarted`,
+  `details.symbols`, `details.symbol_count`: the family's shape for a restored feed); the link
+  telemetry pairing is unchanged. The tree now has four children (limiter, order record, ledger, feed), still
+  `:one_for_one`, so a feed crash leaves the ledger alone.
+
 ### Changed
 
 - **Two trees in one VM need only distinct `name:`s.** A tree started with a non-default atom

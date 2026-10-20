@@ -428,14 +428,28 @@ may be registered under `{:global, _}` or `{:via, _, _}` and passed as `feed:`.
 
 **Two trees in one VM (two accounts) need only distinct `name:`s.** Start each tree with a
 different atom `name:` and its limiter, order record and feed are named from it
-(`Module.concat(name, RateLimiter)`, `OrderLimit`, `Feed`); pass the same `name:` to each
+(`Module.concat(name, RateLimiter)`, `OrderLimit`, `Ledger`, `Feed`); pass the same `name:` to each
 facade call meant for that tree, and every call addresses that tree's processes. A tree started
 with no `name:` (or `nil`, which is silence) keeps the fixed names `DpExchange.Schwab.Supervisor`,
-`DpExchange.Schwab.RateLimiter`, `DpExchange.Schwab.OrderLimit` and `DpExchange.Schwab.Feed`,
-and an explicit `:feed`, `:limiter` or `:order_limit` always wins over the derived name. A
-`name:` that is not an atom (`{:global, _}`, `{:via, _, _}`) derives nothing: name the three
-yourself. Nothing else in the package is named or global per VM: the refresh guard's `:global`
-name is derived from the credential, so two accounts never contend.
+`DpExchange.Schwab.RateLimiter`, `DpExchange.Schwab.OrderLimit`, `DpExchange.Schwab.Ledger` and
+`DpExchange.Schwab.Feed`, and an explicit `:feed`, `:limiter`, `:order_limit` or `:ledger` always
+wins over the derived name. A `name:` that is not an atom (`{:global, _}`, `{:via, _, _}`)
+derives nothing: name the four yourself. Nothing else in the package is named or global per VM:
+the refresh guard's `:global` name is derived from the credential, so two accounts never
+contend.
+
+**A feed that crashes comes back with what you asked of it, and tells you.** The tree keeps a
+`Ledger` (an `Agent`, started before the feed) holding the wanted symbols, the subscribers
+(data and notice) and the credential last pushed with `update_credentials/2`, rewritten on every
+call the feed ACCEPTS (a refused call writes nothing). A restarted feed reads it back, re-monitors
+the subscribers that are still alive, redials, resubscribes the wanted set and sends each
+subscriber a `:coverage_change` notice (severity `:warning`) with `details.reason:
+:feed_restarted`, `details.symbols` and `details.symbol_count`, the family's shape for a restored
+feed. The link telemetry pairing is unchanged: a `:link_up` follows once the route delivers
+again. Coverage restarts empty, as after any lost
+route. A feed started on its own (not through the tree) has no ledger and keeps nothing across a
+restart. A crash of the ledger itself, which holds only a value, loses the memory until the next
+accepted change rewrites it.
 
 **If you hold a running feed (you called `subscribe/2` or started this package supervised),
 also call `DpExchange.Schwab.update_credentials/2` with the refreshed credential.** The

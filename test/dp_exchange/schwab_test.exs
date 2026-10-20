@@ -134,9 +134,10 @@ defmodule DpExchange.SchwabTest do
       assert {:ok, pid} = Schwab.start_link(opts)
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
 
-      # One more than every other venue in the family — `OrderLimit`, the record of
-      # whether `:order_limit_per_minute` was ever stated. See `Supervisor`'s moduledoc.
-      assert length(Elixir.Supervisor.which_children(pid)) == 3
+      # Two more than every other venue in the family — `OrderLimit`, the record of
+      # whether `:order_limit_per_minute` was ever stated (see `Supervisor`'s moduledoc), and
+      # `Ledger`, the feed's durable intent across a feed restart.
+      assert length(Elixir.Supervisor.which_children(pid)) == 4
     end
 
     test "names default and are overridable" do

@@ -88,7 +88,7 @@ defmodule DpExchange.Schwab.Supervisor do
   use Supervisor
 
   alias DpExchange.Core.{Config, DefaultRateLimiter}
-  alias DpExchange.Schwab.{Feed, OrderLimit}
+  alias DpExchange.Schwab.{Feed, Ledger, OrderLimit}
 
   # The vendor says "Get order requests are unthrottled" and states no limit for market data
   # at all (`spec-facts.md` §4) — an absence in the document, not a measurement. This is a
@@ -134,12 +134,23 @@ defmodule DpExchange.Schwab.Supervisor do
     children = [
       {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
       {OrderLimit, name: order_limit_name(opts), declared?: declared?, limit: order_limit},
+      # Before the feed, and independent of it: the feed's durable intent outlives a feed crash
+      # here, and the restarted feed reads it back. `:one_for_one` keeps the ledger alive when the
+      # feed dies, which is the whole point.
+      {Ledger, name: ledger_name(opts)},
       {Feed,
-       opts |> Keyword.put(:name, feed_name(opts)) |> Keyword.put(:limiter, limiter_name(opts))}
+       opts
+       |> Keyword.put(:name, feed_name(opts))
+       |> Keyword.put(:limiter, limiter_name(opts))
+       |> Keyword.put(:ledger, ledger_name(opts))}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end
+
+  @doc "The process holding this tree's feed intent across a feed restart. See `Ledger`."
+  @spec ledger_name(keyword()) :: atom()
+  def ledger_name(opts), do: process_name(opts, :ledger, Ledger)
 
   @doc "The limiter this venue meters against."
   @spec limiter_name(keyword()) :: atom()
