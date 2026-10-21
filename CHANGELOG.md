@@ -31,6 +31,8 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.149] - 2026-10-21
+
 ### Changed (BREAKING for a caller passing a key the tree never read)
 
 - **A misspelt or unread start key is refused, not ignored** (tick AQ's family rule):
