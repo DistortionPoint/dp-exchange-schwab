@@ -180,10 +180,15 @@ defmodule DpExchange.Schwab.Fake do
   @doc """
   Starts no process and answers `:ignore`, so supervising the fake leaves nothing running.
 
+  Refuses a start key the real tree does not read, as the real `start_link/1` does:
+  `{:error, {:unknown_option, key}}` (`DpExchange.Schwab.Options.start_keys/0`).
+
   See `c:DpExchange.Core.Venue.start_link/1`.
   """
   @impl true
-  def start_link(_opts), do: :ignore
+  def start_link(opts) do
+    with :ok <- Options.check_start(opts), do: :ignore
+  end
 
   # --- market data --------------------------------------------------------
 
@@ -833,7 +838,9 @@ defmodule DpExchange.Schwab.Fake do
         |> Enum.filter(&entered_within?(&1, from, to))
         |> take_max_results(Keyword.get(opts, :max_results))
 
-      {:ok, bodies}
+      # The same completeness check the real read makes: a reply at the venue's default cap
+      # of 3000 rows is `{:error, :history_truncated}`, never returned as complete.
+      Rest.within_orders_cap(bodies, opts)
     end
   end
 
@@ -1018,20 +1025,22 @@ defmodule DpExchange.Schwab.Fake do
 
   @doc """
   Replaces the wanted set with `symbols`, then subscribes them; the symbols are judged first and
-  nothing changes if one is refused. `opts[:to]` is not read.
+  nothing changes if one is refused. The call reads no `:to`, as the real one reads none: a
+  `:to` is `{:error, {:unknown_option, :to}}`, and the fake (which keeps no subscriber list)
+  delivers the quotes to the calling process.
 
   See `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
   def update_symbols(symbols, opts \\ []) do
     # Checked before the set is cleared: the real feed refuses first and changes nothing.
-    # `:to` is NOT read: the real `update_symbols/2` takes no subscriber (it replaces the
-    # set; delivery goes to whoever subscribed), so a bad `:to` is not refused here either.
+    # `check_opts/2` refuses a `:to` (the real `update_symbols/2` takes no subscriber: it
+    # replaces the set, and delivery goes to whoever subscribed), so `opts` holds none below.
     with {:ok, symbols} <- checked_symbols(symbols),
          :ok <- check_opts(:update_symbols, opts) do
       Process.put(@wanted_key, [])
       Process.put(__MODULE__, [])
-      subscribe(symbols, Keyword.delete(opts, :to))
+      subscribe(symbols, opts)
     end
   end
 

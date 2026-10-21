@@ -510,6 +510,11 @@ defmodule DpExchange.Schwab.FakeFidelityTest do
       assert replaced.id =~ ~r/\A\d+\z/
       refute replaced.id == placed.id
 
+      # The old order reads back as REPLACED, which Core has no word for: no status, not
+      # :cancelled and not still :open.
+      assert {:ok, %{id: old_id, status: nil}} = Fake.get_order(@creds, placed.id, opts)
+      assert old_id == placed.id
+
       # The replaced order is no longer working, so the venue refuses to cancel it.
       assert {:refused, {:venue_error, 400}} = Fake.cancel_order(@creds, placed.id, opts)
       assert {:ok, :cancelled} = Fake.cancel_order(@creds, replaced.id, opts)

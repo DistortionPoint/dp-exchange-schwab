@@ -31,6 +31,109 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING for a caller passing a key the tree never read)
+
+- **A misspelt or unread start key is refused, not ignored** (tick AQ's family rule):
+  `DpExchange.Schwab.start_link/1` (and `child_spec/1` through its supervisor),
+  `Supervisor.start_link/1`, `Feed.start_link/1` and `Fake.start_link/1` answer `{:error,
+  {:unknown_option, key}}`, or `{:error, {:invalid_options, opts}}` for a non-keyword list with
+  `:credentials` redacted, before anything starts. One table, `Options.start_keys/0`, listed in
+  `usage-rules.md` section 16; `start_options_test.exs` pins it, including that it covers every
+  key `Feed` and `Supervisor` read.
+
+### Fixed (tick AR: Streamer documentation against the code)
+
+- **`:ssl_options` now reaches the Streamer socket.** `usage-rules.md` told a consumer to pass it
+  for the WebSocket's TLS, but `Feed` never forwarded it, so it was silently dropped. It is a
+  start key (`Options.start_keys/0`); `Feed` forwards it to `Socket.start_link/1` through the new
+  `Feed.socket_options/4`, and `Socket` still honours it only while it says `verify:
+  :verify_peer`. A non-keyword value is `{:error, {:invalid_option, :ssl_options}}` at start,
+  never echoed, and the feed holds it behind a closure so a crash report does not print a key
+  password.
+
+- **A streamed top of book for a symbol past the socket's 5,000-symbol carry cap is no longer
+  published, and is announced.** It used to be published unmerged ("but not carried"), so a
+  Change-delivery delta crossed the facade as a snapshot whose absent sides read as "no resting
+  order". It is now dropped, with one `:degraded` notice per session,
+  `details.reason: :book_state_capped`. `usage-rules.md` lists it, and `:unanswered_commands`,
+  which the socket already raised and the list omitted.
+- **`Socket.start_link/1` refuses a bad `:socket_connect_timeout` or `:socket_recv_timeout`**
+  (not a positive integer; `nil` is silence) as `{:error, {:invalid_option, key, value}}` before
+  dialling; only `Feed` judged them, and a direct caller got a `badarg` inside the dial. The
+  `@doc` now names that and `{:insecure_url, :schwab}`.
+- Doc corrections only: `subscribe_all/2`'s moduledoc said it "always answers `:ok`" (its spec
+  has `{:error, :send_timeout}`); the backoff count is `attempt_number - 1`; the decoders' docs
+  now name every `LEVELONE_*` venue-time field (options 38/39, forex 8/9 as well as equities and
+  futures) and the errors `to_candle/3` and `StreamerProtocol.subscribe/5` return.
+
+### Fixed (tick AR: order lifecycle and status mapping)
+
+- **An order whose status contradicts its own sizes is refused (`{:error,
+  :unexpected_response_shape}`), not built as a struct literal that `Core.Types.Order.new/1`
+  would reject**: `FILLED` or a partial fill with `filledQuantity` 0; `WORKING`, `PENDING_*` or
+  `ACCEPTED`-style pending states with the whole `quantity` filled; `FILLED` with only part
+  filled. An absent size contradicts nothing. Every order the Fake produces is checked against
+  `Order.new/1`.
+
+- **A live order with fills is `:partially_filled` whichever live status it carries.** Only
+  `WORKING` said so; `PENDING_CANCEL`, `PENDING_REPLACE` and `PENDING_RECALL` with a
+  `filledQuantity` above zero read `:open`. All 21 `apiOrderStatus` values are now pinned by a
+  test against the committed enum (`REPLACED`, `UNKNOWN` and anything unlisted stay `nil`).
+- **`Order.average_price` is read from the venue's executions** (quantity-weighted mean of the
+  `executionLegs` prices in `EXECUTION` activities of `orderActivityCollection`) for a single-leg
+  order. It was always `nil`. It stays `nil` with no executions, for a spread, and, never a
+  partial average, when any execution is unreadable or not positive.
+- **A negative `quantity` or `filledQuantity` refuses the order** (`{:error,
+  :unexpected_response_shape}`; a list holding one is refused whole) instead of being carried.
+- **An orders reply of 3000 or more rows is refused (`{:error, :history_truncated}`) when
+  `:max_results` is 3000 or more**, as it already was with none: the spec states no ceiling above
+  its default of 3000. A `:max_results` below 3000 is still the caller's own bound. The Fake
+  answers through the same check (`Rest.within_orders_cap/2`).
+- **A bare JSON number as a reply body (`42.5`, decoded to a `%Decimal{}`) is a wrong-kind body,
+  `{:error, :unexpected_response_shape}`**, not an object with no keys. `is_map/1` and a `%{}`
+  pattern accept a struct, so a quote read as `{:refused, :not_listed}`, an order as "no id", an
+  account as flat, and several nested values (chain sides, strikes, contracts, legs, rows)
+  raised in `Access`/`Enum` in the caller's process. `response_shape_test.exs` now feeds every
+  decoding facade read a list, `null`, text, an integer, `42.5` and `{}`.
+
+- **`Feed.init/1` with `credentials: nil` (a forwarded unset lookup) or a non-map raised a
+  `FunctionClauseError`**; `nil` is now silence (no credential yet) and anything else is an
+  `ArgumentError` that does not show the value.
+
+### Fixed (tick AR: Auth and Fake documentation against the code)
+
+- **`Auth.refresh/2` no longer stores a rotated refresh token the next refresh would refuse.** A
+  replacement that is blank, padded or holds a control character was kept (only `""` was
+  refused), so the host persisted a credential whose next `refresh/2` answered
+  `{:missing_credentials, :schwab}` ("nothing was sent") for a token the venue had just issued.
+  It is `{:error, :missing_rotated_refresh_token}` now, judged by `check_token/1` as the access
+  token already was. `auth_rotated_token_test.exs`.
+- Doc corrections: `Auth.refresh/2` names that an `expires_in` that is absent, not an integer or
+  above one day gives a credential with no `:expires_at`; `headers/2` and `check_token/1` name
+  the interior control character and non-UTF-8 refusals they already made; a venue 4xx is
+  `{:venue_error, status}` when its body carries no detail (the docs said only the 3-tuple);
+  `Fake.update_symbols/2` says a `:to` is `{:unknown_option, :to}` (as the real one), not "not
+  read", and drops a dead `Keyword.delete(opts, :to)`.
+
+### Documentation
+
+- `Feed.start_link/1` lists every option judged at start and its default; `Ledger`'s moduledoc
+  names the restart notice it really sends (`:coverage_change`, `:feed_restarted`, not
+  `:link_down`); `Credentials` documents `expires_at` and what `wrap_opt/1` leaves alone;
+  `usage-rules.md` lists `:feed_restarted` among Schwab's notice reasons.
+- `usage-rules.md`: the full status mapping, `average_price`, the orders cap with `:max_results`,
+  and that no orders or transactions endpoint has a cursor; the stated Core floor is `~> 0.3.119`
+  as `mix.exs` says. README dependency snippet brought to the current version.
+- Tests: instruction, order type and duration enums are pinned value by value on the read path;
+  assertions that could not fail were strengthened.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.120` (tick AR: conformance group 54 rebuilds
+  every Order and Fill the Fake answers through `new/1`, and `Order.new/1` refuses a status
+  that contradicts its filled quantity; groups 33, 35 and 37 no longer pass having examined
+  nothing).
+
 ## [0.2.148] - 2026-10-21
 
 ### Changed (BREAKING for callers sending off-tick or degenerate values)

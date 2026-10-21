@@ -603,6 +603,70 @@ defmodule DpExchange.Schwab.OrdersTradingTest do
     end
   end
 
+  describe "X: orders that are no longer working" do
+    test "a venue 400 on a cancel of a filled or already-cancelled order is a refusal" do
+      plug = fn conn ->
+        Plug.Conn.resp(conn, 400, ~s({"message":"Order cannot be cancelled"}))
+      end
+
+      assert Schwab.cancel_order(@creds, "1", account_hash: "H", plug: plug) ==
+               {:refused, {:venue_error, 400, "Order cannot be cancelled"}}
+
+      assert Rest.cancel_order(@creds, "H", "1", plug: plug) ==
+               {:refused, {:venue_error, 400, "Order cannot be cancelled"}}
+    end
+
+    test "a replaced order and its replacement both list, the old one with no status" do
+      leg = fn id ->
+        %{
+          "orderId" => id,
+          "orderLegCollection" => [
+            %{"instruction" => "BUY", "quantity" => 1, "instrument" => %{"symbol" => "AAPL"}}
+          ]
+        }
+      end
+
+      old =
+        Map.merge(leg.(1), %{
+          "status" => "REPLACED",
+          "quantity" => 1,
+          "filledQuantity" => 0,
+          "replacingOrderCollection" => [%{"orderId" => 2}]
+        })
+
+      new = Map.merge(leg.(2), %{"status" => "WORKING", "quantity" => 1, "filledQuantity" => 0})
+      plug = fn conn -> Req.Test.json(conn, [old, new]) end
+
+      assert {:ok, [replaced, working]} =
+               Schwab.get_orders(@creds,
+                 account_hash: "H",
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      # REPLACED is not :cancelled: the order was superseded, and its successor is a live order.
+      assert %Order{id: "1", status: nil} = replaced
+      assert %Order{id: "2", status: :open} = working
+    end
+
+    test "an orders list that silently drops an unreadable order is refused whole" do
+      good = %{"orderId" => 1, "status" => "WORKING", "quantity" => 1}
+
+      plug = fn conn -> Req.Test.json(conn, [good, %{"status" => "WORKING"}]) end
+
+      assert {:error, {:missing_required_field, :id}} =
+               Schwab.get_orders(@creds,
+                 account_hash: "H",
+                 from: ~U[2026-08-01 00:00:00Z],
+                 to: ~U[2026-09-01 00:00:00Z],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
+  end
+
   describe "T12: a missing option is {:missing_option, key}" do
     test "a blank account hash is missing too" do
       for hash <- [nil, "", :h, 12] do

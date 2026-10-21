@@ -13,11 +13,37 @@ wrote `order["status"]` against this package, it is now `order.status` — an at
 `MARKET_ON_CLOSE` and `LIMIT_ON_CLOSE` read back as their own atoms since Core 0.3.74). A spread has `symbol: nil` and `side: nil` at
 the top and carries its `legs`. An order with no `orderId` is refused rather than returned.
 
+**Every value of Schwab's `apiOrderStatus` enum is handled, and none is defaulted.** `NEW`,
+`ACCEPTED`, `QUEUED`, `PENDING_ACTIVATION`, `PENDING_ACKNOWLEDGEMENT`, `AWAITING_PARENT_ORDER`,
+`AWAITING_CONDITION`, `AWAITING_STOP_CONDITION`, `AWAITING_MANUAL_REVIEW`, `AWAITING_UR_OUT` and
+`AWAITING_RELEASE_TIME` are `:pending`; `WORKING` is `:open`; `FILLED`, `CANCELED`, `REJECTED` and
+`EXPIRED` are `:filled`, `:cancelled`, `:rejected` and `:expired`. `PENDING_CANCEL`,
+`PENDING_REPLACE` and `PENDING_RECALL` are `:open`. **A live order that has fills is
+`:partially_filled`**, whichever of the four live statuses (`WORKING` and those three) it carries,
+judged by the venue's own `filledQuantity` above zero (the three pending ones used to read `:open`
+even with shares executed). `REPLACED` (the order was superseded; its successor is a
+different order, and "replaced" is not "cancelled"), `UNKNOWN` and any value outside the enum are
+`nil`, never `:open`. A cancelled or expired order keeps its `filled_quantity`.
+
+**A replaced order reads `status: nil`, and its successor is a separate order.** Schwab's
+`PUT` replace makes a new order (`replace_order/4` returns it, with its new id); the old one stays
+listed as `REPLACED`. `Core.Types.Order` has no field for "replaced by", so the venue's
+`replacingOrderCollection` is not surfaced: `get_orders/2` shows both orders, the old with
+`status: nil` and the new live one, and nothing links them but your own record of the id
+`replace_order/4` returned. Do not read the `nil` as unknown-and-open, and do not count the pair
+as two live orders.
+
+`average_price` is the quantity-weighted mean of the `executionLegs` prices in the order's
+`EXECUTION` activities (`orderActivityCollection`), for a single-leg order. It is `nil` with no
+executions, `nil` for a spread, and `nil` (never a partial average) when any execution is
+unreadable or not positive. A negative `quantity` or `filledQuantity` refuses the order as
+`{:error, :unexpected_response_shape}`, as a list holding one refuses the whole list.
+
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.114`.
+`Core.Types.TopOfBook` has always had. The split arrived in `dp_exchange_core` 0.2.1; this package now requires `dp_exchange_core` `~> 0.3.120`.
 
 ```elixir
 # before
@@ -113,9 +139,12 @@ lists only equities that quote a book, so it never answers it.
 `details.message`, bounded. Schwab's reasons: `:connection_lost` (`:link_down` from the
 Streamer), `:route_crashed`, `:poller_unresponsive`, `:streamer_unreachable` (`:degraded`,
 with `fallback: :internal_poll`), `:login_rejected`, `:command_rejected`,
-`:subscription_not_sent`, `:held_commands_full`, `:delayed_quotes_withheld`,
+`:subscription_not_sent`, `:held_commands_full`, `:unanswered_commands`,
+`:book_state_capped` (a streamed book for a symbol past the 5,000 the socket carries is not
+published; once per session), `:delayed_quotes_withheld`,
 `:frame_unreadable`, `:login_unanswered`, `:silent_connection`, `:credentials_expiring` and
-`:credentials_expired` (kind `:credentials_expiring`, see section 3), and the frame-level
+`:credentials_expired` (kind `:credentials_expiring`, see section 3), `:feed_restarted` (kind
+`:coverage_change`, see section 14), and the frame-level
 `:unparseable_frame`, `:unrecognised_frame` and `:unrecognised_notify`. Code that matched the
 old free-text `details.reason` string must read `details.message`.
 
@@ -316,7 +345,8 @@ has passed is refused by every REST call and every order write with `{:error,
 {:credentials_expired, :schwab}}`, before any request and before a rate-limit slot (or a
 throttled order write) is spent: the answer would only have been a `401`. The remedy is
 `refresh_credentials/2`. A credential with no `:expires_at` is signed as ever, and the venue
-judges it: a `401` comes back once as `{:refused, {:venue_error, 401, _}}` and **nothing in this
+judges it: a `401` comes back once as `{:refused, {:venue_error, 401, _}}` (or `{:venue_error, 401}` when
+the body carries no detail) and **nothing in this
 package refreshes, retries or loops on it** - that is your call (`credential_failure?/1`, above).
 "Passed" includes the last five seconds: a token with five seconds or less left is refused too,
 because it cannot reach the venue alive and the venue's clock is not yours. A token inside the
@@ -864,8 +894,13 @@ padded string.
 An orders reply is capped by the venue at 3000 rows unless `:max_results` is given
 ("Default is 3000"). With no `:max_results`, a reply of 3000 or more rows from
 `get_all_orders/2` or `get_orders/2` is `{:error, :history_truncated}`, as for
-`get_transactions/2`: narrow the window or pass the bound you want. `:max_results` is a
-positive integer or absent, else `{:error, {:invalid_option, :max_results, value}}`.
+`get_transactions/2`: narrow the window or pass the bound you want. A `:max_results` below 3000
+is your bound, and the rows it returns are what you asked for; one of 3000 or more proves nothing
+about a reply of 3000 or more rows (the spec states no ceiling), so that reply is
+`{:error, :history_truncated}` too. `:max_results` is a positive integer or absent, else
+`{:error, {:invalid_option, :max_results, value}}`. There is no cursor or page parameter on either
+orders endpoint or on `/transactions` in the vendor's specification, so nothing here pages: the
+refusal is the whole of the truncation story, and the answer is a narrower window.
 
 `opts` is always a keyword list: anything else is `{:error, {:invalid_options, value}}` (the
 four plain-value reads `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `status/1` raise
@@ -1029,8 +1064,8 @@ it has nothing to inject into.)
 failures_since_ok: 0, last_error: nil}`, the real feed's one shape once the Streamer bootstraps
 (the `:internal_poll` fallback is not modelled). `Fake.subscribe_notices/1` judges `:to`
 (`{:invalid_subscriber, _}`) and sends nothing, as the real feed sends no notice on
-registration; the fake emits no notices at all. `Fake.update_symbols/2` ignores
-`:to`, as the real one does.
+registration; the fake emits no notices at all. `Fake.update_symbols/2` reads no `:to`, as
+the real one does: `to:` is `{:error, {:unknown_option, :to}}` on both.
 
 **The fake judges a credential as the real package does.** A call whose credential has no
 non-blank `:access_token` — `%{refresh_token: "x"}`, `%{access_token: ""}` — is
@@ -1474,3 +1509,32 @@ so `to:` there is an unknown option. A function this venue does not serve keeps 
 `{:error, :not_supported}` whatever the options. The Fake alone also reads `:market_status`
 (`market_status/1`, `get_market/3`) and `:account_hash` (`get_accounts/2`) to steer what it
 returns; on the real facade those are unknown options.
+
+### Start options are one table, and a misspelt key is refused
+
+`DpExchange.Schwab.start_link/1` (and `child_spec/1`, which reaches it when its supervisor starts
+the child), `DpExchange.Schwab.Supervisor.start_link/1`, `Feed.start_link/1` and
+`DpExchange.Schwab.Fake.start_link/1` answer `{:error, {:unknown_option, key}}` for the first
+start key they do not read (a `nil` value counts), and `{:error, {:invalid_options, opts}}` for
+options that are not a keyword list, before anything starts. A `:credentials` entry in any `opts`
+the refusal echoes is redacted. Without it a misspelt `order_limit_per_minut:` started a tree
+that refused every order write for a reason you could not see. The table is
+`DpExchange.Schwab.Options.start_keys/0`:
+
+- Tree: `:name`, `:order_limit_per_minute`, `:read_limit_per_minute`, `:limiter`,
+  `:order_limit`, `:ledger`, `:feed`.
+- Feed: `:credentials`, `:symbols`, `:subscriber`, `:interval_ms`, `:start_delay_ms`,
+  `:retry_attempts`, `:rate_limit_blocking`, `:max_queue_len`, `:route_bootstrap_timeout_ms`,
+  `:bootstrap_reply_ms`, `:config_snapshot`, `:socket` (a test seam: an injected socket).
+- Forwarded to the REST calls: `:plug`, `:req_adapter`, `:market_data_url`, `:trader_url`.
+- Forwarded to the Streamer socket: `:socket_connect_timeout`, `:socket_recv_timeout`, `:url`,
+  `:ssl_options`, `:allow_insecure_socket` (a test seam: a plain-TCP stand-in).
+
+`:ssl_options` (the WebSocket's TLS options, `nil` for the verified defaults) must be a keyword
+list, else `{:error, {:invalid_option, :ssl_options}}` at start; the refusal never echoes the value
+(it may hold a key `:password`), and the feed keeps it behind a closure so a crash report does not
+print it. It is honoured only while it still says `verify: :verify_peer`; anything else gets the
+verified defaults, never `:verify_none` (section 13).
+
+Values are judged separately, at init, and a bad one raises `ArgumentError` naming the option
+(`Feed.start_link/1`). A test pins that the table covers every key `Feed` and `Supervisor` read.

@@ -421,8 +421,12 @@ defmodule DpExchange.Schwab.OrdersTest do
     end
 
     test "a nil on a key the builder reads is still an unset option" do
-      assert {:ok, _payload} = Orders.build(Map.put(@buy, :price, nil))
-      assert {:ok, _payload} = Orders.build(Map.put(@buy, :session, nil))
+      # Unset means unset: no price is sent, and the session is the stated default.
+      assert {:ok, payload} = Orders.build(Map.put(@buy, :price, nil))
+      refute Map.has_key?(payload, "price")
+
+      assert {:ok, payload} = Orders.build(Map.put(@buy, :session, nil))
+      assert payload["session"] == "NORMAL"
     end
 
     test "keys are checked before anything else is" do

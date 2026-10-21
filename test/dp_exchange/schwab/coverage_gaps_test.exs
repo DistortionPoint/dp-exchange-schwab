@@ -288,7 +288,8 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
                )
 
       row = chain.expiries[~D[2026-06-19]][Decimal.new("220.0")]
-      assert row.put
+      assert row.put.right == :put
+      assert row.put.venue_symbol == "AAPL  260619P00220000"
       assert row.call == nil
     end
 
@@ -889,15 +890,58 @@ defmodule DpExchange.Schwab.CoverageGapsTest do
       assert {:ok, rows} = Rest.get_all_orders(@creds, [plug: responding(under)] ++ window)
       assert length(rows) == 2999
 
-      # A bound the caller chose is the caller's: rows up to it are what was asked for.
+      # A bound the caller chose BELOW the venue's default is the caller's: rows up to it are
+      # what was asked for.
+      bounded = Enum.take(full, 100)
+
       assert {:ok, rows} =
                Rest.get_orders(
                  @creds,
                  "hash-1",
-                 [plug: responding(full), max_results: 3000] ++ window
+                 [plug: responding(bounded), max_results: 100] ++ window
                )
 
-      assert length(rows) == 3000
+      assert length(rows) == 100
+
+      # A bound at or above the default proves nothing about a reply of 3000 rows: the spec
+      # states no ceiling, so it is as likely cut off as one asked for without a bound.
+      for max_results <- [3000, 5000] do
+        assert {:error, :history_truncated} =
+                 Rest.get_orders(
+                   @creds,
+                   "hash-1",
+                   [plug: responding(full), max_results: max_results] ++ window
+                 )
+
+        assert {:error, :history_truncated} =
+                 Rest.get_all_orders(
+                   @creds,
+                   [plug: responding(full), max_results: max_results] ++ window
+                 )
+      end
+
+      # ... and below 3000 rows it is a complete answer to that bound.
+      assert {:ok, rows} =
+               Rest.get_orders(
+                 @creds,
+                 "hash-1",
+                 [plug: responding(under), max_results: 5000] ++ window
+               )
+
+      assert length(rows) == 2999
+
+      # The fake answers through the same check (`Rest.within_orders_cap/2`).
+      assert {:error, :history_truncated} = Rest.within_orders_cap(full, [])
+      assert {:error, :history_truncated} = Rest.within_orders_cap(full, max_results: 3000)
+      assert {:ok, ^full} = Rest.within_orders_cap(full, max_results: 100)
+      assert {:ok, ^under} = Rest.within_orders_cap(under, [])
+
+      # (Nothing in the window: the canned order was entered in January.)
+      assert {:ok, []} =
+               Fake.get_orders(
+                 @creds,
+                 [account_hash: "h", max_results: 3000] ++ Keyword.take(window, [:from, :to])
+               )
     end
 
     test "one transaction is fetched by id" do

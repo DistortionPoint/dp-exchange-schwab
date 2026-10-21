@@ -17,7 +17,8 @@ defmodule DpExchange.Schwab.Ledger do
   The credential is kept in its redacting `DpExchange.Schwab.Credentials` struct, so the
   ledger's state prints without a secret. A restarted feed reads it back in `handle_continue/2`,
   re-monitors the subscribers, restores the wanted set and credential, redials, and tells its
-  subscribers with a `:link_down` notice.
+  subscribers with a `:coverage_change` notice (`details.reason: :feed_restarted`). The
+  `:link_down` telemetry event is emitted for it, and the `:link_up` that follows closes it.
 
   The ledger is a sibling started before the feed, named per tree (derived from the tree's
   `name:` like the other processes, see `DpExchange.Schwab.Supervisor.ledger_name/1`). It is

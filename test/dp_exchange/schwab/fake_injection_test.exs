@@ -13,7 +13,7 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.FakeInjection
+  alias DpExchange.Core.{FakeInjection, Types}
   alias DpExchange.Schwab.Fake
 
   @credentials %{access_token: "at-1"}
@@ -127,7 +127,13 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
       FakeInjection.queue_failures(:schwab, [{:error, :timeout}])
 
       assert Fake.get_price("AAPL", credentials: @credentials) == {:error, :timeout}
-      assert {:ok, _quote} = Fake.get_price("AAPL", credentials: @credentials)
+
+      assert {:ok, %Types.Quote{symbol: "AAPL", provider: :schwab}} =
+               Fake.get_price("AAPL", credentials: @credentials)
+
+      # The queue held one entry: a third call is not failed either.
+      assert {:ok, %Types.Quote{symbol: "AAPL"}} =
+               Fake.get_price("AAPL", credentials: @credentials)
     end
   end
 
@@ -139,7 +145,9 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
       FakeInjection.fail_always(:schwab, "MSFT", {:refused, :not_listed})
 
       assert Fake.get_price("MSFT", credentials: @credentials) == {:refused, :not_listed}
-      assert {:ok, _quote} = Fake.get_price("AAPL", credentials: @credentials)
+
+      assert {:ok, %Types.Quote{symbol: "AAPL"}} =
+               Fake.get_price("AAPL", credentials: @credentials)
     end
   end
 
@@ -172,12 +180,12 @@ defmodule DpExchange.Schwab.FakeInjectionTest do
 
       FakeInjection.bypass_credentials(:schwab)
 
-      assert {:ok, _quote} = Fake.get_price("AAPL", [])
+      assert {:ok, %Types.Quote{symbol: "AAPL"}} = Fake.get_price("AAPL", [])
     end
 
     test "the bypass does not leak into a process that did not ask for it" do
       FakeInjection.bypass_credentials(:schwab)
-      assert {:ok, _quote} = Fake.get_price("AAPL", [])
+      assert {:ok, %Types.Quote{symbol: "AAPL"}} = Fake.get_price("AAPL", [])
 
       task =
         Task.async(fn ->

@@ -159,6 +159,16 @@ defmodule DpExchange.Schwab.DecoderRobustnessTest do
       assert {:refused, {:venue_error, 400, "no such symbol"}} =
                Rest.get_price("AAPL", @creds, opts(body, 400))
     end
+
+    test "an oversized text detail is cut, not echoed whole into the error" do
+      body = %{"errors" => [%{"detail" => String.duplicate("d", 50_000)}]}
+
+      assert {:refused, {:venue_error, 400, detail}} =
+               Rest.get_price("AAPL", @creds, opts(body, 400))
+
+      assert is_binary(detail)
+      assert byte_size(detail) < 2_100
+    end
   end
 
   describe "get_option_chain/3 refuses what it cannot address and does not carry non-text" do

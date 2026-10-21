@@ -90,6 +90,10 @@ defmodule DpExchange.Schwab.StreamerProtocol do
   `fields` are the venue's field *numbers* for the service, joined as the venue expects.
   Omitting them asks for the service's default set, which differs per service and is the
   venue's choice rather than this package's.
+
+  Refusals, in the order they are checked: `{:error, {:unknown_service, service}}`,
+  `{:error, {:not_a_subscription_command, command}}` and `{:error, {:invalid_keys, keys}}`
+  (a blank or comma-bearing key, or an empty list for anything but `SUBS`).
   """
   @spec subscribe(StreamerInfo.t(), String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}

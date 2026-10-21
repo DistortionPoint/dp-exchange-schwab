@@ -101,6 +101,11 @@ defmodule DpExchange.Schwab.TickAoLedgerTest do
     ledger = SchwabSupervisor.ledger_name(name: name)
     assert %Credentials{access_token: "CANARY-ROTATED"} = Ledger.fetch(ledger).credentials
     refute inspect(:sys.get_state(ledger), limit: :infinity) =~ "CANARY"
+
+    # The test is named for a restart: kill the feed and read the ledger again.
+    kill_feed(name)
+    assert %Credentials{access_token: "CANARY-ROTATED"} = Ledger.fetch(ledger).credentials
+    refute inspect(:sys.get_state(ledger), limit: :infinity) =~ "CANARY"
   end
 
   defp kill_feed(name) do

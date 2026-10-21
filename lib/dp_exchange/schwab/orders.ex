@@ -860,7 +860,15 @@ defmodule DpExchange.Schwab.Orders do
 
   `WORKING` is `:open`, or `:partially_filled` when the venue's own `filledQuantity` is above
   zero — Schwab has no partial-fill status of its own, and that field is its statement of
-  one. A single-leg order carries that leg's symbol and side; a spread carries neither at
+  one. `PENDING_CANCEL`, `PENDING_REPLACE` and `PENDING_RECALL` are read the same way (an
+  order being cancelled with shares already executed is `:partially_filled`, not `:open`).
+  All 21 `apiOrderStatus` values are handled; `REPLACED` and `UNKNOWN` (and any value outside
+  the enum) are `nil`.
+
+  `average_price` is the quantity-weighted mean of the `executionLegs` prices in the order's
+  `EXECUTION` activities (`orderActivityCollection`), for a single-leg order only. It is `nil`
+  when there are no executions, when any one is unreadable or not positive (never a partial
+  average), and for a spread. A single-leg order carries that leg's symbol and side; a spread carries neither at
   the top and reports its legs, each with a `ratio` taken as the leg quantities over their
   greatest common divisor — the definition of a spread ratio, not an estimate of one.
 
@@ -870,7 +878,11 @@ defmodule DpExchange.Schwab.Orders do
   @spec from_venue(term()) :: {:ok, Order.t()} | {:error, term()}
   def from_venue(%{"orderId" => id} = order)
       when is_integer(id) or (is_binary(id) and id != "") do
-    with {:ok, legs} <- legs(order["orderLegCollection"]) do
+    with {:ok, legs} <- legs(order["orderLegCollection"]),
+         {:ok, quantity} <- size(order["quantity"]),
+         {:ok, filled} <- size(order["filledQuantity"]),
+         status = status(order["status"], filled),
+         :ok <- consistent(status, quantity, filled) do
       {symbol, side, spread_legs} = leg_fields(legs)
 
       {:ok,
@@ -880,11 +892,12 @@ defmodule DpExchange.Schwab.Orders do
          side: side,
          order_type: @order_types_in[order["orderType"]],
          time_in_force: @durations_in[order["duration"]],
-         quantity: number(order["quantity"]),
+         quantity: quantity,
          price: number(order["price"]),
          stop_price: number(order["stopPrice"]),
-         filled_quantity: number(order["filledQuantity"]),
-         status: status(order["status"], number(order["filledQuantity"])),
+         filled_quantity: filled,
+         average_price: average_price(order, length(legs)),
+         status: status,
          legs: spread_legs,
          created_at: timestamp(order["enteredTime"]),
          provider: :schwab
@@ -892,8 +905,54 @@ defmodule DpExchange.Schwab.Orders do
     end
   end
 
-  def from_venue(%{} = _order), do: {:error, {:missing_required_field, :id}}
+  # A struct is a map to a pattern: a JSON number such as `42.5` is decoded to a `%Decimal{}`
+  # (`floats: :decimals`), and "an order with no id" would be a wrong name for it.
+  def from_venue(order) when is_map(order) and not is_struct(order),
+    do: {:error, {:missing_required_field, :id}}
+
   def from_venue(_other), do: {:error, :unexpected_response_shape}
+
+  # **A status that contradicts the sizes beside it is refused, not carried.** The venue's word
+  # for the state and its own `filledQuantity`/`quantity` cannot both be true of one order, and
+  # which of them is right is not this package's to choose: `:filled` or `:partially_filled`
+  # with nothing filled; `:pending`, `:open` or `:partially_filled` with the whole size filled;
+  # `:filled` with only part of it. (`Core.Types.Order.new/1` refuses the same combinations.)
+  # Only sizes the venue stated are judged: an absent one contradicts nothing.
+  defp consistent(status, quantity, filled) do
+    if contradictory?(status, quantity, filled),
+      do: {:error, :unexpected_response_shape},
+      else: :ok
+  end
+
+  defp contradictory?(status, quantity, %Decimal{} = filled) do
+    nothing? = Decimal.eq?(filled, 0)
+
+    {all?, part?} =
+      case quantity do
+        %Decimal{} -> {Decimal.eq?(filled, quantity), Decimal.lt?(filled, quantity)}
+        nil -> {false, false}
+      end
+
+    (status in [:filled, :partially_filled] and nothing?) or
+      (status in [:pending, :open, :partially_filled] and all? and not nothing?) or
+      (status == :filled and part?)
+  end
+
+  defp contradictory?(_status, _quantity, nil), do: false
+
+  # An order's size and its filled size are never negative (`Core.Types.Order.new/1` raises on
+  # one: a negative is a decode bug, and a consumer summing fills against it concludes the order
+  # is over-filled). A venue reply carrying one is refused whole, not clamped and not carried.
+  # Absent or unreadable is `nil`, "not stated", as for every other number here.
+  defp size(raw) do
+    case number(raw) do
+      %Decimal{} = value ->
+        if Decimal.negative?(value), do: {:error, :unexpected_response_shape}, else: {:ok, value}
+
+      nil ->
+        {:ok, nil}
+    end
+  end
 
   # **Every leg, or a refusal.** Legs that were not objects used to be filtered out, and the
   # count of legs is what decides whether this is a single-leg order or a spread. A two-leg
@@ -904,7 +963,9 @@ defmodule DpExchange.Schwab.Orders do
   defp legs(nil), do: {:ok, []}
 
   defp legs(legs) when is_list(legs) do
-    if Enum.all?(legs, &is_map/1), do: {:ok, legs}, else: {:error, :unexpected_response_shape}
+    if Enum.all?(legs, &(is_map(&1) and not is_struct(&1))),
+      do: {:ok, legs},
+      else: {:error, :unexpected_response_shape}
   end
 
   defp legs(_unreadable), do: {:error, :unexpected_response_shape}
@@ -985,17 +1046,86 @@ defmodule DpExchange.Schwab.Orders do
               AWAITING_RELEASE_TIME)
   @still_live ~w(PENDING_CANCEL PENDING_REPLACE PENDING_RECALL)
 
-  defp status("WORKING", filled) do
-    if match?(%Decimal{}, filled) and Decimal.gt?(filled, 0), do: :partially_filled, else: :open
-  end
-
+  # **Every one of `apiOrderStatus`'s 21 values is handled, none is defaulted.** Nineteen map
+  # to a Core status; `REPLACED` (the order was superseded: its successor is a different order,
+  # and "replaced" is not "cancelled") and `UNKNOWN` (the venue's own "I do not know") have no
+  # Core word and are `nil`, as is any value the enum does not list. A status this package does
+  # not recognise is never read as `:open` or `:pending`.
+  #
+  # **A live order with fills is partially filled, whichever live status it carries.** Only
+  # `WORKING` used to say so: an order the venue had begun cancelling or replacing
+  # (`PENDING_CANCEL`, `PENDING_REPLACE`, `PENDING_RECALL`) with shares already executed was
+  # read as `:open`, with the fills visible only to a caller that also read `filled_quantity`.
+  defp status("WORKING", filled), do: live_status(filled)
   defp status("FILLED", _filled), do: :filled
   defp status("CANCELED", _filled), do: :cancelled
   defp status("REJECTED", _filled), do: :rejected
   defp status("EXPIRED", _filled), do: :expired
   defp status(pending, _filled) when pending in @pending, do: :pending
-  defp status(live, _filled) when live in @still_live, do: :open
+  defp status(live, filled) when live in @still_live, do: live_status(filled)
   defp status(_replaced_or_unknown, _filled), do: nil
+
+  defp live_status(%Decimal{} = filled) do
+    if Decimal.gt?(filled, 0), do: :partially_filled, else: :open
+  end
+
+  defp live_status(_not_stated), do: :open
+
+  # **The average fill price, from the executions the venue itself reports.** A single-leg
+  # order's `orderActivityCollection` lists its `EXECUTION` activities, each with
+  # `executionLegs` carrying the `price` and `quantity` of one fill. The average is the
+  # quantity-weighted mean of those prices, which is what an average price is; it is `nil`
+  # (never a partial average) when there are no fills, when any fill is unreadable or not
+  # positive, and for a spread, whose legs are different instruments with no common price.
+  # Read from the document's `OrderActivity`/`ExecutionLeg` schemas, not probed: no credential
+  # is held.
+  defp average_price(order, leg_count) when leg_count <= 1 do
+    case order["orderActivityCollection"] do
+      activities when is_list(activities) ->
+        activities |> Enum.flat_map(&execution_legs/1) |> weighted_average()
+
+      _absent ->
+        nil
+    end
+  end
+
+  defp average_price(_order, _spread), do: nil
+
+  defp execution_legs(%{"activityType" => "EXECUTION", "executionLegs" => legs})
+       when is_list(legs),
+       do: legs
+
+  defp execution_legs(_other_activity), do: []
+
+  defp weighted_average([]), do: nil
+
+  defp weighted_average(legs) do
+    fills = Enum.map(legs, &fill/1)
+
+    if Enum.all?(fills, &match?({%Decimal{}, %Decimal{}}, &1)) do
+      quantity =
+        Enum.reduce(fills, Decimal.new(0), fn {_price, qty}, acc -> Decimal.add(acc, qty) end)
+
+      value =
+        Enum.reduce(fills, Decimal.new(0), fn {price, qty}, acc ->
+          Decimal.add(acc, Decimal.mult(price, qty))
+        end)
+
+      Decimal.div(value, quantity)
+    end
+  end
+
+  defp fill(%{"price" => price, "quantity" => quantity}) do
+    with %Decimal{} = price <- number(price),
+         %Decimal{} = quantity <- number(quantity),
+         true <- Decimal.gt?(price, 0) and Decimal.gt?(quantity, 0) do
+      {price, quantity}
+    else
+      _unreadable -> nil
+    end
+  end
+
+  defp fill(_unreadable), do: nil
 
   # An integer or a float is judged exactly as a Decimal is (34 digits, exponent within +-1000):
   # an integer is a "finite number" with no limit on its length otherwise.

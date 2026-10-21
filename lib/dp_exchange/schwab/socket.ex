@@ -16,7 +16,8 @@ defmodule DpExchange.Schwab.Socket do
 
   ## A command sent before LOGIN is held, not dropped
 
-  `subscribe_all/2` is a cast and always answers `:ok`. This module used to *drop* a command
+  `subscribe_all/2` is a cast and answers `:ok` once the command is queued (it answers
+  `{:error, :send_timeout}` only if the send itself exits). This module used to *drop* a command
   that arrived before the LOGIN response, raise a `:degraded` "not logged in" notice, and
   let the `:ok` stand. The reason given was that a caller told a subscription had succeeded
   would wait for data the venue never agreed to send. But the caller had already been told
@@ -101,7 +102,7 @@ defmodule DpExchange.Schwab.Socket do
   `connected_at` records when each connection came up, and `short_sessions` counts the
   consecutive ones that ended inside `@stable_session_ms` (10s, a chosen figure, not a
   measured one). `handle_disconnect/2` takes the larger of that count, `login_failures` and
-  the websockex `attempt_number` as the failure count for `reconnect_delay_ms/1`, so the
+  the websockex `attempt_number` minus one as the failure count for `reconnect_delay_ms/1`, so the
   same capped doubling applies. A session that outlives the threshold clears the count, so an
   ordinary blip after a healthy session still reconnects at once.
 
@@ -163,6 +164,11 @@ defmodule DpExchange.Schwab.Socket do
     `:unrecognised_notify`, with the size and never the content). Silence on this venue is
     the normal overnight state, so a feed discarding everything it is sent must not look
     like a quiet market.
+  * **Every bound is announced.** A venue that leaves 256 commands unanswered is a `:degraded`
+    `:unanswered_commands`; a command held past the 64th is `:held_commands_full`; a
+    book for a symbol past the 5,000 this session carries is not published and is announced
+    once per session as `:degraded` `:book_state_capped`. (The delayed and unreadable
+    per-symbol sets are capped at 5,000 too and, past it, stay withheld without a repeat.)
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -278,6 +284,12 @@ defmodule DpExchange.Schwab.Socket do
   or `{:error, {:invalid_credentials, :schwab}}`), and is never echoed: a token that is not
   valid UTF-8 would otherwise make the LOGIN's JSON encoding raise with the whole value in the
   exception message.
+
+  `:socket_connect_timeout` and `:socket_recv_timeout` (milliseconds) must each be a positive
+  integer, or absent or `nil` for the package default; anything else is refused before
+  anything is dialled as `{:error, {:invalid_option, key, value}}`. A URL that is not `wss://`
+  is `{:error, {:insecure_url, :schwab}}`. A missing `:streamer_info`, `:subscriber` or
+  `:access_token` raises `ArgumentError` naming the key only.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
@@ -288,9 +300,24 @@ defmodule DpExchange.Schwab.Socket do
     # `Jason.encode!/1` raise in the LOGIN, and that exception's message prints the whole
     # binary; one with a control byte could not travel as sent. `Feed` already judges the
     # token it passes, so this is for a caller of `start_link/1` that did not.
-    with {:ok, token} <- opts |> fetch_opt!(:access_token) |> check_access_token() do
+    with {:ok, token} <- opts |> fetch_opt!(:access_token) |> check_access_token(),
+         :ok <- check_timeouts(opts) do
       start_socket(opts, info, subscriber, token)
     end
+  end
+
+  # A bad timeout reached the dial as its connect timeout and raised `badarg` inside it (or,
+  # for `0`, failed every connect at once). `Feed` judges the same two keys at its own init;
+  # this is for a caller of `start_link/1` that did not. `nil` is silence, as everywhere in
+  # this family (`connection_opts/1` drops it for the default).
+  defp check_timeouts(opts) do
+    Enum.find_value([:socket_connect_timeout, :socket_recv_timeout], :ok, fn key ->
+      case Keyword.get(opts, key) do
+        nil -> nil
+        ms when is_integer(ms) and ms > 0 -> nil
+        bad -> {:error, {:invalid_option, key, bad}}
+      end
+    end)
   end
 
   defp check_access_token(token) when is_binary(token), do: Auth.check_token(token)
@@ -353,6 +380,8 @@ defmodule DpExchange.Schwab.Socket do
       unreadable_reported: MapSet.new(),
       # Whether a frame this package could not read has been announced this session.
       undecodable_reported?: false,
+      # Whether a book refused for want of room in `last_top` has been announced this session.
+      top_capped_reported?: false,
       # A `:link_down` has been raised and no `:link_up` has closed it. See `report_link_down/2`.
       link_down_reported?: false,
       # request id (as the venue echoes it, a string) => `{service, command, keys}` for the
@@ -783,6 +812,7 @@ defmodule DpExchange.Schwab.Socket do
      |> Map.put(:delayed_reported, MapSet.new())
      |> Map.put(:unreadable_reported, MapSet.new())
      |> Map.put(:undecodable_reported?, false)
+     |> Map.put(:top_capped_reported?, false)
      |> Map.put(:pending, %{})}
   end
 
@@ -1403,8 +1433,7 @@ defmodule DpExchange.Schwab.Socket do
     if book_moved?(fields) do
       case StreamerDecode.to_top_of_book(fields, symbol, observed_at) do
         {:ok, delta} ->
-          top = merge_top_of_book(Map.get(state.last_top, symbol), delta, fields)
-          {quoted ++ [top], remember_top(state, symbol, top)}
+          publish_top(state, symbol, delta, fields, quoted)
 
         # An unreadable (or negative) bid/ask refuses this frame's book: publishing `nil`
         # would say "no resting order", and carrying the old level would answer a question
@@ -1470,12 +1499,40 @@ defmodule DpExchange.Schwab.Socket do
 
   # `last_top` is keyed by the venue's own row key, and it is pruned when a symbol is
   # unsubscribed. A venue streaming endless distinct keys it was never asked for must not
-  # grow this process without limit, so a NEW key past the cap is published but not carried.
-  defp remember_top(%{last_top: last_top} = state, symbol, top) do
+  # grow this process without limit, so a NEW key past the cap is not carried.
+  #
+  # **And its book is not published either, and the consumer is told once per session.** A
+  # delta with nothing to merge onto would cross the facade as a snapshot whose absent sides
+  # read as "no resting order" (`merge_top_of_book(nil, ...)`): the plausible wrong answer
+  # this module exists to refuse. Publishing it "but not carrying it" did exactly that,
+  # silently, for every frame of such a key.
+  defp publish_top(%{last_top: last_top} = state, symbol, delta, fields, quoted) do
     if is_map_key(last_top, symbol) or map_size(last_top) < @max_delayed_reported do
-      %{state | last_top: Map.put(last_top, symbol, top)}
+      top = merge_top_of_book(Map.get(last_top, symbol), delta, fields)
+      {quoted ++ [top], %{state | last_top: Map.put(last_top, symbol, top)}}
     else
+      {quoted, report_top_capped(state, symbol)}
+    end
+  end
+
+  defp report_top_capped(state, symbol) do
+    if Map.get(state, :top_capped_reported?, false) do
       state
+    else
+      notify(
+        state,
+        Notice.new(:degraded, :schwab,
+          details: %{
+            symbol: Bound.text(symbol),
+            reason: :book_state_capped,
+            message:
+              "#{@max_delayed_reported} symbols already carry a top of book this session; " <>
+                "this one is not published"
+          }
+        )
+      )
+
+      Map.put(state, :top_capped_reported?, true)
     end
   end
 

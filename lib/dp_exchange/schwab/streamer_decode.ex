@@ -80,16 +80,16 @@ defmodule DpExchange.Schwab.StreamerDecode do
          volume: volume,
          volume_window: volume && :running_total,
          # **The venue's own trade time, where the service names one — `nil` otherwise.**
-         # `LEVELONE_EQUITIES` field 35, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS`
-         # field 11 — "Trade Time in Long" / "Trade Time", the last trade time in
-         # milliseconds since epoch (see the moduledoc's table) — is the venue's own
-         # statement of when the `last` price this `Quote` reports actually traded, read in
-         # preference to the frame's arrival time whenever the frame carries it.
+         # `LEVELONE_EQUITIES` field 35, `LEVELONE_OPTIONS` 39, `LEVELONE_FUTURES`/
+         # `LEVELONE_FUTURES_OPTIONS` 11 and `LEVELONE_FOREX` 9 — "Trade Time in Long" /
+         # "Trade Time", the last trade time in milliseconds since epoch (see the moduledoc's
+         # table) — is the venue's own statement of when the `last` price this `Quote`
+         # reports actually traded, read in preference to the frame's arrival time whenever
+         # the frame carries it.
          #
          # This used to be unconditional `nil`, on the premise that no `LEVELONE_*` service
-         # carried a venue timestamp at all in the fields this package read — true for
-         # `LEVELONE_OPTIONS`/`LEVELONE_FOREX`, false for the two services above once
-         # `StreamerFields` started naming these fields. Before that, it was `timestamp:
+         # carried a venue timestamp at all in the fields this package read — false for
+         # all five once `StreamerFields` named these fields. Before that, it was `timestamp:
          # observed_at`: an arrival time in a field `Core.Types.Quote` documented as the
          # venue's own, because the single `:timestamp` it had left no way to say the venue
          # did not date the frame. Core 0.2.0 split that field for this reason
@@ -126,9 +126,13 @@ defmodule DpExchange.Schwab.StreamerDecode do
   package guessing the multiplier would report a size the venue never sent.
 
   `venue_time` is the venue's own quote time where the service names one — `LEVELONE_EQUITIES`
-  field 34, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS` field 10, "the last time a bid or
-  ask updated" (see the moduledoc's table) — and `nil` where the frame did not carry it. `observed_at` is when the frame arrived
-  either way, and the pair together is the honest statement of freshness this type promises.
+  field 34, `LEVELONE_OPTIONS` 38, `LEVELONE_FUTURES`/`LEVELONE_FUTURES_OPTIONS` 10 and
+  `LEVELONE_FOREX` 8, "the last time a bid or ask updated" (see the moduledoc's table) — and
+  `nil` where the frame did not carry it. `observed_at` is when the frame arrived either way,
+  and the pair together is the honest statement of freshness this type promises.
+
+  A present side that cannot be read, or is negative, is
+  `{:error, {:invalid_decimal, :bid | :ask | :bid_size | :ask_size, value}}`.
 
   ## This returns the frame's DELTA, and is not what crosses the facade
 
@@ -224,6 +228,10 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   `timeframe` is the caller's, because the venue's chart services stream one width and do
   not name it in the frame.
+
+  Errors: `{:error, :missing_venue_timestamp}` (no usable `chart_time`),
+  `{:error, {:invalid_decimal, field, value}}` (a price absent or unreadable),
+  `{:error, {:non_positive_price, field, value}}` and `{:error, :incoherent_candle}`.
 
   ## The four prices are required, and on this service that is the venue's own rule
 

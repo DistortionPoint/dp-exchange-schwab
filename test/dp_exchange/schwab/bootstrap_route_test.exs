@@ -248,14 +248,22 @@ defmodule DpExchange.Schwab.BootstrapRouteTest do
     test "a timer left over from a bootstrap that already settled is ignored" do
       # The timeout is armed per attempt and matched on the stored ref, so one arriving for a
       # bootstrap that has since completed must not tear down whatever is running now.
-      feed = start_feed(socket: fake_socket())
+      socket = fake_socket()
+      feed = start_feed(socket: socket)
       :ok = Feed.subscribe(feed, ["AAPL"])
 
       send(feed, {:route_bootstrap_timeout, make_ref()})
       _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
-      assert :sys.get_state(feed).route_bootstrap == nil
+      state = :sys.get_state(feed)
+      assert state.route_bootstrap == nil
+
+      # "Must not tear down whatever is running now": the route and its socket are untouched,
+      # and the wanted set is intact. A bare `route_bootstrap == nil` held before the message.
+      assert state.route == :stream
+      assert state.socket == socket
+      assert MapSet.to_list(state.wanted) == ["AAPL"]
     end
 
     defp refute_eventually_alive(pid, waited \\ 0) do

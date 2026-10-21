@@ -88,7 +88,7 @@ defmodule DpExchange.Schwab.Supervisor do
   use Supervisor
 
   alias DpExchange.Core.{Config, DefaultRateLimiter}
-  alias DpExchange.Schwab.{Feed, Ledger, OrderLimit}
+  alias DpExchange.Schwab.{Feed, Ledger, Options, OrderLimit}
 
   # The vendor says "Get order requests are unthrottled" and states no limit for market data
   # at all (`spec-facts.md` §4) — an absence in the document, not a measurement. This is a
@@ -106,13 +106,20 @@ defmodule DpExchange.Schwab.Supervisor do
   # is what keeps this `0` from being mistaken for the consumer's own — see the moduledoc.
   @default_order_limit 0
 
-  @spec start_link(keyword()) :: Supervisor.on_start()
+  @doc """
+  Starts the tree. A key outside `DpExchange.Schwab.Options.start_keys/0` is refused before
+  anything starts, `{:error, {:unknown_option, key}}` (or `{:error, {:invalid_options, opts}}`
+  for a non-keyword list, with any `:credentials` redacted), never silently ignored.
+  """
+  @spec start_link(keyword()) :: Supervisor.on_start() | {:error, term()}
   def start_link(opts) do
-    # Wrapped here too: a caller that reached this function without `child_spec/1` (see
-    # `Credentials`) would otherwise leave the raw map in this supervisor's init args, which
-    # OTP prints with the supervisor's state if it ever terminates.
-    opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
-    Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    with :ok <- Options.check_start(opts) do
+      # Wrapped here too: a caller that reached this function without `child_spec/1` (see
+      # `Credentials`) would otherwise leave the raw map in this supervisor's init args, which
+      # OTP prints with the supervisor's state if it ever terminates.
+      opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
+      Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    end
   end
 
   @doc """

@@ -1,7 +1,7 @@
 defmodule DpExchange.Schwab.Credentials do
   @moduledoc """
   Wraps the OAuth credential set (`access_token`, `refresh_token`, `client_id`,
-  `client_secret`) so it can sit in a `GenServer`'s state without printing in full the
+  `client_secret`, and the non-secret `expires_at`, which `inspect/1` still shows) so it can sit in a `GenServer`'s state without printing in full the
   moment that process crashes.
 
   ## The incident this closes
@@ -87,7 +87,8 @@ defmodule DpExchange.Schwab.Credentials do
 
   @doc """
   Wraps the `:credentials` entry of an options keyword list, IN PLACE and only when that
-  key is actually present.
+  key is present AND its value is a map. An absent key, a `nil` and any other value are
+  returned untouched (the caller that consumes them judges them).
 
   This is what keeps a raw secret out of a **supervisor's stored child spec**, and it has
   to be applied in `child_spec/1` — nowhere later is early enough. A supervisor holds the

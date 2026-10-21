@@ -109,6 +109,7 @@ defmodule DpExchange.Schwab.BoundedTextTest do
 
       assert {:refused, {:venue_error, 404, detail}} = price(body, 404)
       assert byte_size(detail) < 2_100
+      assert String.ends_with?(detail, "(50000 bytes)")
     end
 
     test "an oversized error_description is cut" do
@@ -116,6 +117,7 @@ defmodule DpExchange.Schwab.BoundedTextTest do
 
       assert {:refused, {:venue_error, 401, detail}} = price(body, 401)
       assert byte_size(detail) < 2_100
+      assert String.ends_with?(detail, "(50000 bytes)")
     end
 
     test "a non-string errors detail becomes bounded text, not a raw term" do
@@ -150,6 +152,7 @@ defmodule DpExchange.Schwab.BoundedTextTest do
       long = %{"content" => %{"msg" => String.duplicate("s", 50_000)}}
 
       assert byte_size(StreamerProtocol.failure_message(long)) < 2_100
+      assert String.ends_with?(StreamerProtocol.failure_message(long), "(50000 bytes)")
       assert StreamerProtocol.failure_message(%{"content" => %{"msg" => "denied"}}) == "denied"
     end
   end

@@ -83,6 +83,11 @@ defmodule DpExchange.Schwab.SocketBackoffParentExitTest do
     # not its parent. `send/2` stands in for the signal so the test needs no link.
     send(pid, {:EXIT, other, :shutdown})
 
+    # Were the message taken for the parent's, the waiter would stop with that reason; give it
+    # time to, so the mailbox check below cannot pass merely because it has not run yet.
+    refute_receive {:DOWN, ^ref, :process, ^pid, _reason}, 600
+    refute_received {:backoff_finished, ^pid}
+
     # A local `send/2` is enqueued before it returns, so the message is already in the
     # waiter's mailbox: still there, unread, and the waiter still alive, is the proof that
     # it was not taken for its parent's. No wait decides this.

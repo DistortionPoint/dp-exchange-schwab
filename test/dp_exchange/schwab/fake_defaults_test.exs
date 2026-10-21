@@ -28,7 +28,9 @@ defmodule DpExchange.Schwab.FakeDefaultsTest do
     end
 
     test "get_all_orders/1 refuses the missing window exactly as the real path does" do
-      assert {:error, _reason} = expected = Rest.check_all_orders_window([])
+      assert {:error, {:from_and_to_required, :schwab}} =
+               expected = Rest.check_all_orders_window([])
+
       assert Fake.get_all_orders(@creds) == expected
     end
   end

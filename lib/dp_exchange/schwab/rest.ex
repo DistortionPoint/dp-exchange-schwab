@@ -365,12 +365,23 @@ defmodule DpExchange.Schwab.Rest do
   # _}` instead, with no comment ever recording that shape as measured against a live
   # response; replaced with the documented one rather than kept alongside an unverified
   # guess.
-  defp quote_row(body, native) when is_map(body) do
+  # `is_struct/1` is excluded throughout this module where a body is judged to be an object: a
+  # bare JSON number such as `42.5` is decoded to a `%Decimal{}` (`floats: :decimals`), which
+  # `is_map/1` and a `%{}` pattern both accept, and which would be read as an object with no
+  # keys ("not listed", an empty chain) instead of the wrong-kind reply it is.
+  defp quote_row(body, native) when is_map(body) and not is_struct(body) do
     case Map.get(body, native) do
-      %{"quote" => quote_map} when is_map(quote_map) -> {:ok, quote_map}
-      row when is_map(row) -> quote_error_or_unexpected(row)
-      nil -> {:refused, :not_listed}
-      _other -> {:error, :unexpected_response_shape}
+      %{"quote" => quote_map} when is_map(quote_map) and not is_struct(quote_map) ->
+        {:ok, quote_map}
+
+      row when is_map(row) and not is_struct(row) ->
+        quote_error_or_unexpected(row)
+
+      nil ->
+        {:refused, :not_listed}
+
+      _other ->
+        {:error, :unexpected_response_shape}
     end
   end
 
@@ -1006,9 +1017,9 @@ defmodule DpExchange.Schwab.Rest do
 
   # The response nests: %{"equity" => %{"EQ" => %{"isOpen" => true}}}. The inner key is
   # a product code that varies, so it is searched rather than assumed.
-  defp read_is_open(body, market) when is_map(body) do
+  defp read_is_open(body, market) when is_map(body) and not is_struct(body) do
     case Map.get(body, market) do
-      products when is_map(products) and map_size(products) > 0 ->
+      products when is_map(products) and not is_struct(products) and map_size(products) > 0 ->
         # Found 2026-10-10 by reading the path: `Enum.any?` over `product["isOpen"]` read an
         # ABSENT flag as `:closed` and the string "false" as truthy (`:open`). Only a real
         # boolean is evidence; if no product carries one the venue said nothing.
@@ -1277,8 +1288,11 @@ defmodule DpExchange.Schwab.Rest do
   # every active facade call plausible-but-wrong bodies. `Core.Venue`'s error discipline is
   # that a facade answers and never raises; `:unexpected_response_shape` is the refusal this
   # package's `Auth` already uses for the same condition.
-  defp object(%{} = body), do: {:ok, body}
+  defp object(body) when is_map(body) and not is_struct(body), do: {:ok, body}
   defp object(_other), do: {:error, :unexpected_response_shape}
+
+  # A JSON object, as opposed to the `%Decimal{}` a bare JSON number is decoded to.
+  defp plain_map?(value), do: is_map(value) and not is_struct(value)
 
   @doc """
   The expiries listed on an underlying — `GET /expirationchain`.
@@ -1549,7 +1563,7 @@ defmodule DpExchange.Schwab.Rest do
   # Accumulated as a list of per-expiry lists and flattened once at the end. `acc ++ contracts`
   # copied the whole accumulator for every expiry, which is quadratic on an index chain with
   # thousands of contracts. The order is the same as before (map iteration order).
-  defp chain_side(%{} = side, underlying, right) do
+  defp chain_side(side, underlying, right) when is_map(side) and not is_struct(side) do
     side
     |> Enum.reduce_while({:ok, []}, fn {expiry_key, strikes}, {:ok, acc} ->
       case chain_expiry(expiry_key) do
@@ -1587,7 +1601,8 @@ defmodule DpExchange.Schwab.Rest do
   # No clause for a key that is not a string: the map is a JSON object's, whose keys are always
   # strings, and it was found by a string-keyed lookup (`body["callExpDateMap"]`).
 
-  defp chain_strikes(%{} = strikes, underlying, expiry, right) do
+  defp chain_strikes(strikes, underlying, expiry, right)
+       when is_map(strikes) and not is_struct(strikes) do
     strikes
     |> Enum.reduce_while({:ok, []}, fn {strike_key, contracts}, {:ok, acc} ->
       case chain_strike(strike_key) do
@@ -1600,7 +1615,7 @@ defmodule DpExchange.Schwab.Rest do
           # A contract entry that is not an object is unreadable, and refuses the chain the
           # way an unreadable strike key does. It used to raise in `Access`, inside the
           # caller's process. Found by mutating real response bodies, 2026-09-27.
-          if Enum.all?(contracts, &is_map/1) do
+          if Enum.all?(contracts, &plain_map?/1) do
             rows = Enum.map(contracts, &to_contract(&1, underlying, expiry, strike, right))
             {:cont, {:ok, [rows | acc]}}
           else
@@ -1956,7 +1971,7 @@ defmodule DpExchange.Schwab.Rest do
   defp account_positions(%{"securitiesAccount" => %{"positions" => nil}}), do: []
 
   defp account_positions(%{"securitiesAccount" => account})
-       when is_map(account) and not is_map_key(account, "positions"),
+       when is_map(account) and not is_struct(account) and not is_map_key(account, "positions"),
        do: []
 
   # **Anything else is unreadable, and refuses the reply.** A `positions` that is not a list,
@@ -1969,9 +1984,9 @@ defmodule DpExchange.Schwab.Rest do
   # A row, or an `instrument`, that is not an object is a row this package cannot read, and
   # refuses the reply as the comment above says such a row must. Both used to raise in
   # `Access`, inside the caller's process. Found by mutating real response bodies, 2026-09-27.
-  defp to_position(%{} = row) do
+  defp to_position(row) when is_map(row) and not is_struct(row) do
     case row["instrument"] do
-      instrument when is_map(instrument) or is_nil(instrument) ->
+      instrument when (is_map(instrument) and not is_struct(instrument)) or is_nil(instrument) ->
         to_positions(row, instrument || %{})
 
       _unreadable ->
@@ -2143,7 +2158,10 @@ defmodule DpExchange.Schwab.Rest do
   # Absent is an empty balances object, as it always was. Present and not an object is
   # unreadable: it used to raise `BadMapError` inside the caller's process.
   defp current_balances(nil), do: {:ok, %{}}
-  defp current_balances(%{} = current), do: {:ok, current}
+
+  defp current_balances(current) when is_map(current) and not is_struct(current),
+    do: {:ok, current}
+
   defp current_balances(_unreadable), do: {:error, :unexpected_response_shape}
 
   defp position_side(long, short) do
@@ -2203,6 +2221,12 @@ defmodule DpExchange.Schwab.Rest do
 
   `opts[:status]` takes one of the venue's twenty-one statuses; `opts[:max_results]` bounds
   the page.
+
+  **A reply that may have been cut off is refused, never returned as complete**: with no
+  `:max_results`, or one of 3000 or more, a reply of 3000 or more rows is
+  `{:error, :history_truncated}` (the spec: "Default is 3000", and no ceiling is stated). Narrow
+  the window or pass a smaller `:max_results`. The window itself must start within 60 days of
+  now (`check_all_orders_window/1`).
   """
   @spec get_all_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -2228,14 +2252,26 @@ defmodule DpExchange.Schwab.Rest do
   # `maxResults` is "The max number of orders to retrieve. Default is 3000." (`GET /orders` and
   # `GET /accounts/{accountNumber}/orders`), so with no `:max_results` of the caller's own a
   # reply of 3000 or more rows may have been cut off, as for `get_transactions/3`. A caller who
-  # passed `:max_results` asked for that bound and gets the rows it bounded.
+  # passed a `:max_results` BELOW 3000 asked for that bound and gets the rows it bounded. One at
+  # or above 3000 asked for more than the documented default and the spec states no ceiling, so
+  # a reply of 3000 or more rows is as suspect as it is without one: it is refused too, rather
+  # than returned as the complete answer to a bound the venue may not have honoured.
   @orders_default_cap 3000
 
-  defp within_orders_cap(rows, opts) do
-    if Keyword.get(opts, :max_results) == nil and length(rows) >= @orders_default_cap,
+  @doc """
+  Whether `rows` is a complete orders reply under `opts[:max_results]`: `{:ok, rows}`, or
+  `{:error, :history_truncated}` for a reply of 3000 or more rows when `:max_results` is absent
+  or 3000 or more. Public so `DpExchange.Schwab.Fake` answers through the same check.
+  """
+  @spec within_orders_cap([map()], keyword()) :: {:ok, [map()]} | {:error, :history_truncated}
+  def within_orders_cap(rows, opts) do
+    if bound_unproven?(Keyword.get(opts, :max_results)) and length(rows) >= @orders_default_cap,
       do: {:error, :history_truncated},
       else: {:ok, rows}
   end
+
+  defp bound_unproven?(nil), do: true
+  defp bound_unproven?(max_results), do: max_results >= @orders_default_cap
 
   # Both ends, then a window that can mean something. The spec documents a maximum range of
   # one year for `GET /accounts/{accountNumber}/orders` ("Maximum date range is 1 year"),
@@ -2303,7 +2339,7 @@ defmodule DpExchange.Schwab.Rest do
   # `Orders.list_from_venue/1` already applies to the decoded orders: a list with an entry
   # silently dropped or kept as noise reads as complete.
   defp list_body(body) when is_list(body) do
-    if Enum.all?(body, &is_map/1), do: {:ok, body}, else: {:error, :unexpected_response_shape}
+    if Enum.all?(body, &plain_map?/1), do: {:ok, body}, else: {:error, :unexpected_response_shape}
   end
 
   defp list_body(_other), do: {:error, :unexpected_response_shape}
@@ -2613,7 +2649,9 @@ defmodule DpExchange.Schwab.Rest do
          do: object_or_list(body)
   end
 
-  defp object_or_list(body) when is_map(body) or is_list(body), do: {:ok, body}
+  defp object_or_list(body) when (is_map(body) and not is_struct(body)) or is_list(body),
+    do: {:ok, body}
+
   defp object_or_list(_other), do: {:error, :unexpected_response_shape}
 
   # **A path segment is one segment.** `URI.encode/1` leaves `/`, `?` and `#` alone (it encodes
@@ -2739,7 +2777,8 @@ defmodule DpExchange.Schwab.Rest do
     end
   end
 
-  defp balances(%{"securitiesAccount" => account}) when is_map(account) do
+  defp balances(%{"securitiesAccount" => account})
+       when is_map(account) and not is_struct(account) do
     with {:ok, current} <- current_balances(account["currentBalances"]),
          {:ok, total} <- balance_total(account["type"], current),
          {:ok, available} <- fetch_available(account["type"], current) do
@@ -3053,7 +3092,7 @@ defmodule DpExchange.Schwab.Rest do
   def preview_outcome(%{"orderValidationResult" => %{"rejects" => [_first | _rest] = rejects}}),
     do: {:refused, {:preview_rejected, rejects |> Enum.take(50) |> Enum.map(&bound_reject/1)}}
 
-  def preview_outcome(%{} = body), do: {:ok, body}
+  def preview_outcome(body) when is_map(body) and not is_struct(body), do: {:ok, body}
   def preview_outcome(_other), do: {:error, :unexpected_response_shape}
 
   # A `Decimal` is a map to the pattern below; it is a number the venue sent, kept as one.
@@ -3189,6 +3228,10 @@ defmodule DpExchange.Schwab.Rest do
   would return a real list of orders over a period the caller did not ask about, and an
   empty one would read as "no orders" rather than "no window given". `opts[:status]` and
   `opts[:max_results]` are the venue's own optional filters, sent only when given.
+
+  A reply of 3000 or more rows is `{:error, :history_truncated}` unless `:max_results` below
+  3000 was asked for, exactly as for `get_all_orders/2`: the rest of the window may be unseen,
+  and a list that looks complete is the failure this refuses.
   """
   @spec get_orders(map(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}

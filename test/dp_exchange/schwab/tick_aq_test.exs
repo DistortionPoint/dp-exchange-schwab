@@ -15,7 +15,7 @@ defmodule DpExchange.Schwab.TickAqTest do
 
   describe "an equity price must sit on the price increment, and is refused rather than rounded" do
     test "at or above one dollar the increment is a cent" do
-      assert {:ok, _result} = Orders.build(Map.put(@buy, :price, "190.25"))
+      assert {:ok, %{"price" => "190.25"}} = Orders.build(Map.put(@buy, :price, "190.25"))
 
       assert Orders.build(Map.put(@buy, :price, Decimal.new("190.255"))) ==
                {:error, {:price_not_on_tick, :price, Decimal.new("190.255"), "0.01"}}
@@ -40,7 +40,7 @@ defmodule DpExchange.Schwab.TickAqTest do
 
     test "an option price is not judged, and the Fake refuses what the facade builder refuses" do
       option = %{@buy | symbol: @option, side: :buy} |> Map.put(:instruction, "BUY_TO_OPEN")
-      assert {:ok, _result} = Orders.build(Map.put(option, :price, "6.455"))
+      assert {:ok, %{"price" => "6.455"}} = Orders.build(Map.put(option, :price, "6.455"))
 
       off = Map.put(@buy, :price, "190.255")
 
@@ -89,7 +89,8 @@ defmodule DpExchange.Schwab.TickAqTest do
                  {:error, {:invalid_order_field, :stop_price_offset, bad}}
       end
 
-      assert {:ok, _result} = Orders.build(Map.put(request, :stop_price_offset, 1))
+      assert {:ok, payload} = Orders.build(Map.put(request, :stop_price_offset, 1))
+      assert Jason.encode!(payload["stopPriceOffset"]) == "1"
     end
   end
 
@@ -104,7 +105,10 @@ defmodule DpExchange.Schwab.TickAqTest do
       assert {:error, {:invalid_decimal, :price, _value}} =
                StreamerDecode.to_quote(%{last: Integer.to_string(huge)}, "AAPL", now)
 
-      assert {:ok, _result} = StreamerDecode.to_quote(%{last: 123_456_789_012_345}, "AAPL", now)
+      assert {:ok, %{price: price}} =
+               StreamerDecode.to_quote(%{last: 123_456_789_012_345}, "AAPL", now)
+
+      assert Decimal.eq?(price, Decimal.new("123456789012345"))
     end
   end
 

@@ -181,6 +181,83 @@ defmodule DpExchange.Schwab.Options do
 
   defp allowed_without_name(function), do: transport(function) ++ Map.fetch!(@own, function)
 
+  # **The one table of start keys**: every key `Supervisor` (`:name`, the process-name overrides
+  # and the two ceilings), `Feed` (`init/1` and what it forwards to `Socket` and the fallback
+  # poll) and the facade's start path read. A start key outside it is refused at the entry
+  # point (`start_link/1`, which `child_spec/1` reaches when its supervisor starts the child), not
+  # silently ignored: a misspelt `order_limit_per_minut:` would otherwise start a tree that
+  # refuses every order write for a reason the caller cannot see, and a misspelt
+  # `read_limit_per_minute:` one that runs at a ceiling nobody chose.
+  @start_keys [
+    # Supervisor
+    :name,
+    :order_limit_per_minute,
+    :read_limit_per_minute,
+    :limiter,
+    :order_limit,
+    :ledger,
+    :feed,
+    # Feed
+    :credentials,
+    :symbols,
+    :subscriber,
+    :interval_ms,
+    :start_delay_ms,
+    :retry_attempts,
+    :rate_limit_blocking,
+    :max_queue_len,
+    :route_bootstrap_timeout_ms,
+    :bootstrap_reply_ms,
+    :config_snapshot,
+    :socket,
+    # Forwarded to the REST calls (`Rest.get_prices/3`, `get_user_preference/2`)
+    :plug,
+    :req_adapter,
+    :market_data_url,
+    :trader_url,
+    # Forwarded to `Socket.start_link/1`
+    :socket_connect_timeout,
+    :socket_recv_timeout,
+    :url,
+    :ssl_options,
+    :allow_insecure_socket
+  ]
+
+  @doc """
+  Every key a tree (`DpExchange.Schwab.start_link/1`, `Supervisor.start_link/1`,
+  `Feed.start_link/1`) reads at start. The table `check_start/1` judges against, and
+  `usage-rules.md` section 16 lists it.
+  """
+  @spec start_keys() :: [atom()]
+  def start_keys, do: @start_keys
+
+  @doc """
+  Checks a start `opts` against `start_keys/0`: `:ok`,
+  `{:error, {:unknown_option, key}}` for the first key it does not read (a `nil` value counts), or
+  `{:error, {:invalid_options, opts}}` when `opts` is not a keyword list, or
+  `{:error, {:invalid_option, :ssl_options}}` for an `:ssl_options` that is not a keyword list
+  (the value is never echoed: it may hold a key password). The first two are
+  `DpExchange.Core.Options.check/2`'s, which replaces a `:credentials` entry in any `opts` it
+  echoes, so a refused start never prints a token.
+  """
+  @spec check_start(term()) :: :ok | {:error, check_error() | {:invalid_option, :ssl_options}}
+  def check_start(opts) do
+    with :ok <- CoreOptions.check(opts, start_keys()), do: check_ssl_options(opts)
+  end
+
+  # `:ssl_options` is the WebSocket's TLS options (`Socket.connection_opts/1`): `nil` is silence
+  # and anything else must be a keyword list. A refusal names the option and never echoes the
+  # value, which may carry a `:password` for a private key.
+  defp check_ssl_options(opts) do
+    case Keyword.get(opts, :ssl_options) do
+      nil -> :ok
+      tls when is_list(tls) -> if Keyword.keyword?(tls), do: :ok, else: invalid_ssl()
+      _other -> invalid_ssl()
+    end
+  end
+
+  defp invalid_ssl, do: {:error, {:invalid_option, :ssl_options}}
+
   @doc """
   The extra keys only `DpExchange.Schwab.Fake` reads for `function`, as test seams.
   """

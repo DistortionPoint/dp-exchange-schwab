@@ -588,7 +588,51 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert order.created_at == ~U[2026-01-02 15:04:05Z]
       assert order.provider == :schwab
 
+      # Fields the fixture states and the decoder must carry, not drop. The fixture has no
+      # `stopPrice`, no `orderActivityCollection` (so no executions to average) and one leg.
+      assert Decimal.equal?(order.filled_quantity, Decimal.new(10))
+      assert order.stop_price == nil
+      assert order.average_price == nil
+      assert order.legs == []
+
       assert_received {:request, "GET", "/trader/v1/accounts/H/orders/1000000001", _query}
+    end
+
+    test "get_order/3 averages the order's EXECUTION executionLegs by quantity (ExecutionLeg)" do
+      # `OrderActivity.executionLegs` (AT:2079) of `ExecutionLeg` (AT:2094): price and
+      # quantity per fill. 4 @ 190.2 and 6 @ 190.3 weigh to (760.8 + 1141.8) / 10 = 190.26;
+      # an ORDER_ACTION activity is not a fill and must not enter the mean.
+      body =
+        "accounts_and_trading/order_filled_schema.json"
+        |> fixture!()
+        |> Map.put("orderActivityCollection", [
+          %{
+            "activityType" => "EXECUTION",
+            "executionType" => "FILL",
+            "quantity" => 4,
+            "executionLegs" => [%{"legId" => 1, "price" => 190.2, "quantity" => 4}]
+          },
+          %{
+            "activityType" => "EXECUTION",
+            "executionType" => "FILL",
+            "quantity" => 6,
+            "executionLegs" => [%{"legId" => 1, "price" => 190.3, "quantity" => 6}]
+          },
+          %{
+            "activityType" => "ORDER_ACTION",
+            "executionLegs" => [%{"legId" => 1, "price" => 1.0, "quantity" => 1000}]
+          }
+        ])
+
+      assert {:ok, %Order{} = order} =
+               Schwab.get_order(@creds, "1000000001",
+                 account_hash: "H",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(order.average_price, Decimal.new("190.26"))
+      assert order.status == :filled
     end
   end
 
@@ -610,6 +654,7 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       assert filled["status"] == "FILLED"
       assert working["status"] == "WORKING"
       assert working["filledQuantity"] == 4
+      assert {filled["orderId"], working["orderId"]} == {1_000_000_001, 1_000_000_002}
 
       assert_received {:request, "GET", "/trader/v1/orders", query}
       assert query =~ "fromEnteredTime=2026-01-01T00"
@@ -633,6 +678,24 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
 
       assert filled.status == :filled
       assert working.status == :partially_filled
+
+      # Field by field, so each row is checked as the vendor's own schema states it and a
+      # decoder that returned the first row twice, or dropped a field, cannot pass.
+      assert {filled.id, filled.symbol, filled.side} == {"1000000001", "AAPL", :buy}
+      assert {working.id, working.symbol, working.side} == {"1000000002", "BAC", :sell}
+
+      for row <- [filled, working] do
+        assert row.order_type == :limit
+        assert row.time_in_force == :day
+        assert Decimal.equal?(row.quantity, Decimal.new(10))
+        assert Decimal.equal?(row.price, Decimal.from_float(190.25))
+        assert row.created_at == ~U[2026-01-02 15:04:05Z]
+        assert row.average_price == nil
+        assert row.provider == :schwab
+      end
+
+      assert Decimal.equal?(filled.filled_quantity, Decimal.new(10))
+      assert Decimal.equal?(working.filled_quantity, Decimal.new(4))
 
       assert_received {:request, "GET", "/trader/v1/accounts/H/orders", query}
       assert query =~ "fromEnteredTime="
@@ -660,8 +723,17 @@ defmodule DpExchange.Schwab.SpecExamplesTest do
       plug =
         capturing_body(201, %{}, [{"location", "/v1/trader/accounts/H/orders/1000000001"}])
 
-      assert {:ok, %DpExchange.Core.Types.Order{id: "1000000001"}} =
+      # The read-back of this plug cannot be decoded (a GET has no JSON body), so the answer
+      # is built from the body that was sent: every field below comes from the fixture.
+      assert {:ok, %Order{id: "1000000001"} = placed} =
                Schwab.place_order(@creds, request, account_hash: "H", plug: plug)
+
+      assert placed.symbol == "XYZ"
+      assert placed.side == :buy
+      assert placed.order_type == :market
+      assert placed.time_in_force == :day
+      assert Decimal.equal?(placed.quantity, Decimal.new(15))
+      assert placed.status == :pending
 
       assert_received {:request, "POST", "/trader/v1/accounts/H/orders", body}
       assert body == expected

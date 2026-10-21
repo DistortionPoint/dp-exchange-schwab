@@ -54,7 +54,12 @@ defmodule DpExchange.Schwab.StreamerTest do
         }
       }
 
-      assert {:ok, _info} = StreamerInfo.from_user_preference(body)
+      assert {:ok, info} = StreamerInfo.from_user_preference(body)
+      assert info.socket_url == "wss://x"
+      assert info.customer_id == "c"
+      assert info.correl_id == "r"
+      assert info.channel == "IO"
+      assert info.function_id == "F"
     end
 
     test "a missing field is an error, not a nil carried into LOGIN" do

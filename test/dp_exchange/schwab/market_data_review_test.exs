@@ -142,7 +142,7 @@ defmodule DpExchange.Schwab.MarketDataReviewTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, "/marketdata/v1/chains", query}
+      assert_receive {:request, "/marketdata/v1/chains", query}, 5_000
       assert query =~ "fromDate=2026-03-01"
       assert query =~ "toDate=2026-04-01"
     end
@@ -345,7 +345,7 @@ defmodule DpExchange.Schwab.MarketDataReviewTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, path, query}
+      assert_receive {:request, path, query}, 5_000
       assert path == "/marketdata/v1/instruments/037%2F833%3F100"
       assert query == ""
     end

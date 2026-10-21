@@ -119,7 +119,7 @@ defmodule DpExchange.Schwab.Auth do
   (`check_unexpired/1`), before any request and before a rate-limit slot is spent: the venue's
   answer would be a `401` the package already knows. A credential with no `:expires_at` is
   signed as ever, and a `401` from the venue is returned once as `{:refused, {:venue_error,
-  401, _}}`; **nothing in this package refreshes on a `401`, retries after one, or loops** -
+  401}}` (or `{:venue_error, 401, detail}` when its body carried one); **nothing in this package refreshes on a `401`, retries after one, or loops** -
   refreshing is the host's call (`credential_failure?/1`, `refresh/2`).
 
   Nothing is cached here. This module holds no state, writes nothing, and logs no token
@@ -189,7 +189,8 @@ defmodule DpExchange.Schwab.Auth do
   **A token with surrounding whitespace is refused, not trimmed and sent**:
   `{:error, {:invalid_credentials, :schwab}}`. Trimming made a mangled credential work
   silently on one call and fail on every other path that read the same value untrimmed
-  (the Streamer `LOGIN`, the refresh). The value is never echoed in the error.
+  (the Streamer `LOGIN`, the refresh). So is one with an interior control character (a
+  newline) or one that is not valid UTF-8. The value is never echoed in the error.
   """
   @spec headers(credentials() | nil, keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
@@ -210,7 +211,7 @@ defmodule DpExchange.Schwab.Auth do
   @doc """
   Judges one credential string: `{:ok, value}`, `{:error, {:missing_credentials, :schwab}}`
   when it is blank, or `{:error, {:invalid_credentials, :schwab}}` when it has surrounding
-  whitespace. Never echoes the value.
+  whitespace, an interior control character, or is not valid UTF-8. Never echoes the value.
 
   Shared by `headers/2`, `refresh/2` and the `Feed`, so every path that reads a credential
   asks the same question.
@@ -338,7 +339,10 @@ defmodule DpExchange.Schwab.Auth do
   from the venue's own `expires_in` and dated from the instant the request was **sent**
   (never from when the reply was read, which would credit the token with the round trip),
   merged over whatever the caller passed in so the
-  host's own bookkeeping survives the round trip.
+  host's own bookkeeping survives the round trip. **A response with no `expires_in`, or one that
+  is not a positive integer of at most 86_400 seconds, carries no expiry claim**: the result has
+  no `:expires_at` (the previous token's is dropped, never kept), and `needs_refresh?/2` then
+  answers `false` for it, so the host refreshes reactively on a `401`.
 
   **The caller must persist the result before using it.** The refresh token passed in has
   been spent by this call; the one returned is its only replacement. Losing it costs the
@@ -365,7 +369,9 @@ defmodule DpExchange.Schwab.Auth do
     `invalid_client`: the app's `client_id` or `client_secret` is wrong. The grant may be
     intact; fix the configuration, and do not send a person to log in.
   - `{:error, :missing_rotated_refresh_token}` — Schwab accepted the refresh and returned
-    an access token but no replacement refresh token. Treated as a failure rather than a
+    an access token but no replacement refresh token, or one that is blank, padded or
+    contains control characters (the next `refresh/2` would refuse it before sending).
+    Treated as a failure rather than a
     success, because the old token is already spent and reporting success would hand back
     a credential guaranteed to die at the next refresh.
   - `{:error, :unexpected_response_shape}` — a `2xx` JSON body with no `access_token`, or one
@@ -655,8 +661,19 @@ defmodule DpExchange.Schwab.Auth do
   # The rotated token is mandatory, not opportunistic. See the module doc: the token this
   # request was made with is spent, so a response without a replacement leaves the host
   # holding a dead string it would not discover until the next refresh.
-  defp put_rotated_refresh(renewed, token) when is_binary(token) and token != "",
-    do: {:ok, Map.put(renewed, :refresh_token, token)}
+  #
+  # **A replacement the next refresh would refuse is not a replacement.** `token != ""` let
+  # `"   "`, `" rt "` and a token with a control character through, so the host persisted a
+  # credential whose next `refresh/2` answered `{:missing_credentials, :schwab}` ("nothing was
+  # sent, nothing is spent") or `{:invalid_credentials, :schwab}`, days later and far from the
+  # cause. The same `check_token/1` every other credential path uses judges it here, and a
+  # value that fails it is the same answer as an absent one.
+  defp put_rotated_refresh(renewed, token) when is_binary(token) do
+    case check_token(token) do
+      {:ok, token} -> {:ok, Map.put(renewed, :refresh_token, token)}
+      {:error, _unusable} -> {:error, :missing_rotated_refresh_token}
+    end
+  end
 
   defp put_rotated_refresh(_renewed, _absent), do: {:error, :missing_rotated_refresh_token}
 
@@ -668,7 +685,8 @@ defmodule DpExchange.Schwab.Auth do
 
   **Reachable through the facade as `DpExchange.Schwab.credential_failure?/1`.** Every
   `Rest` function that reaches the venue returns `{:refused, {:venue_error, status,
-  detail}}` on a `4xx`, carrying `status` for exactly this check — a host that just
+  detail}}` on a `4xx` whose body carried a detail, and `{:refused, {:venue_error, status}}`
+  when it carried none — either way `status` is there for exactly this check. A host that just
   received that tuple passes `status` here to decide whether the fix is
   `refresh_credentials/2` or something else, rather than re-deriving which codes mean
   "credential" itself.

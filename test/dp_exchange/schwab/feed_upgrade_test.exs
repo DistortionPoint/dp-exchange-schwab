@@ -255,7 +255,7 @@ defmodule DpExchange.Schwab.FeedUpgradeTest do
     :ok = Feed.update_credentials(feed, %{})
     send(request, {:release, user_preference(url), 200})
 
-    assert Task.await(subscribing, 15_000)
+    assert :ok = Task.await(subscribing, 15_000)
 
     assert_receive {:dp_exchange, :schwab, %Notice{kind: :degraded, details: details}}, 5_000
     assert details.reason == :streamer_unreachable

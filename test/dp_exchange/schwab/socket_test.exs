@@ -97,7 +97,12 @@ defmodule DpExchange.Schwab.SocketTest do
     # raised inside `handle_frame/2`, and a raise there drops the connection.
     test "a response entry that is not an object is skipped" do
       for bad <- [true, [%{}], nil, "x"] do
-        assert {:ok, _state} = Socket.handle_frame(frame(%{"response" => [bad]}), state())
+        assert {:ok, next} = Socket.handle_frame(frame(%{"response" => [bad]}), state())
+
+        # Skipped means skipped: no session change, no failure counted, nothing published.
+        refute next.logged_in?
+        assert next.login_failures == 0
+        refute_received {:dp_exchange, :schwab, _payload}
       end
     end
 
@@ -108,7 +113,9 @@ defmodule DpExchange.Schwab.SocketTest do
         ]
       }
 
-      assert {:ok, _state} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      assert {:ok, next} = Socket.handle_frame(frame(data), state(%{logged_in?: true}))
+      assert next.last_top == %{}
+      refute_received {:dp_exchange, :schwab, _payload}
     end
 
     test "a row naming no symbol is dropped, not published with symbol nil" do
@@ -1185,7 +1192,10 @@ defmodule DpExchange.Schwab.SocketTest do
 
     test "a malformed frame does not take down the socket" do
       # One bad message must not kill a live feed.
-      assert {:ok, _state} = Socket.handle_frame({:text, "not json"}, state())
+      assert {:ok, next} = Socket.handle_frame({:text, "not json"}, state())
+
+      assert next.undecodable_reported?
+      assert_received {:dp_exchange, :schwab, %Notice{kind: :data_quality}}
     end
 
     test "an unrecognised frame shape is never read as data, and is said once" do
@@ -1552,7 +1562,7 @@ defmodule DpExchange.Schwab.SocketTest do
       assert Decimal.equal?(state.last_top["AAPL"].bid, Decimal.new("99.50"))
     end
 
-    test "a key the venue streams past the carried-book cap is published but not carried" do
+    test "a key the venue streams past the carried-book cap is neither published nor carried" do
       full = Map.new(1..5_000, fn n -> {"K#{n}", %{symbol: "K#{n}"}} end)
 
       {:ok, state} =
@@ -1561,7 +1571,12 @@ defmodule DpExchange.Schwab.SocketTest do
           state(%{last_top: full})
         )
 
-      assert_received {:dp_exchange, :schwab, %TopOfBook{symbol: "NEWKEY"}}
+      # A delta with nothing to merge onto would read its absent sides as "no resting order"
+      # (tick AR): withheld, and the cap announced instead.
+      assert_received {:dp_exchange, :schwab,
+                       %Notice{kind: :degraded, details: %{reason: :book_state_capped}}}
+
+      refute_received {:dp_exchange, :schwab, %TopOfBook{symbol: "NEWKEY"}}
       assert map_size(state.last_top) == 5_000
       refute is_map_key(state.last_top, "NEWKEY")
 

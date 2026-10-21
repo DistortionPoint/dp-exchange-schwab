@@ -120,6 +120,10 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
       shared = DpExchange.Core.Options.transport_options()
       requesting = Enum.map(@answering, &elem(&1, 0)) -- @no_request
 
+      # The comprehension below must not run over nothing and pass.
+      assert shared -- [:environment, :base_url] != []
+      assert requesting != []
+
       for function <- requesting, key <- shared -- [:environment, :base_url] do
         # An order write is one attempt (no wait to scale); a refresh is never retried.
         unread =
@@ -144,6 +148,7 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
 
     test "a call that sends no request allows its own keys and :credentials, no transport key" do
       shared = DpExchange.Core.Options.transport_options() -- [:credentials]
+      assert shared != []
 
       for function <- @no_request ++ @plain_reads do
         allowed = Options.allowed(function)
@@ -431,7 +436,7 @@ defmodule DpExchange.Schwab.UnknownOptionTest do
                dp_contract_unknown_option: true
              ) == {:error, {:unknown_option, :dp_contract_unknown_option}}
 
-      assert {:ok, _quote} = Fake.get_price("AAPL", credentials: @creds)
+      assert {:ok, %{symbol: "AAPL"}} = Fake.get_price("AAPL", credentials: @creds)
     end
   end
 end

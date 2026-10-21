@@ -179,8 +179,11 @@ defmodule DpExchange.Schwab do
   @doc """
   Starts this venue's supervision tree through `DpExchange.Schwab.Supervisor.start_link/1`.
 
-  Reads `:name`, `:order_limit_per_minute`, `:read_limit_per_minute` and the feed options. See
-  `c:DpExchange.Core.Venue.start_link/1`.
+  Reads `:name`, `:order_limit_per_minute`, `:read_limit_per_minute` and the feed options, and
+  **refuses a key it does not read** before anything starts: `{:error, {:unknown_option, key}}`,
+  or `{:error, {:invalid_options, opts}}` for a non-keyword list (a `:credentials` entry is
+  redacted). The table is `DpExchange.Schwab.Options.start_keys/0`; `child_spec/1` reaches the
+  same check when its supervisor starts the child. See `c:DpExchange.Core.Venue.start_link/1`.
   """
   @impl true
   def start_link(opts), do: Supervisor.start_link(opts)
@@ -510,6 +513,12 @@ defmodule DpExchange.Schwab do
   @doc """
   Cancel an open order.
 
+  `{:ok, :cancelled}` means the venue accepted the cancel request (a 2xx), not that the order
+  has already left the book: Schwab may report it `PENDING_CANCEL` first, and a fill can beat the
+  cancel. Read it with `get_order/3` for its final state. An order already filled, cancelled or
+  replaced is the venue's 4xx, `{:refused, {:venue_error, status, detail}}` (or
+  `{:venue_error, status}` with no detail), never `{:ok, _}`.
+
   `{:error, :order_limit_not_declared}` under the same conditions as `place_order/3` — a
   cancel is a `DELETE` order write, the same throttled category as a placement.
   """
@@ -677,7 +686,8 @@ defmodule DpExchange.Schwab do
   request.
 
   Every `get_*`/`place_*`/`cancel_*` call above that reaches the venue returns
-  `{:refused, {:venue_error, status, detail}}` on a `4xx`. `status in [401, 403]` means
+  `{:refused, {:venue_error, status, detail}}` (`{:venue_error, status}` when the body carries
+  no detail) on a `4xx`. `status in [401, 403]` means
   the access token itself is the problem — the caller's move is `refresh_credentials/2`
   and one retry; any other `4xx` is about the request and retrying it with a fresh token
   would not help.

@@ -306,6 +306,7 @@ defmodule DpExchange.Schwab.Feed do
     Bound,
     Credentials,
     Ledger,
+    Options,
     Rest,
     Socket,
     StreamerInfo,
@@ -368,15 +369,35 @@ defmodule DpExchange.Schwab.Feed do
   Re-applying in the server rather than resolving per request is right *here* because a feed
   belongs to one supervision subtree. A shared long-lived server would leak one caller's
   configuration into another's; this one has a single caller by construction.
-  """
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts) do
-    opts =
-      opts
-      |> Credentials.wrap_opt()
-      |> Keyword.put_new(:config_snapshot, Config.snapshot(@config_keys))
 
-    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  **Options are judged in `init/1`, and a bad one raises `ArgumentError` there** (so the
+  child fails to start, naming the option; a refused value that could carry a secret is not
+  shown). A forwarded `nil` is silence for each of them:
+
+    * `:credentials` must be a map.
+    * `:interval_ms` (default `#{@interval_ms}`) must be a positive integer.
+    * `:symbols` must be a list of equity or option tickers this venue accepts, and
+      `:subscriber` a pid or a registered name.
+    * `:route_bootstrap_timeout_ms` (default `#{@route_bootstrap_timeout_ms}`),
+      `:bootstrap_reply_ms` (default `#{@bootstrap_reply_ms}`), `:socket_connect_timeout`
+      and `:socket_recv_timeout` must be positive integers (milliseconds).
+    * `:start_delay_ms` and `:retry_attempts` must be non-negative integers.
+    * `:max_queue_len` is judged by `Core.Fanout.max_queue_len!/2`.
+
+  **A key outside `DpExchange.Schwab.Options.start_keys/0` is refused before the process
+  starts**: `{:error, {:unknown_option, key}}` (a `nil` value counts), or `{:error,
+  {:invalid_options, opts}}` for a non-keyword list, with any `:credentials` redacted.
+  """
+  @spec start_link(keyword()) :: GenServer.on_start() | {:error, term()}
+  def start_link(opts) do
+    with :ok <- Options.check_start(opts) do
+      opts =
+        opts
+        |> Credentials.wrap_opt()
+        |> Keyword.put_new(:config_snapshot, Config.snapshot(@config_keys))
+
+      GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    end
   end
 
   @doc """
@@ -682,7 +703,7 @@ defmodule DpExchange.Schwab.Feed do
     # message back to its own mailbox, which delivered it again, forever (found 2026-10-10;
     # `Supervisor` passes no `:subscriber`). Subscribers arrive through `subscribe/3`'s `to:`.
     subscriber = Config.opt(opts, :subscriber, nil)
-    credentials = opts |> Keyword.get(:credentials, %{}) |> Credentials.wrap()
+    credentials = boot_credentials!(opts)
 
     state = %{
       # Wrapped immediately, before it reaches `state` — see `Credentials`'s moduledoc.
@@ -702,7 +723,11 @@ defmodule DpExchange.Schwab.Feed do
       # `Feed` no longer stores the raw `opts` it was started with". Nothing below reads
       # `:credentials` back out of `state.opts`; only `state.credentials` is ever signed
       # with.
-      opts: Keyword.delete(opts, :credentials),
+      opts: opts |> Keyword.delete(:credentials) |> Keyword.delete(:ssl_options),
+      # The WebSocket's TLS options, forwarded to `Socket`. Held behind a closure so a crash
+      # report of this state prints a function reference, not a key `:password`. Already judged
+      # (a keyword list or `nil`) by `Options.check_start/1` at `start_link/1`.
+      ssl_options: ssl_options_cell(Keyword.get(opts, :ssl_options)),
       request_opts:
         opts
         |> Keyword.take([
@@ -1453,8 +1478,9 @@ defmodule DpExchange.Schwab.Feed do
   # **The socket is still opened by this process, not by the task**, and that is not an
   # oversight: `Socket.start_link/1` links to its caller, so opening it inside the task
   # would tie the venue's connection to a process that exits moments later. The task fetches;
-  # this GenServer connects. The connect is bounded by `@socket_connect_timeout_ms` (3_000)
-  # and is the only part still on the mailbox.
+  # this GenServer connects. The connect is bounded by `Socket`'s own
+  # `@socket_connect_timeout_ms` (3_000, overridable as `:socket_connect_timeout`) and is the
+  # only part still on the mailbox.
 
   # Already settled — answer now, with no bootstrap at all.
   defp settle_route(%{route: route} = state, _from) when route in [:stream, :poll],
@@ -1595,24 +1621,7 @@ defmodule DpExchange.Schwab.Feed do
       tag = make_ref()
 
       result =
-        Socket.start_link(
-          Keyword.merge(
-            # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
-            # chooses deliberate defaults rather than inheriting websockex's, which do not
-            # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
-            Keyword.take(state.opts, [
-              :url,
-              :socket_connect_timeout,
-              :socket_recv_timeout,
-              # Test-only seam, see `Socket.start_link/1`: a plain-TCP stand-in for the Streamer.
-              :allow_insecure_socket
-            ]),
-            streamer_info: info,
-            access_token: token,
-            subscriber: self(),
-            tag: tag
-          )
-        )
+        Socket.start_link(socket_options(state, info, token, tag))
 
       with {:ok, socket} <- result, do: {:ok, socket, tag}
     end
@@ -2404,6 +2413,21 @@ defmodule DpExchange.Schwab.Feed do
     raise ArgumentError, "symbols must be a list of ticker strings, got: #{inspect(other)}"
   end
 
+  # The boot-time `:credentials`: a map, or silence (absent or a forwarded `nil`, which is no
+  # credential yet; a call that needs one then refuses it by name). Anything else raised a
+  # `FunctionClauseError` out of `Credentials.wrap/1`, and a forwarded `nil` was one of those.
+  # **The refused value is not echoed**: a keyword list or a bare token string is exactly what
+  # a mistaken caller passes, and it carries the secret into the crash report.
+  defp boot_credentials!(opts) do
+    case Config.opt(opts, :credentials, %{}) do
+      %{} = credentials ->
+        Credentials.wrap(credentials)
+
+      _not_a_map ->
+        raise ArgumentError, "credentials must be a map (the value is not shown)"
+    end
+  end
+
   # The boot-time `:subscriber` gets the judgement `subscribe/3`'s `:to` gets. A string or a
   # tuple was stored and raised inside `Core.Fanout.resolve/1` on the first delivery, in this
   # shared process. `nil` is silence (no boot subscriber).
@@ -2420,6 +2444,39 @@ defmodule DpExchange.Schwab.Feed do
                 inspect(subscriber, limit: 10, printable_limit: 64)
     end
   end
+
+  @doc """
+  The options `Socket.start_link/1` is started with, from this feed's `state`: what the caller
+  tuned (`:url`, the two socket timeouts, `:ssl_options`, and the test-only
+  `:allow_insecure_socket`) plus the bootstrap `info`, the access `token`, this feed as the
+  subscriber and the route `tag`. Public so a test can read back what reaches the socket's
+  connect without dialling one; `build_socket/2` calls it.
+  """
+  @spec socket_options(map(), term(), String.t(), reference()) :: keyword()
+  def socket_options(state, info, token, tag) do
+    Keyword.merge(
+      # The timeouts are forwarded so a consumer can tune the connect budget. `Socket`
+      # chooses deliberate defaults rather than inheriting websockex's, which do not
+      # fit inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
+      Keyword.take(state.opts, [
+        :url,
+        :socket_connect_timeout,
+        :socket_recv_timeout,
+        # Test-only seam, see `Socket.start_link/1`: a plain-TCP stand-in for the Streamer.
+        :allow_insecure_socket
+      ]),
+      [streamer_info: info, access_token: token, subscriber: self(), tag: tag] ++
+        ssl_options_for_socket(Map.get(state, :ssl_options))
+    )
+  end
+
+  defp ssl_options_cell(nil), do: nil
+  defp ssl_options_cell(options), do: fn -> options end
+
+  # `Socket` keeps verification on whatever it is given that drops `verify: :verify_peer`
+  # (`Socket.connection_opts/1`), so forwarding the caller's list cannot turn it off.
+  defp ssl_options_for_socket(nil), do: []
+  defp ssl_options_for_socket(cell), do: [ssl_options: cell.()]
 
   # Timers and connect budgets: read long after start, where a bad one fails inside
   # `Process.send_after/3` or the dial, in this process. `nil` is silence (the default).

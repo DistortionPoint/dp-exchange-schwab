@@ -405,8 +405,13 @@ defmodule DpExchange.SchwabTest do
 
     test "subscribe, unsubscribe and update_symbols all route", %{name: name} do
       assert :ok = Schwab.subscribe(["AAPL"], feed: name)
+      assert Schwab.wanted(feed: name) == ["AAPL"]
+
       assert :ok = Schwab.update_symbols(["AAPL", "MSFT"], feed: name)
+      assert Enum.sort(Schwab.wanted(feed: name)) == ["AAPL", "MSFT"]
+
       assert :ok = Schwab.unsubscribe(["MSFT"], feed: name)
+      assert Schwab.wanted(feed: name) == ["AAPL"]
     end
 
     test "coverage is empty until something actually arrives", %{name: name} do
@@ -793,7 +798,7 @@ defmodule DpExchange.SchwabTest do
       # Bars carry four prices now, not one. A fake whose OHLC all matched could not catch
       # a caller reading the wrong one.
       assert Enum.all?(candles, &Decimal.lt?(&1.low, &1.high))
-      assert Enum.all?(candles, & &1.opened_at)
+      assert Enum.all?(candles, &match?(%DateTime{}, &1.opened_at))
     end
 
     test "the market can be closed, which is the only place that path is testable" do

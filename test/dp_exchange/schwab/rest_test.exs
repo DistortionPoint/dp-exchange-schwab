@@ -135,7 +135,8 @@ defmodule DpExchange.Schwab.RestTest do
 
       assert Decimal.equal?(quoted.price, Decimal.new("227.5"))
       assert quoted.venue_time == nil, "the venue stated no time, and nil says exactly that"
-      assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
+      assert %DateTime{} = quoted.observed_at
+      assert DateTime.diff(DateTime.utc_now(), quoted.observed_at, :second) in -5..60
     end
 
     test "a dated quote still carries the venue's own time" do
@@ -388,13 +389,22 @@ defmodule DpExchange.Schwab.RestTest do
     end
 
     test "no range asks for the deepest the width allows" do
-      body = %{"candles" => []}
+      # `periodType=year` legalises 1, 2, 3, 5, 10, 15 and 20: the deepest is 20.
+      capture = fn conn ->
+        send(self(), {:request, conn.query_string})
+        Req.Test.json(conn, %{"candles" => []})
+      end
 
       assert {:ok, []} =
                Rest.get_historical_prices("AAPL", "1d", [], @creds,
-                 plug: responding(body),
+                 plug: capture,
                  retry_attempts: 0
                )
+
+      assert_received {:request, query}
+      params = URI.decode_query(query)
+      assert params["periodType"] == "year"
+      assert params["period"] == "20"
     end
 
     test "an explicit range sends startDate/endDate, not just a period-sized lookback" do

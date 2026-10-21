@@ -25,7 +25,7 @@ defmodule DpExchange.Schwab.FeedTest do
   use DpExchange.Schwab.FeedCase, async: true
 
   alias DpExchange.Core.{Config, Notice, Types}
-  alias DpExchange.Schwab.Feed
+  alias DpExchange.Schwab.{Credentials, Feed}
 
   defmodule ExitOnceLimiter do
     @moduledoc false
@@ -244,6 +244,20 @@ defmodule DpExchange.Schwab.FeedTest do
       assert {:ok, _state} = Feed.init(start_delay_ms: nil, retry_attempts: nil)
     end
 
+    test "credentials: nil is silence, and a non-map is refused without showing the value" do
+      assert {:ok, %{credentials: %Credentials{access_token: nil}}} =
+               Feed.init(credentials: nil)
+
+      for bad <- [[access_token: "LEAK_PROOF_TOKEN"], "LEAK_PROOF_TOKEN"] do
+        error =
+          assert_raise ArgumentError, ~r/credentials must be a map/, fn ->
+            Feed.init(credentials: bad)
+          end
+
+        refute error.message =~ "LEAK_PROOF_TOKEN"
+      end
+    end
+
     test "a notice for a subscriber name nothing holds is skipped, and the others still get it" do
       feed = start_feed(plug: responding(%{"error" => "unauthorized"}, 401), retry_attempts: 0)
 
@@ -284,6 +298,13 @@ defmodule DpExchange.Schwab.FeedTest do
 
       assert Feed.coverage(feed) == %{}
       assert Feed.coverage_by_kind(feed) == %{}
+
+      # No bootstrap task in flight either: a request that was still on its way to the plug
+      # would not yet have sent the message below, so the in-flight state is asserted too.
+      state = :sys.get_state(feed)
+      assert state.route_bootstrap == nil
+      assert state.poller == nil
+      assert state.socket == nil
       refute_received :unexpected_venue_call
     end
 
@@ -300,6 +321,7 @@ defmodule DpExchange.Schwab.FeedTest do
       # A synchronous call is the fence: without it the negative below is checked before
       # anything queued behind `init/1` has run, and could not fail.
       assert %{route: nil} = Feed.status(feed)
+      assert :sys.get_state(feed).route_bootstrap == nil
       refute_received :venue_call
 
       :ok = Feed.subscribe(feed, ["AAPL"])
@@ -1515,6 +1537,10 @@ defmodule DpExchange.Schwab.FeedTest do
       Feed.subscribe(feed, ["AAPL", @option_symbol])
 
       services = subscribed_services(socket)
+
+      # Not vacuous: the services that ARE wanted were sent, so an empty map cannot pass.
+      assert Map.has_key?(services, "LEVELONE_EQUITIES")
+      assert Map.has_key?(services, "LEVELONE_OPTIONS")
       refute Map.has_key?(services, "NYSE_BOOK")
       refute Map.has_key?(services, "NASDAQ_BOOK")
       refute Map.has_key?(services, "OPTIONS_BOOK")

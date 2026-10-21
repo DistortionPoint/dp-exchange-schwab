@@ -28,6 +28,9 @@ defmodule DpExchange.Schwab.UnresponsiveFeedTest do
     notices = Task.async(fn -> Schwab.subscribe_notices(feed: silent, to: self()) end)
     coverage = Task.async(fn -> Schwab.coverage(feed: silent) end)
 
-    assert [{:error, :feed_timeout}, %{}] = Task.await_many([notices, coverage], 40_000)
+    # `%{}` as a pattern matches ANY map, so the read is compared by value: empty, not merely
+    # a map.
+    assert [{:error, :feed_timeout}, empty] = Task.await_many([notices, coverage], 40_000)
+    assert empty == %{}
   end
 end

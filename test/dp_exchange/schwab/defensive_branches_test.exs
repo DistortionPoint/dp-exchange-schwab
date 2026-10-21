@@ -12,6 +12,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
   @moduletag :capture_log
 
   alias DpExchange.Core.Config
+  alias DpExchange.Core.Types.Quote
   alias DpExchange.Schwab
   alias DpExchange.Schwab.Rest
 
@@ -60,7 +61,9 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       assert {:ok, quoted} = Rest.get_price("AAPL", @creds, opts(responding(body)))
 
       assert quoted.venue_time == nil
-      assert quoted.observed_at
+      # The local clock is recorded where it belongs, as the arrival time, and nowhere else.
+      assert %DateTime{} = quoted.observed_at
+      assert Decimal.equal?(quoted.price, Decimal.new("1.0"))
       refute quoted.venue_time == quoted.observed_at
     end
 
@@ -219,14 +222,24 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                Rest.get_symbols(@creds, opts(responding(body)) ++ [query: "A"])
     end
 
-    test "the projection is selectable" do
+    test "the projection is selectable, and is the one sent" do
       body = %{"instruments" => [%{"symbol" => "AAPL"}]}
+      test_pid = self()
+
+      capture = fn conn ->
+        send(test_pid, {:instruments_query, conn.query_string})
+        Req.Test.json(conn, body)
+      end
 
       assert {:ok, ["AAPL"]} =
                Rest.get_symbols(
                  @creds,
-                 opts(responding(body)) ++ [query: "apple", projection: "desc-search"]
+                 opts(capture) ++ [query: "apple", projection: "desc-search"]
                )
+
+      assert_received {:instruments_query, query}
+      assert query =~ "projection=desc-search"
+      assert query =~ "symbol=apple"
     end
   end
 
@@ -350,6 +363,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       assert {:ok, [balance]} = Rest.get_balances(@creds, "H", opts(responding(body)))
       assert balance.available_balance == nil
+      # The cash side the venue did send is still read; only the unsent side is absent.
+      assert Decimal.equal?(balance.balance, Decimal.new("1.0"))
     end
   end
 
@@ -564,8 +579,35 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       :ok = Schwab.Feed.subscribe(feed, ["AAPL"])
 
-      assert_receive {:dp_exchange, :schwab, %DpExchange.Core.Types.Quote{symbol: "AAPL"}}, 5_000
+      assert_receive {:dp_exchange, :schwab, %Quote{symbol: "AAPL", price: price} = delivered},
+                     5_000
+
+      assert Decimal.equal?(price, Decimal.from_float(227.5))
+      assert delivered.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
       assert Schwab.Feed.coverage(feed) == %{"AAPL" => :internal_poll}
+    end
+
+    test "a pid names the feed to the facade's reads, and the subscribed set is read back",
+         %{limiter: limiter} do
+      # `coverage/1` of a feed that has delivered nothing is `%{}` whatever is asked, so it
+      # cannot show the pid was consulted; `wanted/1` can, because it names what was asked for.
+      {:ok, feed} =
+        Schwab.Feed.start_link(
+          name: :"wanted_feed_#{System.unique_integer([:positive])}",
+          symbols: [],
+          credentials: @creds,
+          subscriber: self(),
+          start_delay_ms: 60_000,
+          interval_ms: 50,
+          limiter: limiter,
+          plug: responding(%{}),
+          retry_attempts: 0
+        )
+
+      assert Schwab.wanted(feed: feed) == []
+      :ok = Schwab.Feed.subscribe(feed, ["AAPL"])
+      assert Schwab.wanted(feed: feed) == ["AAPL"]
+      assert Schwab.coverage(feed: feed) == %{}
     end
 
     test "a refusal reaches the subscriber rather than being retried forever", %{
@@ -598,8 +640,10 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
         "AAPL" => %{"quote" => %{"lastPrice" => 1.0, "quoteTime" => 1_787_936_147_000}}
       }
 
-      assert {:ok, _quote} =
+      assert {:ok, %Quote{symbol: "AAPL", price: price}} =
                Schwab.get_price("AAPL", [credentials: @creds] ++ opts(responding(quote_body)))
+
+      assert Decimal.equal?(price, Decimal.new("1.0"))
 
       assert {:ok, []} =
                Schwab.get_historical_prices(
@@ -621,7 +665,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
                    opts(responding(%{"instruments" => [%{"symbol" => "AAPL"}]}))
                )
 
-      assert {:ok, [_account]} =
+      assert {:ok, [%{account_number: "1", hash: "H"}]} =
                Schwab.get_accounts(
                  @creds,
                  opts(responding([%{"accountNumber" => "1", "hashValue" => "H"}]))
@@ -642,7 +686,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       base = [credentials: @creds, account_hash: "H"]
       window = [from: ~U[2026-08-01 00:00:00Z], to: ~U[2026-09-01 00:00:00Z]]
 
-      assert {:ok, [_balance]} = Schwab.get_balances(@creds, base ++ opts(responding(balances)))
+      assert {:ok, [balance]} = Schwab.get_balances(@creds, base ++ opts(responding(balances)))
+      assert Decimal.equal?(balance.balance, Decimal.new("1.0"))
       assert {:ok, []} = Schwab.get_orders(@creds, base ++ window ++ opts(responding([])))
       # This asserted `{:ok, %{}}` — an EMPTY OBJECT accepted as an order — which pinned the
       # facade returning the venue's raw map instead of the `Types.Order.t()` its `Core.Venue`
@@ -702,7 +747,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
       request = @buy_request
       base = [account_hash: "H"]
 
-      assert {:ok, %{"orderValidationResult" => _r}} =
+      assert {:ok, %{"orderValidationResult" => %{}} = previewed} =
                Schwab.preview_order(
                  @creds,
                  request,
@@ -718,6 +763,8 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
           |> Plug.Conn.resp(201, "")
         end
       end
+
+      assert map_size(previewed) == 1
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "9"}} =
                Schwab.replace_order(@creds, "1", request, base ++ [plug: plug])
@@ -738,7 +785,7 @@ defmodule DpExchange.Schwab.DefensiveBranchesTest do
 
       request = @buy_request
 
-      assert {:ok, _preview} =
+      assert {:ok, %{"orderValidationResult" => %{}}} =
                Schwab.preview_order(@creds, request, [account_hash: "H"] ++ opts(capture))
 
       assert_received {:preview_body, body}

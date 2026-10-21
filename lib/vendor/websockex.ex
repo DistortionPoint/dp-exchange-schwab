@@ -156,8 +156,9 @@ defmodule DpExchange.Schwab.Vendor.WebSockex do
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: the six changes listed above (three clauses, the `spawn_process/5`/`do_spawn/2`
-  glue, the handshake deadline and rescue, and the message bound). A handful of doc comments were additionally edited, never behaviour: the two
+  true size: the six changes listed above (the `FrameError` clause, the
+  `spawn_process/5`/`do_spawn/2` glue, the handshake deadline, the message bound, the
+  handshake rescue and the unsendable-close-frame clause). A handful of doc comments were additionally edited, never behaviour: the two
   self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Schwab.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
