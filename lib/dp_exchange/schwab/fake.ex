@@ -172,8 +172,10 @@ defmodule DpExchange.Schwab.Fake do
   See `c:DpExchange.Core.Venue.child_spec/1`.
   """
   @impl true
+  # `Config.opt/3`: a forwarded `name: nil` is silence, so it is the default id, as the real
+  # `DpExchange.Schwab.child_spec/1` has it. `Keyword.get/3` made the id `nil`.
   def child_spec(opts),
-    do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
+    do: %{id: Config.opt(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
 
   @doc """
   Starts no process and answers `:ignore`, so supervising the fake leaves nothing running.
@@ -647,7 +649,7 @@ defmodule DpExchange.Schwab.Fake do
   defp preview_rejects(%{"orderLegCollection" => [%{"quantity" => quantity} = leg | _rest]}) do
     option? = get_in(leg, ["instrument", "assetType"]) == "OPTION"
 
-    if option? and quantity != trunc(quantity) do
+    if option? and not whole_quantity?(quantity) do
       [
         %{
           "validationRuleName" => "FAKE_OPTION_QUANTITY_NOT_WHOLE",
@@ -659,6 +661,12 @@ defmodule DpExchange.Schwab.Fake do
     else
       []
     end
+  end
+
+  # Whole by its own JSON text: a quantity `Orders.build/2` wrote out in plain digits (a
+  # `Jason.Fragment`, for a size below 0.01 or above 1.0e14) is not a number `trunc/1` takes.
+  defp whole_quantity?(quantity) do
+    quantity |> Jason.encode!() |> Decimal.new() |> Decimal.integer?()
   end
 
   @doc """

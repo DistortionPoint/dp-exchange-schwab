@@ -634,7 +634,8 @@ defmodule DpExchange.Schwab.Feed do
     opts = DpExchange.Schwab.Credentials.wrap_opt(opts)
 
     %{
-      id: Keyword.get(opts, :name, __MODULE__),
+      # A forwarded `name: nil` is silence: the default id, not `nil`.
+      id: Config.opt(opts, :name, __MODULE__),
       start: {__MODULE__, :start_link, [opts]},
       type: :worker
     }
@@ -660,6 +661,20 @@ defmodule DpExchange.Schwab.Feed do
 
     boot_symbols = opts |> Config.opt(:symbols, []) |> canonical_symbols()
     validate_symbols!(boot_symbols)
+    validate_boot_subscriber!(Config.opt(opts, :subscriber, nil))
+
+    for key <- [
+          :route_bootstrap_timeout_ms,
+          :bootstrap_reply_ms,
+          :socket_connect_timeout,
+          :socket_recv_timeout
+        ] do
+      validate_positive_ms!(key, Config.opt(opts, key, nil))
+    end
+
+    # Zero is legal for both: no start delay, and one attempt with no retry.
+    validate_non_negative!(:start_delay_ms, Config.opt(opts, :start_delay_ms, nil))
+    validate_non_negative!(:retry_attempts, Config.opt(opts, :retry_attempts, nil))
 
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
@@ -2387,6 +2402,43 @@ defmodule DpExchange.Schwab.Feed do
 
   defp validate_symbols!(other) do
     raise ArgumentError, "symbols must be a list of ticker strings, got: #{inspect(other)}"
+  end
+
+  # The boot-time `:subscriber` gets the judgement `subscribe/3`'s `:to` gets. A string or a
+  # tuple was stored and raised inside `Core.Fanout.resolve/1` on the first delivery, in this
+  # shared process. `nil` is silence (no boot subscriber).
+  defp validate_boot_subscriber!(nil), do: :ok
+
+  defp validate_boot_subscriber!(subscriber) do
+    case valid_subscriber(subscriber) do
+      {:ok, _subscriber} ->
+        :ok
+
+      {:error, _refused} ->
+        raise ArgumentError,
+              "subscriber must be a pid or a registered name, got: " <>
+                inspect(subscriber, limit: 10, printable_limit: 64)
+    end
+  end
+
+  # Timers and connect budgets: read long after start, where a bad one fails inside
+  # `Process.send_after/3` or the dial, in this process. `nil` is silence (the default).
+  defp validate_positive_ms!(_key, nil), do: :ok
+  defp validate_positive_ms!(_key, value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_positive_ms!(key, value) do
+    raise ArgumentError,
+          "#{key} must be a positive integer (milliseconds), got: " <>
+            inspect(value, limit: 10, printable_limit: 64)
+  end
+
+  defp validate_non_negative!(_key, nil), do: :ok
+  defp validate_non_negative!(_key, value) when is_integer(value) and value >= 0, do: :ok
+
+  defp validate_non_negative!(key, value) do
+    raise ArgumentError,
+          "#{key} must be a non-negative integer, got: " <>
+            inspect(value, limit: 10, printable_limit: 64)
   end
 
   defp validate_interval_ms!(value) when is_integer(value) and value > 0, do: :ok

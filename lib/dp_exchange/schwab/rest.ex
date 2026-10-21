@@ -3431,14 +3431,17 @@ defmodule DpExchange.Schwab.Rest do
   # and the first compare or add against it allocates a billion-digit integer). The limit is
   # chosen, not measured: no price, size or balance has an exponent anywhere near it.
   defp decimal(%Decimal{} = value), do: finite_decimal(value)
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
+  # An integer is judged like any other number: JSON integers have no length limit, and
+  # `Decimal.new/1` of one carries exponent 0, so only the digit bound (`finite_decimal/1`) stops
+  # a million-digit "price".
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> finite_decimal()
 
   # **A deliberate defensive clause, not one a test can reach.** Every body arrives as bytes
   # (`decode_body: false`) and is decoded with `floats: :decimals`, so a JSON number is never a
   # float here. It is kept for a body a consumer's own `:req_adapter` hands over already
   # decoded (see `decoded_body/1`), whose floats would otherwise raise `FunctionClauseError`
   # in the caller's process; `Decimal.from_float/1` keeps the float's own digits.
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> finite_decimal()
 
   # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
   # the whole string be consumed (`{d, ""}`), is what `streamer_decode.ex` and
@@ -3469,10 +3472,15 @@ defmodule DpExchange.Schwab.Rest do
 
   @max_decimal_exponent 1000
 
+  # At most 34 significant digits (decimal128), the family's bound on a venue number. Chosen,
+  # not measured: no price, size or balance has more.
+  @max_decimal_coefficient Integer.pow(10, 34)
+
   defp finite_decimal(%Decimal{exp: exp} = value) do
     cond do
       Decimal.nan?(value) or Decimal.inf?(value) -> nil
       abs(exp) > @max_decimal_exponent -> nil
+      value.coef >= @max_decimal_coefficient -> nil
       true -> value
     end
   end

@@ -31,6 +31,38 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING for callers sending off-tick or degenerate values)
+
+- **An EQUITY `price` or `stop_price` off the price increment is refused, never rounded**:
+  `{:error, {:price_not_on_tick, key, value, increment}}`, `"0.01"` at or above 1 and `"0.0001"`
+  below. This is the SEC sub-penny rule (Reg NMS Rule 612), not a Schwab publication (the two
+  OpenAPI documents state no tick or lot rule) and not probed. Options are not judged. The Fake
+  refuses the same, through `Orders.build/2`.
+- **A `stop_price_offset` of zero or below is refused** (`{:invalid_order_field,
+  :stop_price_offset, value}`), and so is an integer `quantity` above 2^53 (a double cannot
+  hold it).
+
+### Fixed
+
+- **An order quantity below 0.01 or above 1.0e14 is sent in plain digits**, not `1.0e-5`
+  (a `Jason.Fragment`); `Orders.accepted/2` and the Fake's preview read it back.
+- **Venue numbers are bounded to 34 digits for integers and floats too** (REST and Streamer
+  decoders, and the order readers): a million-digit integer was "finite".
+- **`Feed.init/1` refuses at start** an unusable `:subscriber`, and a `:route_bootstrap_timeout_ms`,
+  `:bootstrap_reply_ms`, `:socket_connect_timeout` or `:socket_recv_timeout` that is not a positive
+  integer; they used to fail on first delivery, timer or dial. `Feed.child_spec/1` and
+  `Fake.child_spec/1` give `name: nil` the default id.
+- **The Streamer's pending-request map (cap 256) forgets the oldest command at the cap** and
+  sends a `:degraded` notice (`details.reason: :unanswered_commands`), instead of silently not
+  remembering the newest.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.119` (tick AQ: value types refuse non-positive
+  prices and negative sizes, conformance groups 52 and 53, group 26 requires coverage to
+  empty after the last unsubscribe).
+
+
 ## [0.2.147] - 2026-10-20
 
 ### Dependencies

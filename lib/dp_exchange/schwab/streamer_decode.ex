@@ -493,8 +493,8 @@ defmodule DpExchange.Schwab.StreamerDecode do
   # send is neither.
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: finite_decimal(value)
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> finite_decimal()
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> finite_decimal()
 
   # `Decimal.parse/1` requiring the whole string be consumed is NOT a sufficient guard on
   # its own, which is the half this copy was missing. "NaN", "Inf" and "-Inf" all parse
@@ -522,7 +522,17 @@ defmodule DpExchange.Schwab.StreamerDecode do
 
   # NaN, Infinity and an exponent beyond +-1000 (`1E999999999` is finite to `Decimal`, and
   # the first compare or add against it allocates a huge integer) are not a number here.
+  #
+  # And a coefficient of 34 or more digits (decimal128's limit; chosen, not measured): an
+  # integer carries exponent 0, so only this stops a million-digit "price".
+  @max_coefficient Integer.pow(10, 34)
+
   defp finite_decimal(%Decimal{exp: exp} = value) do
-    if Decimal.nan?(value) or Decimal.inf?(value) or abs(exp) > 1000, do: nil, else: value
+    cond do
+      Decimal.nan?(value) or Decimal.inf?(value) -> nil
+      abs(exp) > 1000 -> nil
+      value.coef >= @max_coefficient -> nil
+      true -> value
+    end
   end
 end

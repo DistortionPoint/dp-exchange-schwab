@@ -241,8 +241,9 @@ defmodule DpExchange.Schwab.Socket do
   @max_delayed_reported 5_000
 
   # The most commands remembered as sent-and-unanswered. A venue that never answers must not
-  # grow this process: past the cap a command is simply not remembered, and its refusal (if
-  # one comes) is reported without the symbols it was for.
+  # grow this process: past the cap the OLDEST command is forgotten (and a `:degraded` notice,
+  # `details.reason: :unanswered_commands`, says so), and a refusal of it is reported without
+  # the symbols it was for.
   @max_pending 256
 
   # A connection that ends sooner than this after it came up counts toward the reconnect
@@ -964,9 +965,38 @@ defmodule DpExchange.Schwab.Socket do
   defp remember_pending(state, request_id, command) do
     pending = Map.get(state, :pending, %{})
 
-    if map_size(pending) < @max_pending,
-      do: Map.put(state, :pending, Map.put(pending, to_string(request_id), command)),
-      else: state
+    if map_size(pending) < @max_pending do
+      Map.put(state, :pending, Map.put(pending, to_string(request_id), command))
+    else
+      # **At the bound the OLDEST is forgotten, and the consumer is told.** The newest command
+      # is the one a coming refusal is most likely to be about; refusing to remember it left a
+      # refusal unable to name its symbols for the rest of the session, silently. A venue that
+      # leaves 256 commands unanswered is not answering, which is worth a notice.
+      oldest = Enum.min_by(Map.keys(pending), &request_order/1)
+      pending = pending |> Map.delete(oldest) |> Map.put(to_string(request_id), command)
+
+      notify(
+        state,
+        Notice.new(:degraded, :schwab,
+          details: %{
+            reason: :unanswered_commands,
+            message:
+              "#{@max_pending} Streamer commands are unanswered; the oldest is forgotten, so a " <>
+                "refusal of it can no longer name its symbols"
+          }
+        )
+      )
+
+      Map.put(state, :pending, pending)
+    end
+  end
+
+  # Request ids are the integers this socket issued, kept as the strings the venue echoes.
+  defp request_order(id) do
+    case Integer.parse(id) do
+      {n, ""} -> n
+      _other -> 0
+    end
   end
 
   # `details.reason` is an atom; the builder's own term, bounded, is `details.message`.

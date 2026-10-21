@@ -125,7 +125,9 @@ defmodule DpExchange.Schwab.Orders do
   - an order type or time-in-force outside what this venue serves
   - a quantity that is missing (`{:missing_field, :quantity}`), or is not a positive, finite
     Decimal, integer or numeric string (`{:invalid_quantity, value}`). **Floats are refused**:
-    a float has already lost digits
+    a float has already lost digits. An integer above 2^53 is refused too: the venue's
+    `quantity` is a double, which cannot hold it exactly. A quantity below 0.01 or above
+    1.0e14 is written out in plain digits (`Jason.Fragment`), never `1.0e-5`
   - a field the order type never reads, `{:unexpected_field, key}` (a `:price` on a market,
     stop or trailing-stop order, a `:stop_price` on a market, limit or trailing order, an
     offset, link basis or link type on a non-trailing order). A market order carrying a
@@ -135,6 +137,16 @@ defmodule DpExchange.Schwab.Orders do
     spent a throttled write
   - a price or stop price that is not a positive, finite Decimal, integer or numeric
     string (floats refused): `{:invalid_price, value}` / `{:invalid_stop_price, value}`
+  - an EQUITY `price` or `stop_price` off the price increment: `{:price_not_on_tick, key,
+    value, increment}`, with `increment` the text `"0.01"` (price at or above 1) or `"0.0001"`
+    (below 1). **Refused, never rounded**: rounding a limit price moves the caller's money.
+    This is the SEC's sub-penny rule (Rule 612 of Regulation NMS, 17 CFR 242.612), not
+    something read from Schwab's two OpenAPI documents (they publish no tick or lot rule,
+    `capabilities.ex`'s note on `quantization/1`) and not probed: no credential is held. It
+    applies to equities only; an option's increment is not stated anywhere this package
+    reads, so an option price is not judged
+  - a `stop_price_offset` that is not a positive, finite number:
+    `{:invalid_order_field, :stop_price_offset, value}`
   - the instruction does not match the asset type, per the venue's published matrix
     (`{:instruction_not_valid_for_asset, instruction, asset}`), or is not a string
     (`{:invalid_instruction, value}`, naming the value given)
@@ -172,6 +184,7 @@ defmodule DpExchange.Schwab.Orders do
          :ok <- check_prices(order_type, request),
          {:ok, session} <- fetch_session(request, opts),
          {:ok, asset} <- fetch_asset_type(request, native),
+         :ok <- check_ticks(asset, request),
          :ok <- check_links(request) do
       {:ok,
        %{
@@ -374,28 +387,30 @@ defmodule DpExchange.Schwab.Orders do
   # `number`, so anything that is not an integer, a finite `Decimal` or a string that reads
   # as a finite number is refused by name. **A float is refused too**: it has already lost
   # digits, and `to_string/1` of one is scientific below 1.0e-4.
+  #
+  # **An offset is a distance, so it is positive.** Zero or a negative offset was accepted and
+  # sent: a trailing stop that trails by nothing (or by a negative amount) is not the order the
+  # caller means, and the venue would reject it after spending a throttled write.
   defp check_offset(request) do
     value = Map.get(request, :stop_price_offset)
 
-    if finite_number?(value) and not is_float(value),
+    if is_nil(value) or positive_value?(value),
       do: :ok,
       else: {:error, {:invalid_order_field, :stop_price_offset, value}}
   end
 
-  defp finite_number?(nil), do: true
-  defp finite_number?(value) when is_number(value), do: true
+  # **At most 34 significant digits and an exponent within +-1000.** The same bound the rest
+  # of the family puts on a venue number (Decimal's own default context is 28 digits; 34 is
+  # decimal128). Chosen, not measured: no price, size or balance has more. Without it `1`
+  # followed by a million digits is "finite" and the first compare allocates it.
+  @max_coefficient Integer.pow(10, 34)
+
+  defp finite_number?(value) when is_integer(value), do: abs(value) < @max_coefficient
 
   defp finite_number?(%Decimal{exp: exp} = value),
-    do: not (Decimal.nan?(value) or Decimal.inf?(value)) and abs(exp) <= 1000
-
-  defp finite_number?(value) when is_binary(value) do
-    case Decimal.parse(String.trim(value)) do
-      {parsed, ""} -> finite_number?(parsed)
-      _unreadable -> false
-    end
-  end
-
-  defp finite_number?(_other), do: false
+    do:
+      not (Decimal.nan?(value) or Decimal.inf?(value)) and abs(exp) <= 1000 and
+        value.coef < @max_coefficient
 
   # `stopPriceLinkBasis` and `stopPriceLinkType` are enums (`accounts-and-trading-production
   # .openapi.json`). Sent as given, so a lower-case or atom value reached the venue as
@@ -466,11 +481,29 @@ defmodule DpExchange.Schwab.Orders do
     float = Decimal.to_float(quantity)
 
     if float > 0 and Decimal.eq?(Decimal.from_float(float), quantity),
-      do: {:ok, float},
+      do: {:ok, plain_quantity(float, quantity)},
       else: {:error, {:invalid_quantity, original}}
   end
 
-  defp positive(quantity) when quantity > 0, do: {:ok, quantity}
+  # **A JSON number, never scientific notation.** `Jason` writes a float through the shortest
+  # round-trip form, which is `1.0e-5` below about a thousandth and `1.0e15` from a quadrillion;
+  # the venue documents a plain number. Inside `[0.01, 1.0e14)` the float is written plain, so
+  # it is sent as the float it always was. Outside it the quantity is written out digit for digit
+  # from the exact Decimal (`Decimal.to_string(_, :normal)`) and carried unquoted in a
+  # `Jason.Fragment`, the way `stopPriceOffset` is. The bounds are chosen well inside the
+  # float formatter's switch points, not measured at them.
+  defp plain_quantity(float, _quantity) when float >= 0.01 and float < 1.0e14, do: float
+
+  defp plain_quantity(_float, quantity),
+    do: Jason.Fragment.new(Decimal.to_string(quantity, :normal))
+
+  # An integer the venue's double cannot hold exactly (above 2^53) is a different size once sent,
+  # exactly as a Decimal with more digits than a double is refused above.
+  @max_exact_quantity 9_007_199_254_740_992
+
+  defp positive(quantity) when quantity > 0 and quantity <= @max_exact_quantity,
+    do: {:ok, quantity}
+
   defp positive(quantity), do: {:error, {:invalid_quantity, quantity}}
 
   # **The order type is required, never inferred.** A request with no type and no price used
@@ -603,7 +636,7 @@ defmodule DpExchange.Schwab.Orders do
       else: {:error, {tag, value}}
   end
 
-  defp positive_value?(value) when is_integer(value), do: value > 0
+  defp positive_value?(value) when is_integer(value), do: value > 0 and finite_number?(value)
 
   defp positive_value?(value) when is_binary(value) do
     case value |> String.trim() |> Decimal.parse() do
@@ -616,6 +649,43 @@ defmodule DpExchange.Schwab.Orders do
     do: finite_number?(value) and Decimal.gt?(value, 0)
 
   defp positive_value?(_other), do: false
+
+  # **An equity price must sit on the price increment, or the order is refused** (never rounded:
+  # a limit price moved to the nearest cent is a different order). See `build/2`'s
+  # "price_not_on_tick" for what the rule is and what it is not: the SEC's sub-penny rule, not a
+  # Schwab publication, and not probed. `price` and `stop_price` were already judged positive
+  # and finite by `check_prices/2`, so each is a number here. An option leg is not judged.
+  defp check_ticks("EQUITY", request) do
+    Enum.reduce_while([:price, :stop_price], :ok, fn key, :ok ->
+      case check_tick(key, Map.get(request, key)) do
+        :ok -> {:cont, :ok}
+        {:error, _off_tick} = refused -> {:halt, refused}
+      end
+    end)
+  end
+
+  defp check_ticks(_asset, _request), do: :ok
+
+  defp check_tick(_key, nil), do: :ok
+
+  defp check_tick(key, value) do
+    price = price_decimal(value)
+    {places, increment} = if Decimal.lt?(price, 1), do: {4, "0.0001"}, else: {2, "0.01"}
+
+    if Decimal.eq?(Decimal.round(price, places, :down), price),
+      do: :ok,
+      else: {:error, {:price_not_on_tick, key, value, increment}}
+  end
+
+  # Only ever called on a value `positive_value?/1` accepted: an integer, a Decimal, or text
+  # that reads as a number in full.
+  defp price_decimal(value) when is_integer(value), do: Decimal.new(value)
+  defp price_decimal(%Decimal{} = value), do: value
+
+  defp price_decimal(value) when is_binary(value) do
+    {parsed, ""} = value |> String.trim() |> Decimal.parse()
+    parsed
+  end
 
   defp required_fields(type) when type in @trailing_types, do: [:stop_price_offset]
   defp required_fields("LIMIT_ON_CLOSE"), do: [:price]
@@ -927,8 +997,14 @@ defmodule DpExchange.Schwab.Orders do
   defp status(live, _filled) when live in @still_live, do: :open
   defp status(_replaced_or_unknown, _filled), do: nil
 
-  defp number(value) when is_integer(value), do: Decimal.new(value)
-  defp number(value) when is_float(value), do: Decimal.from_float(value)
+  # An integer or a float is judged exactly as a Decimal is (34 digits, exponent within +-1000):
+  # an integer is a "finite number" with no limit on its length otherwise.
+  defp number(value) when is_integer(value), do: value |> Decimal.new() |> number()
+  defp number(value) when is_float(value), do: value |> Decimal.from_float() |> number()
+
+  # The quantity `build/2` wrote out in plain digits (see `plain_quantity/2`): read back through
+  # its own JSON text, so `accepted/2` reports the size that was sent.
+  defp number(%Jason.Fragment{} = fragment), do: fragment |> Jason.encode!() |> number()
 
   # The venue's JSON numbers arrive as `Decimal`s (`floats: :decimals`, see `Rest`): finite
   # ones only, as for a string.

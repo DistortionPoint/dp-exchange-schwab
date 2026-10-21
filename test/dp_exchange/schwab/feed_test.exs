@@ -233,22 +233,15 @@ defmodule DpExchange.Schwab.FeedTest do
       assert %{route: :internal_poll} = Feed.status(feed)
     end
 
-    test "a poll that cannot start leaves no route, and the reason is kept" do
-      # `PollingFeed` refuses a negative `:start_delay_ms` at its own start. The fallback then
-      # has nothing to poll with, and says so rather than claiming a route it does not have.
-      feed =
-        start_feed(
-          plug: responding(%{"error" => "unauthorized"}, 401),
-          retry_attempts: 0,
-          start_delay_ms: -1
-        )
+    test "a negative start delay or retry count is refused at start, not at the first poll" do
+      for key <- [:start_delay_ms, :retry_attempts], bad <- [-1, 1.5, "0"] do
+        assert_raise ArgumentError, ~r/#{key} must be a non-negative integer/, fn ->
+          Feed.init([{key, bad}])
+        end
+      end
 
-      assert Feed.subscribe(feed, ["AAPL"]) == {:error, :no_route}
-
-      state = :sys.get_state(feed)
-      assert state.route == nil
-      assert state.poller == nil
-      assert state.last_error == {:invalid_option, :start_delay_ms, -1}
+      assert {:ok, _state} = Feed.init(start_delay_ms: 0, retry_attempts: 0)
+      assert {:ok, _state} = Feed.init(start_delay_ms: nil, retry_attempts: nil)
     end
 
     test "a notice for a subscriber name nothing holds is skipped, and the others still get it" do

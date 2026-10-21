@@ -452,15 +452,15 @@ defmodule DpExchange.Schwab.OrdersTest do
       refute String.contains?(payload["price"], "E")
     end
 
-    test "a very small price keeps its digits rather than becoming an exponent" do
+    test "a small price on the sub-dollar tick keeps its digits rather than becoming an exponent" do
       request =
         @buy
         |> Map.put(:order_type, :limit)
-        |> Map.put(:price, Decimal.new("0.00000001"))
+        |> Map.put(:price, Decimal.new("0.0001"))
 
       assert {:ok, payload} = Orders.build(request)
 
-      assert payload["price"] == "0.00000001"
+      assert payload["price"] == "0.0001"
     end
 
     test "a Decimal stopPriceOffset is a bare number too, not a scientific string" do
