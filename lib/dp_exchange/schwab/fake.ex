@@ -190,6 +190,26 @@ defmodule DpExchange.Schwab.Fake do
     with :ok <- Options.check_start(opts), do: :ignore
   end
 
+  @doc """
+  The keys `start_link/1` accepts: the real facade's, `DpExchange.Schwab.Options.start_keys/0`.
+
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: Options.start_keys()
+
+  @doc """
+  The option keys this fake's `name` accepts: everything the real facade declares for it plus
+  the keys only the fake reads (`DpExchange.Schwab.Options.fake_only/1`).
+
+  See `DpExchange.Schwab.call_options/1` and `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: Options.declared_fake(name)
+
   # --- market data --------------------------------------------------------
 
   @doc """

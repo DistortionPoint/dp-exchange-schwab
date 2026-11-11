@@ -188,6 +188,35 @@ defmodule DpExchange.Schwab do
   @impl true
   def start_link(opts), do: Supervisor.start_link(opts)
 
+  @doc """
+  The keys `start_link/1` and `child_spec/1` accept: `DpExchange.Schwab.Options.start_keys/0`,
+  the table the start-time check refuses against, so the two cannot drift.
+
+  A consumer passes `Keyword.take(opts, start_options())` to `start_link/1`. See
+  `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: Options.start_keys()
+
+  @doc """
+  The option keys the public function `name` accepts, so a consumer can pass
+  `Keyword.take(opts, keys)` and never meet `{:error, {:unknown_option, key}}`.
+
+    * a `Core.Venue` callback this venue does not serve: `{:error, :not_supported}`
+    * a public function of this module: `{:ok, keys}` - exactly what `DpExchange.Schwab.Options`
+      accepts for it (transport keys it reads, its own keys, `:name`, `:credentials`);
+      `child_spec` and `start_link` answer `start_options/0`; a function with no options
+      answers `{:ok, []}`
+    * anything else, a non-atom included: `{:error, {:unknown_function, name}}`
+
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: Options.declared(name)
+
   # --- market data --------------------------------------------------------
 
   @doc """

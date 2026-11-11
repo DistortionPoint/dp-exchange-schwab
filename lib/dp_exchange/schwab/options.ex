@@ -83,7 +83,9 @@ defmodule DpExchange.Schwab.Options do
   `DpExchange.Schwab.Fake` adds the keys only it reads, listed in `fake_only/1`.
   """
 
+  alias DpExchange.Core.Capabilities, as: CoreCapabilities
   alias DpExchange.Core.Options, as: CoreOptions
+  alias DpExchange.Core.Venue
   alias DpExchange.Schwab.Rest
 
   @market [:market_data_url, :extra_headers]
@@ -284,6 +286,79 @@ defmodule DpExchange.Schwab.Options do
 
   @typedoc "What a refused option check answers."
   @type check_error :: {:unknown_option, atom()} | {:invalid_options, term()}
+
+  @typedoc "What `DpExchange.Core.Venue.call_options/1` answers."
+  @type declared_answer ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, term()}}
+
+  # Public functions that take no keyword `opts` at all, on the facade and on the Fake
+  # (`listed/0` and `as_of/0` are the Fake's own). Named, not inferred: a public function in
+  # neither this list nor the `@own` table is answered `{:unknown_function, name}`, so a new
+  # function with options that nobody declared fails a test instead of reading as "no options".
+  @no_options [
+    :provider_name,
+    :runtime_id,
+    :asset_classes,
+    :capabilities,
+    :start_options,
+    :call_options,
+    :venue_does_not_serve,
+    :quotes,
+    :needs_refresh?,
+    :credential_failure?,
+    :movers_universes,
+    :markets,
+    :transaction_types,
+    :equity_instructions,
+    :option_instructions,
+    :listed,
+    :as_of
+  ]
+
+  @doc """
+  The option keys the real facade's `function` accepts, as
+  `c:DpExchange.Core.Venue.call_options/1` answers them.
+
+  Order: an inactive `Core.Venue` callback is `{:error, :not_supported}` (it answers that
+  whatever the options); a public facade function is `{:ok, keys}`, the exact keys `check/2`
+  accepts (`allowed/1`), `start_keys/0` for `child_spec` and `start_link`, `[]` for a function
+  that takes no options; anything else, a non-atom included, is
+  `{:error, {:unknown_function, function}}`. Never `{:ok, []}` for a name nobody serves.
+  """
+  @spec declared(term()) :: declared_answer()
+  def declared(function), do: answer(DpExchange.Schwab, function, &allowed/1)
+
+  @doc """
+  As `declared/1`, for `DpExchange.Schwab.Fake`: the keys its own checks accept
+  (`allowed/1` plus `fake_only/1`), a superset of the facade's for every function.
+  """
+  @spec declared_fake(term()) :: declared_answer()
+  def declared_fake(function) do
+    answer(DpExchange.Schwab.Fake, function, &(allowed(&1) ++ fake_only(&1)))
+  end
+
+  defp answer(module, function, keys) when is_atom(function) do
+    cond do
+      not public?(module, function) -> {:error, {:unknown_function, function}}
+      inactive?(module, function) -> {:error, :not_supported}
+      function in [:child_spec, :start_link] -> {:ok, start_keys()}
+      Map.has_key?(@own, function) -> {:ok, Enum.uniq(keys.(function))}
+      function in @no_options -> {:ok, []}
+      true -> {:error, {:unknown_function, function}}
+    end
+  end
+
+  defp answer(_module, function, _keys), do: {:error, {:unknown_function, function}}
+
+  defp public?(module, function), do: Keyword.has_key?(module.__info__(:functions), function)
+
+  defp inactive?(module, function) do
+    declaration = module.capabilities()
+
+    Enum.any?(Venue.behaviour_info(:callbacks), fn {name, arity} ->
+      name == function and not CoreCapabilities.active?(declaration, {name, arity})
+    end)
+  end
 
   @doc """
   As `check/2` for the reads that return a plain value and so have no error channel: a

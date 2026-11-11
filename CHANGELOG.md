@@ -31,6 +31,22 @@ an acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `dp_exchange_core` 0.3.123 or later, the release that adds the required
+  `start_options/0` and `call_options/1` callbacks and conformance group 55.
+
+### Added
+
+- **`start_options/0` and `call_options/1`**, the two `DpExchange.Core.Venue` callbacks of
+  DistortionPoint/dp-exchange-core#43, on `DpExchange.Schwab` and `DpExchange.Schwab.Fake`.
+  `start_options/0` is `Options.start_keys/0`, the list the start check refuses against.
+  `call_options(name)` answers `{:ok, keys}` for a public function (the keys
+  `Options.allowed/1` accepts; `start_options/0` for `child_spec` and `start_link`; `[]` for a
+  function that takes no options), `{:error, :not_supported}` for a callback the venue does not
+  serve, and `{:error, {:unknown_function, name}}` for anything else. The Fake adds the keys only
+  it reads. A consumer passes `Keyword.take(opts, keys)`.
+
 ## [0.2.149] - 2026-10-21
 
 ### Changed (BREAKING for a caller passing a key the tree never read)

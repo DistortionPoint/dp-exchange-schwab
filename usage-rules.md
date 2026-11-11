@@ -1538,3 +1538,26 @@ verified defaults, never `:verify_none` (section 13).
 
 Values are judged separately, at init, and a bad one raises `ArgumentError` naming the option
 (`Feed.start_link/1`). A test pins that the table covers every key `Feed` and `Supervisor` read.
+
+### Ask the package which keys a call takes: `start_options/0` and `call_options/1`
+
+A consumer that holds one options list for several calls should not hand-copy these tables.
+`DpExchange.Schwab.start_options/0` is `Options.start_keys/0` (the very list the start check
+refuses against), and `DpExchange.Schwab.call_options/1` answers, for a function name:
+
+- `{:ok, keys}` - exactly the keys that call accepts without `{:unknown_option, key}`: the transport
+  keys it reads, its own keys, `:name` and `:credentials`. `child_spec` and `start_link` answer
+  `start_options/0`; a function that takes no options (`provider_name`, `capabilities`, ...)
+  answers `{:ok, []}`.
+- `{:error, :not_supported}` - a `Core.Venue` callback this venue does not serve.
+- `{:error, {:unknown_function, name}}` - any other name, a non-atom included. Never `{:ok, []}`.
+
+```elixir
+{:ok, keys} = DpExchange.Schwab.call_options(:get_price)
+DpExchange.Schwab.get_price("AAPL", Keyword.take(opts, keys))
+
+DpExchange.Schwab.start_link(Keyword.take(opts, DpExchange.Schwab.start_options()))
+```
+
+`DpExchange.Schwab.Fake` answers both for itself: the same keys plus the ones only it reads, so
+anything the facade declares for an endpoint the Fake accepts too.
